@@ -3,7 +3,10 @@
 /** @var string $content */
 $user = $current_user ?? null;
 $authorizer = $authorizer ?? null;
-$title = isset($page_title) && $page_title !== null ? $view->t($page_title) . ' · ' : '';
+$documentTitle = isset($page_title) && $page_title !== null
+    ? $view->t($page_title) . ' · '
+    : (isset($title) && is_string($title) && $title !== '' ? $view->e($title) . ' · ' : '');
+$can = static fn (\DigitalLibrary\Security\Permission $p): bool => $user !== null && $authorizer !== null && $authorizer->can($user, $p);
 ?>
 <!doctype html>
 <html lang="<?= $view->e($view->locale()) ?>">
@@ -11,7 +14,7 @@ $title = isset($page_title) && $page_title !== null ? $view->t($page_title) . ' 
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="robots" content="noindex, nofollow">
-    <title><?= $title ?><?= $view->t('app.name') ?></title>
+    <title><?= $documentTitle ?><?= $view->t('app.name') ?></title>
     <link rel="stylesheet" href="/assets/css/app.css">
     <link rel="icon" href="/assets/img/favicon.svg" type="image/svg+xml">
     <script src="/assets/js/app.js" defer></script>
@@ -32,7 +35,19 @@ $title = isset($page_title) && $page_title !== null ? $view->t($page_title) . ' 
             <nav id="primary-nav" class="primary-nav" aria-label="<?= $view->t('nav.primary') ?>">
                 <ul>
                     <li><a href="/"><?= $view->t('nav.dashboard') ?></a></li>
-                    <?php if ($authorizer?->can($user, \DigitalLibrary\Security\Permission::UserManage)): ?>
+                    <li><a href="/books"><?= $view->t('nav.catalogue') ?></a></li>
+                    <?php if ($can(\DigitalLibrary\Security\Permission::CatalogueCreate)): ?>
+                        <li><a href="/books/new"><?= $view->t('nav.add_book') ?></a></li>
+                    <?php endif; ?>
+                    <li><a href="/authors"><?= $view->t('nav.authors') ?></a></li>
+                    <li><a href="/publishers"><?= $view->t('nav.publishers') ?></a></li>
+                    <?php if ($can(\DigitalLibrary\Security\Permission::CategoryManage)): ?>
+                        <li><a href="/admin/categories"><?= $view->t('nav.categories') ?></a></li>
+                    <?php endif; ?>
+                    <?php if ($can(\DigitalLibrary\Security\Permission::LocationManage)): ?>
+                        <li><a href="/admin/locations"><?= $view->t('nav.locations') ?></a></li>
+                    <?php endif; ?>
+                    <?php if ($can(\DigitalLibrary\Security\Permission::UserManage)): ?>
                         <li><a href="/admin/users"><?= $view->t('nav.users') ?></a></li>
                     <?php endif; ?>
                     <li><a href="/account/password"><?= $view->t('nav.account') ?></a></li>

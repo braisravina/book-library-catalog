@@ -69,9 +69,32 @@ final class View
         return $this->e($this->translator->get($key, $params));
     }
 
+    /**
+     * Translated but NOT escaped: only for passing to helpers or partials that
+     * escape their input (e.g. option labels in partials/select).
+     *
+     * @param array<string, string|int> $params
+     */
+    public function trans(string $key, array $params = []): string
+    {
+        return $this->translator->get($key, $params);
+    }
+
     public function locale(): string
     {
         return $this->translator->locale();
+    }
+
+    /**
+     * Builds a local URL with an escaped query string; empty values are dropped.
+     *
+     * @param array<string, scalar|null> $query
+     */
+    public function url(string $path, array $query = []): string
+    {
+        $query = array_filter($query, static fn ($v): bool => $v !== null && $v !== '');
+
+        return $path . ($query === [] ? '' : '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986));
     }
 
     public function csrfField(): string

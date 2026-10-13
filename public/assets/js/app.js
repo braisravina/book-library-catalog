@@ -25,5 +25,49 @@
                 }
             });
         });
+
+        // Destructive forms ask for confirmation. The server still enforces
+        // permissions and integrity; this only prevents accidental clicks.
+        document.querySelectorAll('form[data-confirm]').forEach(function (form) {
+            form.addEventListener('submit', function (event) {
+                if (!window.confirm(form.getAttribute('data-confirm'))) {
+                    event.preventDefault();
+                }
+            });
+        });
+
+        // Repeating author/contributor rows: clone the last row on demand.
+        document.querySelectorAll('[data-repeat]').forEach(function (group) {
+            var button = group.querySelector('[data-repeat-add]');
+            if (!button) {
+                return;
+            }
+            button.hidden = false;
+            button.addEventListener('click', function () {
+                var rows = group.querySelectorAll('[data-repeat-row]');
+                if (rows.length >= 20) {
+                    return;
+                }
+                var last = rows[rows.length - 1];
+                var clone = last.cloneNode(true);
+                var index = rows.length;
+                clone.querySelectorAll('input, select, label').forEach(function (el) {
+                    ['id', 'for'].forEach(function (attr) {
+                        var value = el.getAttribute(attr);
+                        if (value) {
+                            el.setAttribute(attr, value.replace(/-\d+$/, '-' + index));
+                        }
+                    });
+                    if (el.tagName === 'INPUT') {
+                        el.value = '';
+                    }
+                });
+                last.parentNode.insertBefore(clone, last.nextSibling);
+                var input = clone.querySelector('input');
+                if (input) {
+                    input.focus();
+                }
+            });
+        });
     });
 })();
