@@ -1,0 +1,255 @@
+# Architecture
+
+## Goals and principles
+
+- **Long-term maintainability over cleverness.** No framework, and no
+  runtime Composer dependencies (Composer provides only the autoloader and
+  PHPUnit). Every dependency between components is wired explicitly in
+  `src/Core/Services.php`.
+- **Private by default.** Everything except the landing page, sign-in,
+  language switch and health check requires authentication.
+- **Security in the foundation.** The foundation itself provides CSRF
+  protection, escaping, authorization, rate limiting and least-privilege
+  database access, so later features don't have to opt in to them.
+- **Bibliographic records are separate from physical copies.** The catalogue
+  is shared; ownership and location belong to copies.
+
+## Runtime topology
+
+```
+Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ nginx:1.27-alpine ──FastCGI──▶ php:8.4-fpm-alpine ──▶ mysql:8.4
+                                                         serves /assets only          runs public/index.php    no published port
+```
+
+- **nginx** serves `public/assets` directly. Every other path is routed
+  internally to `public/index.php`. Direct requests to any `.php` file,
+  dotfiles and anything outside `public/` return 404.
+- **php** runs PHP-FPM with `clear_env = no` (so configuration reaches PHP)
+  and `disable_functions` for process execution. In development the source
+  tree is bind-mounted; the `prod` image target bakes code in, read-only to
+  `www-data`, with only `storage/` writable.
+- **db** is MySQL 8.4 LTS. The init script creates two accounts (see
+  [Database access](#database-access)).
+
+## Source layout (`src/`, namespace `DigitalLibrary\`)
+
+| Namespace | Responsibility |
+|---|---|
+| `Core` | `Application` (kernel and middleware pipeline), `Services` (container), `Config`/`DotEnv`, `Bootstrap` |
+| `Http` | `Request`, `Response`, `Router`, `HttpException`, middleware, controllers |
+| `Security` | `Session`, `Csrf`, `PasswordHasher`, `PasswordPolicy`, `LoginThrottle`, `Role`, `Permission`, `Authorizer` |
+| `Auth` | `User`, `UserRepository`, `AuthService` |
+| `Database` | `ConnectionFactory`, `Migrator`, `SqlSplitter`, `Transaction` |
+| `I18n` | `Translator`, `LocaleNegotiator` |
+| `View` | `View` (plain-PHP templates with escaping helpers) |
+| `Validation` | `Validator` (declarative rules → translation keys) |
+| `Catalogue` | `Isbn` value object (more domain services in Phase 2) |
+| `Upload` | `CoverImageProcessor` (validated, re-encoded image storage) |
+| `Audit` | `AuditLogger` |
+| `Console` | `bin/console` commands |
+
+## Request lifecycle
+
+1. `public/index.php` builds `Services` from the environment and calls
+   `Application::handle(Request::fromGlobals())`.
+2. Global middleware, outermost first:
+   1. `SecurityHeaders` sets the CSP, frame, sniffing, referrer, permissions
+      and cache headers, and HSTS when enabled.
+   2. `StartSession` starts the hardened session, applies the timeouts and
+      shares the CSRF token with views.
+   3. `SetLocale` chooses the language: session/user choice, then
+      `Accept-Language`, then the default.
+   4. An error boundary renders translated error pages; details go to the
+      log only.
+   5. `VerifyCsrf` checks the token and `Origin`/`Sec-Fetch-Site` on every
+      non-safe method.
+3. `Router` matches method and path; per-route middleware runs next:
+   - `auth`: authenticated, active user whose `auth_version` matches the session.
+   - `guest`: redirects signed-in users away from the login page.
+   - `can:<permission>`: role permission check.
+4. The controller performs **object-level** checks via `Authorizer` where a
+   specific record is involved, and returns a `Response`.
+
+`/health` bypasses the session stack and returns only `{"status":"ok"}`, or
+503 when the database is unreachable.
+
+## Authorization model
+
+`Role` maps to a fixed set of `Permission`s (`src/Security/Role.php`):
+
+| Permission | Admin | Member | Viewer |
+|---|:-:|:-:|:-:|
+| `catalogue.view` | ✔ | ✔ | ✔ |
+| `catalogue.create` | ✔ | ✔ | |
+| `catalogue.edit_own` (records they created) | ✔ | ✔ | |
+| `catalogue.edit_any`, `catalogue.delete` | ✔ | | |
+| `copy.manage_own` (copies they own) | ✔ | ✔ | |
+| `copy.manage_any` | ✔ | | |
+| `location.manage`, `category.manage` | ✔ | | |
+| `user.manage`, `settings.manage`, `audit.view` | ✔ | | |
+
+Object-level decisions are `Authorizer::canEditRecord($user, $createdBy)` and
+`Authorizer::canManageCopy($user, $ownerId)`. Templates may use the same
+methods to hide controls, but only the server-side checks are authoritative.
+Inactive users have no permissions.
+
+## Data model
+
+All tables use InnoDB, `utf8mb4_0900_ai_ci`, UTC `DATETIME`s and named
+foreign keys. The schema is created by `database/migrations/*.sql`.
+
+```
+roles ─< users >─ invitations
+            │
+            ├─< copies >── editions >── works ─< work_authors >── authors
+            │      │          │  │        └─< work_categories >── categories (tree)
+            │      └── locations (tree)   │
+            │                 │  ├── publishers
+            ├─< collections ─< collection_items >── editions
+            └─< audit_log     │  ├─< edition_contributors >── authors
+                              │  ├─< covers
+                              │  └── metadata_records
+```
+
+- **works:** the abstract book (title, original title and language, first
+  publication year, description).
+- **editions:** a published manifestation: title as printed, publisher,
+  year, language, format, pages, legal deposit, and **optional** `isbn_13` /
+  `isbn_10`, each `UNIQUE` (NULLs don't collide) and `CHECK`-constrained.
+  Every valid ISBN is normalised to its ISBN-13 form
+  (`DigitalLibrary\Catalogue\Isbn`), so duplicates are detected whichever
+  form the user types.
+- **copies:** one row per physical book, with `owner_user_id`, an optional
+  `location_id`, condition, status, acquisition data and notes. Several users
+  can own copies of the same edition without duplicating catalogue records.
+- **locations** and **categories** are adjacency-list trees with
+  `UNIQUE(parent_id, name)`.
+- **covers** store image metadata. Files live on disk outside the web root.
+  A stored generated column enforces at most one primary cover per edition.
+- **metadata_records** cache raw provider payloads (Open Library, Google
+  Books) per ISBN, so entries can be reviewed and stay available offline.
+- **audit_log** is append-only by convention: who did what, to which entity,
+  from where, with redacted JSON details.
+- **login_attempts** stores a SHA-256 of the normalised e-mail and the client
+  IP, never the e-mail itself.
+- **settings** is a key/JSON store; `registration.mode` defaults to `"disabled"`.
+
+Delete behaviour: catalogue records `RESTRICT` deletion while copies or
+editions reference them. Users are deactivated rather than deleted, so copies
+`RESTRICT` user deletion. Join tables cascade.
+
+## Database access
+
+| Account | Privileges | Used by |
+|---|---|---|
+| `DB_USERNAME` (`library_app`) | `SELECT, INSERT, UPDATE, DELETE` | Web application |
+| `DB_MIGRATION_USERNAME` (`library_migrator`) | the above plus `CREATE, ALTER, DROP, INDEX, REFERENCES` | `bin/console migrate` only |
+| `root` | everything | MySQL container initialisation only |
+
+Connections use native prepared statements (`ATTR_EMULATE_PREPARES=false`),
+exceptions, `utf8mb4`, UTC and a strict `sql_mode`. Connection errors are
+reduced to a SQLSTATE before they can reach any output. Multi-step writes use
+`Database\Transaction::run()`.
+
+### Migrations
+
+- Files are named `YYYY_MM_DD_HHMMSS_description.sql` and applied in order.
+  Each applied version is recorded in `schema_migrations` with a SHA-256
+  checksum. `migrate:status` reports `MODIFIED` if an applied file has since
+  been edited. Never edit an applied migration; add a new one.
+- Runs are serialised with `GET_LOCK`.
+- MySQL commits DDL implicitly, so a migration can't be rolled back as a
+  unit. Keep each file small and focused. If one fails, fix forward with a
+  new migration, or repair manually and re-run.
+
+## Internationalisation
+
+- `lang/{en,es,gl}.php` hold nested arrays addressed by dot keys
+  (`auth.login.title`). Controllers and templates use keys, never literal
+  strings. A unit test checks that every locale defines the same keys and
+  placeholders.
+- Locale precedence: an explicit choice (stored in the session and the user
+  profile), then `Accept-Language`, then `APP_LOCALE`. URLs aren't
+  locale-prefixed because the catalogue is private and not indexed.
+- To add a language, add `lang/xx.php`, append `'xx'` to
+  `Translator::SUPPORTED`, and add it to the footer selector in
+  `templates/layout.php`.
+
+## Frontend
+
+- Server-rendered HTML with plain-PHP templates. `$view->e()` / `$view->t()`
+  escape everything; raw output is limited to pre-rendered partials.
+- One stylesheet with design tokens in `:root`, so the palette can be aligned
+  with the Bravina site, plus a dark-mode variant and reduced-motion support.
+- JavaScript is progressive enhancement only, loaded as an external
+  `defer`red file. No inline scripts or styles, so the CSP doesn't need
+  `unsafe-inline`.
+- Accessibility: skip link, landmark elements, labelled controls,
+  `aria-invalid` / `aria-describedby` on errors, visible focus outlines,
+  44 px touch targets.
+
+## Deployment
+
+Production deployment hasn't been performed or verified. Requirements:
+
+1. **TLS** terminates at the existing Bravina reverse proxy, which forwards to
+   the `nginx` service. Set `APP_URL=https://library.bravina.co.uk`,
+   `SESSION_SECURE_COOKIE=true` and `SECURITY_HSTS=true`.
+2. **Client IP:** configure trusted-proxy handling as described in
+   [Client IP behind a reverse proxy](#client-ip-behind-a-reverse-proxy).
+3. **Image (blocker until verified):** the Alpine image has not yet been
+   built or tested anywhere. Build `docker build --target prod -f docker/php/Dockerfile .`
+   and run it instead of the bind-mounted dev target. Nginx needs the same
+   `public/` files (bake a small nginx image or share a read-only volume).
+4. **Secrets:** use Docker secrets (`DB_PASSWORD_FILE`, …). Set
+   `APP_ENV=production`.
+5. **Persistence:** volumes for MySQL data and `storage/covers`. Include both
+   in backups.
+6. **Migrations:** run `php bin/console migrate` as a one-off task on each
+   release, before the new image takes traffic.
+
+### Client IP behind a reverse proxy
+
+The application uses only `REMOTE_ADDR`, never a forwarded header itself.
+Behind a reverse proxy, `REMOTE_ADDR` is the proxy's address unless Nginx
+is told which peers to trust. Without that:
+
+- every user shares one IP for the per-IP login limit (20 failures in
+  15 minutes), so one attacker can lock out everyone;
+- audit-log IP addresses are meaningless.
+
+Configuring it wrongly is worse than not configuring it. If an untrusted
+host is listed as trusted, any client can forge its IP address and bypass
+the per-IP limit.
+
+No proxy address is assumed in this repository. To configure:
+
+1. Find the address the proxy connects **from**, as seen by the `nginx`
+   container. For a proxy on a shared Docker network, use that container's
+   address on the network (`docker network inspect <network>`); for a proxy
+   on the host, use the gateway address of the Compose network. Docker may
+   reassign container addresses on restart. Prefer a dedicated network with
+   a fixed subnet, or a static address for the proxy.
+2. In `docker/nginx/default.conf`, uncomment the block and replace
+   `<PROXY_ADDRESS_OR_NARROW_CIDR>` with that address, or the narrowest
+   CIDR containing only the proxy.
+3. Make sure the proxy **overwrites or appends** `X-Forwarded-For` with the
+   real client address. With `real_ip_recursive on`, Nginx walks the header
+   from the right and stops at the first untrusted address.
+4. Make sure the application port is reachable **only** through the proxy.
+   Compose binds it to `127.0.0.1` for this reason.
+5. Verify: sign in from a known IP, then confirm that
+   `SELECT ip_address FROM audit_log ORDER BY id DESC LIMIT 1` shows that
+   IP rather than the proxy's. Also confirm that a request sending a forged
+   `X-Forwarded-For` directly to the container (bypassing the proxy) does
+   not change the logged IP.
+
+## Testing strategy
+
+- Unit tests isolate pure logic. Database-backed classes whose SQL is
+  portable (the login throttle) also run against SQLite in memory.
+- Integration tests use real MySQL, run the real migrations, use the
+  least-privilege accounts, and drive `Application::handle()` in-process with
+  an in-memory session standing in for the browser cookie.
+- CI (`.github/workflows/ci.yml`) runs lint, both suites against a MySQL 8.4
+  service, and a Dockerfile lint.
