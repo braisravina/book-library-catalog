@@ -1,7 +1,7 @@
 <?php
 /**
  * @var \DigitalLibrary\View\View $view
- * @var array<string, int> $stats  @var int $my_copies  @var list<array<string, mixed>> $recent
+ * @var array<string, int> $stats  @var int $my_copies  @var list<array<string, mixed>> $recent  @var int $overdue
  * @var \DigitalLibrary\Auth\User $current_user
  */
 $canCreate = $authorizer->can($current_user, \DigitalLibrary\Security\Permission::CatalogueCreate);
@@ -17,6 +17,12 @@ $canCreate = $authorizer->can($current_user, \DigitalLibrary\Security\Permission
         <?php if ($canCreate): ?><a class="button" href="/books/new"><?= $view->t('nav.add_book') ?></a><?php endif; ?>
     </div>
 </form>
+
+<?php if ($overdue > 0): ?>
+    <div class="alert alert-info" role="status">
+        <a href="<?= $view->e($view->url('/loans', ['scope' => 'lent', 'status' => 'overdue'])) ?>"><?= $view->t('dashboard.overdue', ['count' => $overdue]) ?></a>
+    </div>
+<?php endif; ?>
 
 <section aria-labelledby="stats-heading">
     <h2 id="stats-heading" class="visually-hidden"><?= $view->t('dashboard.stats') ?></h2>

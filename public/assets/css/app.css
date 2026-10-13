@@ -303,3 +303,24 @@ legend { font-weight: 600; padding: 0; margin-bottom: var(--space-2); }
 /* Phase 3 */
 .two-column > div { display: grid; gap: var(--space-4); align-content: start; }
 .two-column > div > .form-card { margin: 0; }
+
+/* ---------------------------------------------------------------------------
+   Phase 4A: library management
+   ------------------------------------------------------------------------- */
+:root { --color-warning-bg: #fdf1d8; --color-warning-text: #6b4500; }
+@media (prefers-color-scheme: dark) { :root { --color-warning-bg: #3a2e14; --color-warning-text: #f3d69a; } }
+.badge-warning { background: var(--color-warning-bg); color: var(--color-warning-text); }
+.badge-success { background: var(--color-success-bg); color: var(--color-success-text); }
+.status { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); }
+.status-on-loan { font-weight: 600; }
+.availability { margin: var(--space-2) 0 var(--space-3); }
+.tabs { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: 0 0 var(--space-3); }
+.filter-inline { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2); margin: 0 0 var(--space-3); }
+.filter-inline .form-field { min-width: 10rem; }
+.filter-inline .form-field input, .filter-inline .form-field select { min-height: 2.5rem; }
+.inline-actions { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; }
+.inline-actions form { display: inline; margin: 0; }
+.json-view { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--color-surface-alt); padding: var(--space-3); border-radius: var(--radius); font-size: 0.9rem; max-height: 32rem; overflow: auto; }
+/* Contain visually-hidden (absolutely positioned) labels inside scrolling tables on narrow screens. */
+.table-wrap { position: relative; }
+.filter-grid .form-field { align-content: start; }

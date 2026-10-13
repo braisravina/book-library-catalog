@@ -26,10 +26,17 @@ final class EditionController extends CatalogueBaseController
         $edition = $this->found($this->services->editions()->find($id));
         $authorizer = $this->services->authorizer();
         $copies = $this->services->copies()->forEdition($id);
+        $activeLoans = $this->services->loans()->activeForCopies(array_map(static fn (array $c): int => (int) $c['id'], $copies));
         foreach ($copies as &$copy) {
-            $copy['can_manage'] = $authorizer->canManageCopy($user, (int) $copy['owner_user_id']);
+            $ownerId = (int) $copy['owner_user_id'];
+            $loan = $activeLoans[(int) $copy['id']] ?? null;
+            $copy['can_manage'] = $authorizer->canManageCopy($user, $ownerId);
+            $copy['can_lend'] = $authorizer->canManageLoans($user, $ownerId);
+            $copy['active_loan'] = $loan;
+            $copy['show_borrower'] = $loan !== null && $authorizer->canSeeLoanDetails($user, $ownerId, $loan['borrower_user_id'] === null ? null : (int) $loan['borrower_user_id']);
         }
         unset($copy);
+        $canWishlist = $this->can($user, Permission::WishlistManageOwn);
 
         return $this->render('catalogue/edition_show', [
             'page_title' => null,
@@ -50,6 +57,11 @@ final class EditionController extends CatalogueBaseController
             'can_delete' => $this->can($user, Permission::CatalogueDelete),
             'can_add_copy' => $this->can($user, Permission::CopyManageOwn),
             'max_upload_bytes' => $this->services->config->int('UPLOAD_MAX_BYTES', 5 * 1024 * 1024),
+            'today' => \DigitalLibrary\Loans\LoanService::today(),
+            'in_collections' => $this->services->collections()->containing($id, $user->id, $this->can($user, Permission::CollectionManageAny)),
+            'addable_collections' => $this->can($user, Permission::CollectionManageOwn) ? $this->services->collections()->addableFor($id, $user->id) : [],
+            'can_wishlist' => $canWishlist,
+            'wishlist_entry' => $canWishlist ? $this->services->wishlist()->wantedForEdition($user->id, $id, $edition['isbn_13']) : null,
         ]);
     }
 

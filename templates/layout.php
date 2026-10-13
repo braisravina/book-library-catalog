@@ -39,6 +39,11 @@ $can = static fn (\DigitalLibrary\Security\Permission $p): bool => $user !== nul
                     <?php if ($can(\DigitalLibrary\Security\Permission::CatalogueCreate)): ?>
                         <li><a href="/books/new"><?= $view->t('nav.add_book') ?></a></li>
                     <?php endif; ?>
+                    <li><a href="/loans"><?= $view->t('nav.loans') ?></a></li>
+                    <?php if ($can(\DigitalLibrary\Security\Permission::WishlistManageOwn)): ?>
+                        <li><a href="/wishlist"><?= $view->t('nav.wishlist') ?></a></li>
+                    <?php endif; ?>
+                    <li><a href="/collections"><?= $view->t('nav.collections') ?></a></li>
                     <li><a href="/authors"><?= $view->t('nav.authors') ?></a></li>
                     <li><a href="/publishers"><?= $view->t('nav.publishers') ?></a></li>
                     <?php if ($can(\DigitalLibrary\Security\Permission::CategoryManage)): ?>
@@ -49,6 +54,9 @@ $can = static fn (\DigitalLibrary\Security\Permission $p): bool => $user !== nul
                     <?php endif; ?>
                     <?php if ($can(\DigitalLibrary\Security\Permission::UserManage)): ?>
                         <li><a href="/admin/users"><?= $view->t('nav.users') ?></a></li>
+                    <?php endif; ?>
+                    <?php if ($can(\DigitalLibrary\Security\Permission::AuditView)): ?>
+                        <li><a href="/admin/audit"><?= $view->t('nav.audit') ?></a></li>
                     <?php endif; ?>
                     <li><a href="/account/password"><?= $view->t('nav.account') ?></a></li>
                     <li>

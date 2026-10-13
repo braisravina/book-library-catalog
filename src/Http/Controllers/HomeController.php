@@ -33,6 +33,7 @@ final class HomeController extends Controller
             'stats' => array_map('intval', $stats ?: []),
             'my_copies' => (int) $mine->fetchColumn(),
             'recent' => $this->services->editions()->recent(12),
+            'overdue' => $this->services->loans()->countOverdueForOwner($user->id),
         ]);
     }
 }

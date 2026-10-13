@@ -94,6 +94,12 @@ final class CopyController extends CatalogueBaseController
     public function destroy(Request $request, array $params): Response
     {
         $copy = $this->manageableCopy($request, $params);
+        // Lending history is kept: such copies are withdrawn, not deleted.
+        if ($this->services->loans()->countForCopy((int) $copy['id']) > 0) {
+            $this->flash('error', 'loans.error.copy_has_history');
+
+            return Response::redirect('/copies/' . (int) $copy['id']);
+        }
         $this->services->copies()->delete((int) $copy['id']);
         $this->audit($request, 'copy.deleted', 'copy', (int) $copy['id'], ['edition_id' => (int) $copy['edition_id'], 'owner_user_id' => (int) $copy['owner_user_id']]);
         $this->flash('success', 'catalogue.copy.deleted');
@@ -128,6 +134,13 @@ final class CopyController extends CatalogueBaseController
         }
     }
 
+    private function currentStatus(int $copyId): ?string
+    {
+        $copy = $this->services->copies()->find($copyId);
+
+        return $copy === null ? null : (string) $copy['status'];
+    }
+
     private function validate(CopyInput $input, ?int $copyId): Validator
     {
         $validator = Validator::make([], []);
@@ -139,6 +152,14 @@ final class CopyController extends CatalogueBaseController
         $this->validateLocation($input->locationId(), $validator);
         if ($input->inventoryCode !== '' && $this->services->copies()->inventoryCodeTaken($input->inventoryCode, $copyId)) {
             $validator->addError('inventory_code', 'validation.inventory_taken');
+        }
+        // "On loan" is driven by the loans table: it is set by lending and
+        // cleared by recording the return, never edited by hand.
+        $activeLoan = $copyId === null ? null : $this->services->loans()->activeForCopy($copyId);
+        if ($activeLoan !== null && $input->status !== 'on_loan') {
+            $validator->addError('status', 'loans.validation.status_active_loan');
+        } elseif ($activeLoan === null && $input->status === 'on_loan' && ($copyId === null || $this->currentStatus($copyId) !== 'on_loan')) {
+            $validator->addError('status', 'loans.validation.status_use_lending');
         }
 
         return $validator;

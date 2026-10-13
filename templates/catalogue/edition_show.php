@@ -6,6 +6,8 @@
  * @var list<array<string, mixed>> $copies  @var list<array<string, mixed>> $covers
  * @var array<int, string> $location_paths  @var bool $can_edit  @var bool $can_edit_work
  * @var bool $can_delete  @var bool $can_add_copy  @var int $max_upload_bytes
+ * @var bool $can_wishlist  @var array<string, mixed>|null $wishlist_entry
+ * @var list<array<string, mixed>> $in_collections  @var list<array<string, mixed>> $addable_collections
  */
 $primary = $covers[0] ?? null;
 $authorNames = implode(', ', array_column(array_filter($authors, static fn (array $a): bool => $a['role'] === 'author'), 'name'));
@@ -66,9 +68,42 @@ $details = [
             <?php if ($can_edit): ?><a class="button" href="/editions/<?= (int) $edition['id'] ?>/edit"><?= $view->t('catalogue.edition.edit_title') ?></a><?php endif; ?>
             <?php if ($can_edit_work): ?><a class="button" href="/works/<?= (int) $edition['work_id'] ?>/edit"><?= $view->t('catalogue.work.edit_title') ?></a><?php endif; ?>
             <a class="button" href="/works/<?= (int) $edition['work_id'] ?>"><?= $view->t('catalogue.work.view_all_editions') ?></a>
+            <?php if ($can_wishlist && $wishlist_entry === null): ?>
+                <a class="button" href="<?= $view->e($view->url('/wishlist/new', ['edition' => (int) $edition['id']])) ?>"><?= $view->t('wishlist.add_from_edition') ?></a>
+            <?php elseif ($wishlist_entry !== null): ?>
+                <a class="button" href="/wishlist#item-<?= (int) $wishlist_entry['id'] ?>"><?= $view->t('wishlist.on_wishlist') ?></a>
+            <?php endif; ?>
         </div>
     </div>
 </article>
+
+<?php if ($in_collections !== [] || $addable_collections !== []): ?>
+<section aria-labelledby="collections-heading" id="collections">
+    <h2 id="collections-heading"><?= $view->t('collections.on_edition') ?></h2>
+    <?php if ($in_collections !== []): ?>
+        <ul class="tags">
+            <?php foreach ($in_collections as $c): ?>
+                <li><a href="/collections/<?= (int) $c['id'] ?>"><?= $view->e($c['name']) ?></a><?php if ($c['visibility'] === 'private'): ?> <span class="badge"><?= $view->t('collections.visibility.private') ?></span><?php endif; ?></li>
+            <?php endforeach; ?>
+        </ul>
+    <?php endif; ?>
+    <?php if ($addable_collections !== []): ?>
+        <form method="post" action="/collections/add-item" class="filter-inline">
+            <?= $view->csrfField() ?>
+            <input type="hidden" name="edition_id" value="<?= (int) $edition['id'] ?>">
+            <div class="form-field">
+                <label for="collection-id"><?= $view->t('collections.add_to') ?></label>
+                <select id="collection-id" name="collection_id">
+                    <?php foreach ($addable_collections as $c): ?>
+                        <option value="<?= (int) $c['id'] ?>"><?= $view->e($c['name']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <button type="submit" class="button"><?= $view->t('collections.add') ?></button>
+        </form>
+    <?php endif; ?>
+</section>
+<?php endif; ?>
 
 <section aria-labelledby="copies-heading" id="copies">
     <div class="page-header">
@@ -95,9 +130,15 @@ $details = [
                         <td><?= $view->e($copy['owner_name']) ?><?= (int) $copy['is_signed'] === 1 ? ' <span class="badge">' . $view->t('fields.is_signed') . '</span>' : '' ?></td>
                         <td><?= $copy['location_id'] !== null ? $view->e($location_paths[(int) $copy['location_id']] ?? '') : '<span class="muted">' . $view->t('catalogue.unspecified') . '</span>' ?></td>
                         <td><?= $copy['copy_condition'] !== null ? $view->t('conditions.' . $copy['copy_condition']) : '' ?></td>
-                        <td><?= $view->t('statuses.' . $copy['status']) ?></td>
+                        <td><?= $view->partial('loans/_status', ['status' => (string) $copy['status'], 'loan' => $copy['active_loan'], 'show_borrower' => $copy['show_borrower'], 'today' => $today]) ?></td>
                         <td><?= $view->e($copy['inventory_code'] ?? '') ?></td>
                         <td class="cell-actions">
+                            <a href="/copies/<?= (int) $copy['id'] ?>"><?= $view->t('loans.copy.details') ?></a>
+                            <?php if ($copy['can_lend'] && $copy['active_loan'] === null && $copy['status'] === 'available'): ?>
+                                <a href="/copies/<?= (int) $copy['id'] ?>/lend"><?= $view->t('loans.lend.action') ?></a>
+                            <?php elseif ($copy['can_lend'] && $copy['active_loan'] !== null): ?>
+                                <a href="/loans/<?= (int) $copy['active_loan']['id'] ?>/return"><?= $view->t('loans.return.action') ?></a>
+                            <?php endif; ?>
                             <?php if ($copy['can_manage']): ?>
                                 <a href="/copies/<?= (int) $copy['id'] ?>/edit"><?= $view->t('actions.edit') ?></a>
                                 <form method="post" action="/copies/<?= (int) $copy['id'] ?>/delete" class="inline-form" data-confirm="<?= $view->t('catalogue.copy.confirm_delete') ?>">

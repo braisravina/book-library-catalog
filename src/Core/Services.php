@@ -20,6 +20,13 @@ use DigitalLibrary\Catalogue\Repository\PublisherRepository;
 use DigitalLibrary\Catalogue\Repository\WorkRepository;
 use DigitalLibrary\Database\ConnectionFactory;
 use DigitalLibrary\I18n\Translator;
+use DigitalLibrary\Audit\AuditLogRepository;
+use DigitalLibrary\Collections\CollectionRepository;
+use DigitalLibrary\Collections\CollectionService;
+use DigitalLibrary\Loans\LoanRepository;
+use DigitalLibrary\Loans\LoanService;
+use DigitalLibrary\Wishlist\WishlistRepository;
+use DigitalLibrary\Wishlist\WishlistService;
 use DigitalLibrary\Metadata\CoverImporter;
 use DigitalLibrary\Metadata\Http\CurlHttpClient;
 use DigitalLibrary\Metadata\Http\HttpClient;
@@ -195,6 +202,41 @@ final class Services
             $this->coverRecords(),
             $this->config->int('UPLOAD_MAX_BYTES', 5 * 1024 * 1024),
         ));
+    }
+
+    public function loans(): LoanRepository
+    {
+        return $this->once(LoanRepository::class, fn (): LoanRepository => new LoanRepository($this->pdo()));
+    }
+
+    public function loanService(): LoanService
+    {
+        return $this->once(LoanService::class, fn (): LoanService => new LoanService($this->pdo(), $this->loans(), $this->authorizer()));
+    }
+
+    public function wishlist(): WishlistRepository
+    {
+        return $this->once(WishlistRepository::class, fn (): WishlistRepository => new WishlistRepository($this->pdo()));
+    }
+
+    public function wishlistService(): WishlistService
+    {
+        return $this->once(WishlistService::class, fn (): WishlistService => new WishlistService($this->pdo(), $this->wishlist(), $this->authorizer()));
+    }
+
+    public function auditLog(): AuditLogRepository
+    {
+        return $this->once(AuditLogRepository::class, fn (): AuditLogRepository => new AuditLogRepository($this->pdo()));
+    }
+
+    public function collections(): CollectionRepository
+    {
+        return $this->once(CollectionRepository::class, fn (): CollectionRepository => new CollectionRepository($this->pdo()));
+    }
+
+    public function collectionService(): CollectionService
+    {
+        return $this->once(CollectionService::class, fn (): CollectionService => new CollectionService($this->pdo(), $this->collections(), $this->authorizer()));
     }
 
     public function authorizer(): Authorizer

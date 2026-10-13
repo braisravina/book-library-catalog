@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use DigitalLibrary\Core\Services;
 use DigitalLibrary\Http\Controllers\AccountController;
+use DigitalLibrary\Http\Controllers\Admin\AuditController;
 use DigitalLibrary\Http\Controllers\Admin\CategoryController;
 use DigitalLibrary\Http\Controllers\Admin\LocationController;
 use DigitalLibrary\Http\Controllers\Admin\UserController;
@@ -17,6 +18,9 @@ use DigitalLibrary\Http\Controllers\Catalogue\PublisherController;
 use DigitalLibrary\Http\Controllers\Catalogue\WorkController;
 use DigitalLibrary\Http\Controllers\HealthController;
 use DigitalLibrary\Http\Controllers\HomeController;
+use DigitalLibrary\Http\Controllers\Library\CollectionController;
+use DigitalLibrary\Http\Controllers\Library\LoanController;
+use DigitalLibrary\Http\Controllers\Library\WishlistController;
 use DigitalLibrary\Http\Controllers\LocaleController;
 use DigitalLibrary\Http\Router;
 
@@ -45,6 +49,10 @@ return static function (Router $router, Services $s): void {
     $publishers = new PublisherController($s);
     $categories = new CategoryController($s);
     $locations = new LocationController($s);
+    $loans = new LoanController($s);
+    $wishlist = new WishlistController($s);
+    $collections = new CollectionController($s);
+    $audit = new AuditController($s);
 
     $view = ['auth', 'can:catalogue.view'];
     $create = ['auth', 'can:catalogue.create'];
@@ -88,6 +96,43 @@ return static function (Router $router, Services $s): void {
     $router->get('/copies/{id:\d+}/edit', $copies->edit(...), $copyOwn, 'copies.edit');
     $router->post('/copies/{id:\d+}', $copies->update(...), $copyOwn, 'copies.update');
     $router->post('/copies/{id:\d+}/delete', $copies->destroy(...), $copyOwn, 'copies.delete');
+
+    // Copy details and lending (Phase 4A). Object-level checks in LoanController/LoanService.
+    $loanOwn = ['auth', 'can:loan.manage_own'];
+    $router->get('/copies/{id:\d+}', $loans->copy(...), $view, 'copies.show');
+    $router->get('/copies/{id:\d+}/lend', $loans->create(...), $loanOwn, 'loans.create');
+    $router->post('/copies/{id:\d+}/lend', $loans->store(...), $loanOwn, 'loans.store');
+    $router->get('/loans', $loans->index(...), $view, 'loans.index');
+    $router->get('/loans/{id:\d+}/return', $loans->confirmReturn(...), $loanOwn, 'loans.return');
+    $router->post('/loans/{id:\d+}/return', $loans->storeReturn(...), $loanOwn, 'loans.return.store');
+
+    // Wishlists: private to their owner (object-level checks in the controller and service).
+    $wish = ['auth', 'can:wishlist.manage_own'];
+    $router->get('/wishlist', $wishlist->index(...), $wish, 'wishlist.index');
+    $router->get('/wishlist/new', $wishlist->create(...), $wish, 'wishlist.create');
+    $router->post('/wishlist', $wishlist->store(...), $wish, 'wishlist.store');
+    $router->get('/wishlist/{id:\d+}/edit', $wishlist->edit(...), $wish, 'wishlist.edit');
+    $router->post('/wishlist/{id:\d+}', $wishlist->update(...), $wish, 'wishlist.update');
+    $router->post('/wishlist/{id:\d+}/status', $wishlist->status(...), $wish, 'wishlist.status');
+
+    // Collections: visibility and management are checked per collection in the controller and service.
+    $collectionOwn = ['auth', 'can:collection.manage_own'];
+    $router->get('/collections', $collections->index(...), $view, 'collections.index');
+    $router->get('/collections/new', $collections->create(...), $collectionOwn, 'collections.create');
+    $router->post('/collections', $collections->store(...), $collectionOwn, 'collections.store');
+    $router->get('/collections/{id:\d+}', $collections->show(...), $view, 'collections.show');
+    $router->get('/collections/{id:\d+}/edit', $collections->edit(...), $collectionOwn, 'collections.edit');
+    $router->post('/collections/{id:\d+}', $collections->update(...), $collectionOwn, 'collections.update');
+    $router->post('/collections/{id:\d+}/delete', $collections->destroy(...), $collectionOwn, 'collections.delete');
+    $router->post('/collections/{id:\d+}/items', $collections->addItem(...), $collectionOwn, 'collections.items.add');
+    $router->post('/collections/add-item', $collections->addItemFromEdition(...), $collectionOwn, 'collections.items.add_from_edition');
+    $router->post('/collections/{id:\d+}/items/{edition:\d+}/remove', $collections->removeItem(...), $collectionOwn, 'collections.items.remove');
+    $router->post('/collections/{id:\d+}/items/{edition:\d+}/move', $collections->moveItem(...), $collectionOwn, 'collections.items.move');
+
+    // Audit-log viewer: administrators only, read-only (GET routes only).
+    $auditView = ['auth', 'can:audit.view'];
+    $router->get('/admin/audit', $audit->index(...), $auditView, 'admin.audit');
+    $router->get('/admin/audit/{id:\d+}', $audit->show(...), $auditView, 'admin.audit.show');
 
     // Covers.
     $router->post('/editions/{id:\d+}/covers', $covers->store(...), $editOwn, 'covers.store');
