@@ -69,6 +69,56 @@ tests check it for guests, viewers, two different members and admins. That
 includes IDOR attempts on copy ids, attempts to forge `owner_user_id`, and
 inactive or unknown owners.
 
+### User administration (Phase 3)
+
+- Only `user.manage` (administrators) can reach `/admin/users/*`; tests check
+  that members can't promote themselves.
+- Safeguards in `Auth\UserAdministration`:
+  - no self-demotion or self-deactivation;
+  - the last active administrator can't be demoted or deactivated. The check
+    runs under row locks, so racing requests can't bypass it.
+- Deactivation, admin password resets and "sign out everywhere" increment
+  `auth_version`, ending every session on its next request. Role changes
+  apply on the next request too, because users are reloaded from the
+  database each time.
+- Passwords set by administrators must pass the normal password policy. They
+  never appear in the audit log or in responses.
+- Audit actions: `user.updated` (with a from/to diff of changed fields),
+  `user.password_reset`, `user.sessions_revoked`.
+
+### Outbound requests (ISBN metadata, Phase 3)
+
+The application makes outbound HTTP requests only for metadata lookup and
+cover import, and only through `Metadata\Http\CurlHttpClient`:
+
+- **Allowlist:** HTTPS only, port 443, no credentials in the URL, no literal
+  IP addresses, and only hosts under `openlibrary.org`, `archive.org`,
+  `googleapis.com`, `books.google.com` and `googleusercontent.com`.
+- **Redirects:** followed manually (at most 3), and every hop is
+  re-checked; curl's own redirect following is off.
+- **TLS:** peer and host verification are always on.
+- **Limits:** connect timeout of 4 s or less, total timeout from
+  `METADATA_TIMEOUT_SECONDS` (default 8), and responses capped at 1 MB for
+  JSON and `UPLOAD_MAX_BYTES` for images (the transfer is aborted when
+  exceeded).
+- **No user-controlled URLs.** Request URLs are built from fixed templates
+  plus the validated 13-digit ISBN. The cover URL comes from the server's
+  own cached provider record and is only used for the same ISBN.
+  `metadata_record_id` from the form is just a pointer, verified against
+  that ISBN.
+- **Untrusted provider data:** it only pre-fills a form that the user
+  reviews, it's cleaned and length-capped, and output is escaped as usual.
+  A hostile payload (HTML or script, an internal cover URL such as
+  `169.254.169.254`) is tested to be inert.
+- **Privacy:** the browser never contacts the providers (the CSP stays
+  `img-src 'self'`). The server does send each looked-up ISBN to the
+  configured providers; set `METADATA_PROVIDERS=none` to disable this.
+- **Secrets:** `GOOGLE_BOOKS_API_KEY` is optional; supply it as
+  `GOOGLE_BOOKS_API_KEY_FILE` in production. It's sent only to
+  googleapis.com.
+- **Residual risk:** DNS for the allowlisted domains is trusted. Network
+  egress filtering at the host or container level is a sensible extra layer.
+
 ### Request integrity
 
 - **CSRF:** a per-session synchroniser token (`hash_equals`) is required on
@@ -177,11 +227,15 @@ inactive or unknown owners.
   they fail the CSRF check and show the "form expired" page rather than a
   size error. Files between `UPLOAD_MAX_BYTES` (5 MB) and that limit get a
   proper size error.
-- Catalogue edits have no optimistic-locking check yet. If two people edit
-  the same record at once, the last save wins (both are audited).
+- Concurrent edits of works, editions and copies are detected since Phase 3
+  (`row_version`). Categories, locations, authors and publishers still use
+  last-write-wins; their edits are admin-only and audited.
 - Search uses LIKE with leading wildcards, which scans the editions table.
   That's fine at personal-library scale; revisit beyond tens of thousands
   of editions.
+- Audit actions added in Phase 3: `user.updated`, `user.password_reset`,
+  `user.sessions_revoked`, `author.merged`, `author.deleted`,
+  `publisher.merged`, `publisher.deleted`, `cover.imported`.
 - Audit actions added in Phase 2: `work.*`, `edition.*`, `copy.*`,
   `cover.uploaded`/`cover.deleted`, `author.updated`, `publisher.updated`,
   `category.*`, `location.*`.
@@ -221,6 +275,8 @@ integration of Phase 1; awaiting the owner's decision.
       address only, and verified via the audit log
 - [ ] Alpine `dev` and `prod` images built; full test suite passes inside
       them with `--fail-on-skipped` (includes all GD and cover tests)
+- [ ] Decide on `METADATA_PROVIDERS` (privacy). If enabled, allow egress
+      only to the provider domains and supply any API key as a Docker secret
 - [ ] Persistent volume for `storage/covers` mounted, writable by `www-data`
       and included in backups
 - [ ] CI workflow executed and green

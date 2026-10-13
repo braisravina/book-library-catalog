@@ -38,7 +38,7 @@ Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ ngi
 | `Core` | `Application` (kernel and middleware pipeline), `Services` (container), `Config`/`DotEnv`, `Bootstrap` |
 | `Http` | `Request`, `Response`, `Router`, `HttpException`, middleware, controllers (`Controllers\Catalogue\*`, `Controllers\Admin\*`) |
 | `Security` | `Session`, `Csrf`, `PasswordHasher`, `PasswordPolicy`, `LoginThrottle`, `Role`, `Permission`, `Authorizer` |
-| `Auth` | `User`, `UserRepository`, `AuthService` |
+| `Auth` | `User`, `UserRepository`, `AuthService`, `UserAdministration` (admin changes with lock-out safeguards) |
 | `Database` | `ConnectionFactory`, `Migrator`, `SqlSplitter`, `Transaction` |
 | `I18n` | `Translator`, `LocaleNegotiator` |
 | `View` | `View` (plain-PHP templates with escaping helpers) |
@@ -46,6 +46,7 @@ Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ ngi
 | `Catalogue` | `Isbn`, `Vocabulary`, `Tree`, `Slug`, inputs (`Input\*`), repositories (`Repository\*`), `BookService` (transactional writes, duplicate detection), `CatalogueSearch` + `SearchCriteria` |
 | `Upload` | `CoverImageProcessor` (validated, re-encoded image storage) |
 | `Audit` | `AuditLogger` |
+| `Metadata` | `MetadataService`, providers (`Provider\OpenLibraryProvider`, `Provider\GoogleBooksProvider`), `BookMetadata`, `MetadataPrefill`, `CoverImporter`, hardened HTTP (`Http\CurlHttpClient`, `Http\OutboundPolicy`) |
 | `Console` | `bin/console` commands |
 
 ## Request lifecycle
@@ -226,8 +227,88 @@ defeat any heuristic.
 | Delete edition/work | `catalogue.delete` | refused while copies/editions exist |
 | Add copy | `copy.manage_own` | owner must be self unless `copy.manage_any` |
 | Edit/delete copy | `copy.manage_own` | owner (or `copy.manage_any`); transferring ownership needs `copy.manage_any` |
-| Edit authors/publishers | `catalogue.edit_any` | — (shared records) |
+| Edit, merge or delete authors/publishers | `catalogue.edit_any` | merges need a different existing target; deletion only when unused |
+| User administration | `user.manage` | no self-demotion or self-deactivation; last active admin protected |
 | Categories / locations admin | `category.manage` / `location.manage` | no cycles; refuse deletion of parents or items in use |
+
+## Administration and data quality (Phase 3)
+
+### User administration (`/admin/users/{id}/edit`, `user.manage`)
+
+- Edit e-mail, name, role, language and active status; reset a password;
+  sign a user out everywhere.
+- Every session is re-validated on each request against the user row
+  (`is_active` and `auth_version`):
+  - role changes apply on the next request;
+  - deactivation, password resets and "sign out everywhere" end all
+    sessions (`auth_version` is incremented).
+- `Auth\UserAdministration` enforces the safeguards in a transaction:
+  - administrators can't change their own role or deactivate themselves;
+  - demoting or deactivating an active administrator first locks all
+    active admin rows (`SELECT … FOR UPDATE`) and refuses if none would
+    remain, so concurrent requests can't remove the last admin;
+  - admins reset their own password and sign themselves out through their
+    own account pages.
+
+### Edit conflicts (optimistic locking)
+
+- Works, editions and copies have `row_version`. Edit forms carry the
+  version they were loaded with.
+- Updates are conditional (`WHERE id = ? AND row_version = ?`) and
+  increment the version; zero affected rows means a conflict.
+- On a conflict the transaction rolls back (no partial author or category
+  changes) and the form is re-shown with HTTP 409 and the user's input.
+- The stale version is kept in the re-shown form, so saving again can't
+  overwrite the other change; the user must reload.
+- Merges also increment the version of affected records.
+
+### Merging authors and publishers (`catalogue.edit_any`)
+
+- **Authors:** `UPDATE IGNORE` moves credits to the target (credits the
+  target already holds are kept once), then the leftovers and the source
+  are deleted. All in one transaction.
+- **Publishers:** editions are re-pointed, then the source is deleted.
+- Unused authors and publishers can be deleted; anything still in use
+  can't.
+
+## ISBN metadata lookup (Phase 3)
+
+```
+ISBN step (new ISBN) ──▶ MetadataService.lookup ──▶ cache hit? ── yes ─▶ normalise
+                                   │                    └ no ─▶ provider.fetch (CurlHttpClient + OutboundPolicy)
+                                   ▼                                  └▶ store raw payload in metadata_records
+                         merged BookMetadata ──▶ MetadataPrefill ──▶ form (user reviews/edits)
+POST /books ──▶ cachedRecord(id, ISBN) must match ──▶ editions.metadata_record_id
+                                         └▶ import_cover ─▶ CoverImporter ─▶ CoverImageProcessor (validate + re-encode)
+```
+
+- **Providers,** in priority order from `METADATA_PROVIDERS` (default
+  `open_library,google_books`):
+  - Open Library Books API (`/api/books?bibkeys=ISBN:…&jscmd=data`);
+  - Google Books (`/books/v1/volumes?q=isbn:…`). Its results are accepted
+    only if the volume lists the requested ISBN.
+  Fields are merged so the first provider wins and later ones fill gaps.
+- **Cache:** raw payloads live in `metadata_records`, positive results for
+  `METADATA_CACHE_DAYS` (30) and "not found" for one day. Transport failures
+  are not cached. Later steps (linking, cover import) use the cache, never
+  a new request from the browser.
+- **Review before saving:** provider data only pre-fills the form; it passes
+  the same validation as manual input. Values are cleaned first (control
+  characters removed, HTML stripped, lengths capped, years and page counts
+  range-checked, languages mapped to the catalogue vocabulary).
+- **Outbound HTTP:** see SECURITY.md › Outbound requests. Tests use
+  `tests/Support/FakeHttpClient`, which enforces the same `OutboundPolicy`.
+- **Cover import:** the server takes the cover URL from its cached record,
+  never from form input, and only for the same ISBN. It downloads the image
+  through the hardened client and stores it through
+  `CoverImageProcessor::storeDownloaded()`: the same validation and
+  re-encoding as uploads, without the HTTP-upload origin check, which can't
+  apply to a server-side file.
+- **Verification status:** in the development sandbox, Open Library is
+  blocked by egress policy and Google Books answers HTTP 429 without an API
+  key. Live transport and error handling were exercised, but a successful
+  live parse wasn't. Provider parsing is tested against fixtures in the
+  documented response formats.
 
 ## Database access
 
@@ -249,6 +330,9 @@ reduced to a SQLSTATE before they can reach any output. Multi-step writes use
   checksum. `migrate:status` reports `MODIFIED` if an applied file has since
   been edited. Never edit an applied migration; add a new one.
 - Runs are serialised with `GET_LOCK`.
+- Phase 3 added `2026_10_10_215610_add_row_versions.sql` (a `row_version`
+  column on works, editions and copies; additive, existing rows start at 1).
+  It applied cleanly to a database already at the Phase 2 schema.
 - Phase 2 added `2026_10_10_000005_add_catalogue_browse_indexes.sql`
   (indexes only: author names, edition titles and creation dates, copies
   by edition and owner). It applies cleanly to a database at the Phase 1

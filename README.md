@@ -6,8 +6,9 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
 - **Stack:** PHP 8.4 (PHP-FPM) · MySQL 8.4 · Nginx (Alpine) · Docker Compose ·
   HTML5/CSS3/vanilla JS. No framework. PDO with prepared statements, Argon2id.
 - **Languages:** English, Spanish (Español), Galician (Galego).
-- **Status:** Phase 1 (foundation) and Phase 2 (functional catalogue) are
-  implemented. Neither has been deployed. See [Roadmap](#roadmap).
+- **Status:** Phases 1 (foundation), 2 (functional catalogue) and 3 (user
+  administration, data quality and ISBN metadata lookup) are implemented.
+  None has been deployed. See [Roadmap](#roadmap).
 
 | Document | Contents |
 |---|---|
@@ -67,6 +68,28 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
   - Administrators can do everything; deletion is admin-only and refused
     while dependent records exist.
 - Every catalogue change is recorded in the audit log.
+
+### Administration, data quality and metadata (Phase 3)
+
+- **User administration:**
+  - Edit a user's name, e-mail, role and language; deactivate and reactivate
+    accounts.
+  - Reset passwords and sign a user out of every session. Both take effect
+    on the user's next request.
+  - Safeguards: administrators can't change their own role or deactivate
+    themselves, and the last active administrator can never be demoted or
+    deactivated (enforced with row locks).
+- **Edit-conflict detection** on works, editions and copies. A save based on
+  an outdated form is rejected (HTTP 409) and the user's input is kept, so
+  nobody silently overwrites someone else's change.
+- **Merge duplicate authors and publishers,** and delete unused ones
+  (admin-only). Overlapping credits collapse into one.
+- **ISBN metadata lookup.** When a new ISBN is entered, Open Library and then
+  Google Books are queried. Results pre-fill the form for review, never save
+  automatically, and are cached locally. The cover can be imported on save:
+  the server downloads it, then validates and re-encodes it like an upload.
+  Failures fall back to manual entry. Set `METADATA_PROVIDERS=none` to turn
+  lookups off.
 
 ## Requirements
 
@@ -129,6 +152,19 @@ The database has no published port. Only the `php` service can reach it.
   administration; and a full permission matrix: guest, viewer, member, other
   member and admin across every catalogue route, IDOR attempts on copies, and
   CSRF on every POST route.
+- **Phase 3 tests** cover:
+  - user administration: the self-lockout and last-admin safeguards,
+    immediate effect of role changes and deactivation, password reset and
+    session revocation;
+  - edit-conflict detection on works, editions and copies;
+  - author and publisher merges;
+  - the outbound URL allowlist, including tricks such as credentials in the
+    URL, lookalike or suffix domains, IP literals, other schemes and ports;
+  - metadata parsing, cleaning and merging;
+  - the full lookup flow against an offline HTTP fake: pre-fill, caching,
+    negative caching, provider failure, hostile payloads, cover import and
+    rejected cover bytes.
+  Tests never touch the network.
 - **Integration tests** (`tests/Integration`) run against the MySQL database
   named in `DB_TEST_DATABASE`, using the same least-privilege accounts as the
   application. They rebuild the schema from the migrations and drive the full
@@ -163,6 +199,10 @@ the full, commented list. Any variable can instead be supplied as a file via
   cookie to the `__Host-` prefix.
 - `DB_USERNAME` is the runtime account (DML only). `DB_MIGRATION_USERNAME` is
   used only by `bin/console migrate`.
+- `METADATA_PROVIDERS` controls the online ISBN lookup (default
+  `open_library,google_books`; `none` disables it). Lookups send the ISBN to
+  those services. `GOOGLE_BOOKS_API_KEY` (or `_FILE`) is optional, and
+  raises Google's rate limit.
 
 ## Deployment
 
@@ -216,11 +256,10 @@ tests/                   PHPUnit unit and integration suites
   check, authors and publishers, physical copies with owner and location,
   cover upload and serving, cover-grid and list views, search and filters,
   and admin management of categories and locations.
-- **Next (proposed):** user deactivation, role changes and admin password
-  resets; audit-database separation (see SECURITY.md); merging duplicate
-  authors and publishers.
-- **Phase 3 — Metadata providers:** Open Library and Google Books lookups via
-  a provider interface, cached in `metadata_records`, with a review step
-  before saving. Remote covers are downloaded and re-encoded locally.
+- **Phase 3 — Administration, data quality and metadata (done):** user
+  administration with lock-out safeguards, edit-conflict detection, merging
+  of authors and publishers, and Open Library / Google Books lookup with
+  review before saving and local cover import.
+- **Pending decision:** audit-database separation (see SECURITY.md).
 - **Phase 4 — Circulation and lists:** loans, wishlists, collections UI,
   invitation-based registration, audit-log viewer, CSV export and backups.

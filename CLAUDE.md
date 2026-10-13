@@ -48,7 +48,9 @@ These rules apply to every commit, in every phase, with no exceptions.
   from the owner's committed result of the previous phase. Until the owner
   reports a commit hash, identify a phase's base by its **tree hash**:
   - Phase 1: `f6805793e10db5e24f05d1a6534221da4ad2e2e4`
-  - Phase 2: recorded in the Phase 2 delivery notes.
+  - Phase 2: `943ca00257f67123698eb8dabf73056f71f24662`
+  - Phase 3: recorded in the Phase 3 delivery notes (branch `phase-3`,
+    created from the committed `phase-2`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -99,6 +101,16 @@ These rules apply to every commit, in every phase, with no exceptions.
   `tree_options`, `people_fields`, `cover`, `pagination`). Partials receive
   only the data passed to them. Use `$view->trans()` (unescaped) only when
   the value goes into a partial or helper that escapes it.
+- **Edits of works, editions and copies are optimistic-locked:** forms
+  carry `row_version`, and repository `update()` methods take the expected
+  version and return false on conflict (throw `EditConflictException` from
+  services). Any new edit form for these records must do the same.
+- **Outbound HTTP** only through `Metadata\Http\HttpClient` (production:
+  `CurlHttpClient` + `OutboundPolicy`). Never build request URLs from user
+  input. Tests must use `Tests\Support\FakeHttpClient` and must not touch
+  the network.
+- Administrative account changes go through `Auth\UserAdministration`
+  (lock-out safeguards).
 - Cover files are only ever reached through `CoverImageProcessor::path()` /
   `delete()`, never by building paths from input.
 
