@@ -15,6 +15,8 @@ use DigitalLibrary\Validation\Validator;
  */
 final class AuthorController extends CatalogueBaseController
 {
+    use MergesRecords;
+
     private const PER_PAGE = 50;
 
     public function index(Request $request): Response
@@ -97,6 +99,32 @@ final class AuthorController extends CatalogueBaseController
     }
 
     /**
+     * Merges this author into the chosen target author.
+     *
+     * @param array<string, string> $params
+     */
+    public function merge(Request $request, array $params): Response
+    {
+        $author = $this->found($this->services->authors()->find($this->id($params)));
+        $repo = $this->services->authors();
+
+        return $this->mergeRecord($request, $author, 'author', '/authors', $repo->find(...), $repo->mergeInto(...));
+    }
+
+    /**
+     * Deletes an author that no work or edition credits.
+     *
+     * @param array<string, string> $params
+     */
+    public function destroy(Request $request, array $params): Response
+    {
+        $author = $this->found($this->services->authors()->find($this->id($params)));
+        $repo = $this->services->authors();
+
+        return $this->deleteUnused($request, $author, 'author', '/authors', $repo->usage((int) $author['id']), $repo->delete(...));
+    }
+
+    /**
      * @param array<string, mixed>        $author
      * @param array<string, string>       $old
      * @param array<string, list<string>> $errors
@@ -108,6 +136,8 @@ final class AuthorController extends CatalogueBaseController
             'author' => $author,
             'old' => $old,
             'errors' => $errors,
+            'merge_options' => $this->services->authors()->options((int) $author['id']),
+            'usage' => $this->services->authors()->usage((int) $author['id']),
         ], $status);
     }
 }

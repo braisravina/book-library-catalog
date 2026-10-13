@@ -12,3 +12,4 @@
         </div>
     </form>
 </section>
+<?= $view->partial('catalogue/_merge_delete', ['base' => '/publishers/' . (int) $publisher['id'], 'options' => $merge_options, 'usage' => $usage, 'entity' => 'publishers']) ?>

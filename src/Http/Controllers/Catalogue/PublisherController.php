@@ -11,6 +11,8 @@ use DigitalLibrary\Validation\Validator;
 
 final class PublisherController extends CatalogueBaseController
 {
+    use MergesRecords;
+
     public function index(Request $request): Response
     {
         return $this->render('catalogue/publishers_index', [
@@ -66,6 +68,28 @@ final class PublisherController extends CatalogueBaseController
     }
 
     /**
+     * @param array<string, string> $params
+     */
+    public function merge(Request $request, array $params): Response
+    {
+        $publisher = $this->found($this->services->publishers()->find($this->id($params)));
+        $repo = $this->services->publishers();
+
+        return $this->mergeRecord($request, $publisher, 'publisher', '/publishers', $repo->find(...), $repo->mergeInto(...));
+    }
+
+    /**
+     * @param array<string, string> $params
+     */
+    public function destroy(Request $request, array $params): Response
+    {
+        $publisher = $this->found($this->services->publishers()->find($this->id($params)));
+        $repo = $this->services->publishers();
+
+        return $this->deleteUnused($request, $publisher, 'publisher', '/publishers', $repo->usage((int) $publisher['id']), $repo->delete(...));
+    }
+
+    /**
      * @param array<string, mixed>        $publisher
      * @param array<string, list<string>> $errors
      */
@@ -76,6 +100,8 @@ final class PublisherController extends CatalogueBaseController
             'publisher' => $publisher,
             'name' => $name,
             'errors' => $errors,
+            'merge_options' => $this->services->publishers()->options((int) $publisher['id']),
+            'usage' => $this->services->publishers()->usage((int) $publisher['id']),
         ], $status);
     }
 }

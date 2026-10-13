@@ -64,6 +64,37 @@ final class PublisherRepository extends Repository
         );
     }
 
+    public function usage(int $id): int
+    {
+        return (int) $this->scalar('SELECT COUNT(*) FROM editions WHERE publisher_id = :id', ['id' => $id]);
+    }
+
+    /**
+     * Reassigns all editions to $targetId and deletes the source. Affected
+     * editions get a new row_version. Must run inside a transaction.
+     */
+    public function mergeInto(int $sourceId, int $targetId): void
+    {
+        $this->run('UPDATE editions SET publisher_id = :t, row_version = row_version + 1 WHERE publisher_id = :s', ['t' => $targetId, 's' => $sourceId]);
+        $this->run('DELETE FROM publishers WHERE id = :s', ['s' => $sourceId]);
+    }
+
+    public function delete(int $id): void
+    {
+        $this->run('DELETE FROM publishers WHERE id = :id', ['id' => $id]);
+    }
+
+    /**
+     * @return list<array{id: int, name: string}>
+     */
+    public function options(int $excludeId): array
+    {
+        return array_map(static fn (array $r): array => ['id' => (int) $r['id'], 'name' => (string) $r['name']], $this->many(
+            'SELECT id, name FROM publishers WHERE id <> :x ORDER BY name, id LIMIT 2000',
+            ['x' => $excludeId],
+        ));
+    }
+
     /**
      * @return bool false when another publisher already has the name
      */

@@ -104,6 +104,51 @@ final class AuthorRepository extends Repository
         return array_column($this->many('SELECT name FROM authors ORDER BY sort_name LIMIT :l', ['l' => $limit]), 'name');
     }
 
+    /**
+     * Number of credits (work authorships and edition contributions).
+     */
+    public function usage(int $id): int
+    {
+        return (int) $this->scalar(
+            'SELECT (SELECT COUNT(*) FROM work_authors WHERE author_id = :a) + (SELECT COUNT(*) FROM edition_contributors WHERE author_id = :b)',
+            ['a' => $id, 'b' => $id],
+        );
+    }
+
+    /**
+     * Moves every credit from $sourceId to $targetId and deletes the source.
+     * Credits the target already holds are kept once (UPDATE IGNORE skips
+     * rows that would duplicate a primary key). Affected works and editions
+     * get a new row_version so stale edit forms cannot resurrect the source.
+     * Must run inside a transaction.
+     */
+    public function mergeInto(int $sourceId, int $targetId): void
+    {
+        $this->run('UPDATE works SET row_version = row_version + 1 WHERE id IN (SELECT work_id FROM work_authors WHERE author_id = :s)', ['s' => $sourceId]);
+        $this->run('UPDATE editions SET row_version = row_version + 1 WHERE id IN (SELECT edition_id FROM edition_contributors WHERE author_id = :s)', ['s' => $sourceId]);
+        $this->run('UPDATE IGNORE work_authors SET author_id = :t WHERE author_id = :s', ['t' => $targetId, 's' => $sourceId]);
+        $this->run('DELETE FROM work_authors WHERE author_id = :s', ['s' => $sourceId]);
+        $this->run('UPDATE IGNORE edition_contributors SET author_id = :t WHERE author_id = :s', ['t' => $targetId, 's' => $sourceId]);
+        $this->run('DELETE FROM edition_contributors WHERE author_id = :s', ['s' => $sourceId]);
+        $this->run('DELETE FROM authors WHERE id = :s', ['s' => $sourceId]);
+    }
+
+    public function delete(int $id): void
+    {
+        $this->run('DELETE FROM authors WHERE id = :id', ['id' => $id]);
+    }
+
+    /**
+     * @return list<array{id: int, name: string}>
+     */
+    public function options(int $excludeId, int $limit = 2000): array
+    {
+        return array_map(static fn (array $r): array => ['id' => (int) $r['id'], 'name' => (string) $r['name']], $this->many(
+            'SELECT id, name FROM authors WHERE id <> :x ORDER BY sort_name, id LIMIT :l',
+            ['x' => $excludeId, 'l' => $limit],
+        ));
+    }
+
     public static function normalizeName(string $name): string
     {
         return trim((string) preg_replace('/\s+/u', ' ', $name));
