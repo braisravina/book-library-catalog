@@ -1,0 +1,15 @@
+/vendor/
+/.env
+/.env.*
+!/.env.example
+/storage/covers/*
+/storage/logs/*
+/storage/cache/*
+!/storage/**/.gitkeep
+/.phpunit.cache/
+/.phpunit.result.cache
+/coverage/
+.DS_Store
+*.swp
+.idea/
+.vscode/
