@@ -43,12 +43,60 @@ final class UserRepository
         return is_string($hash) ? $hash : null;
     }
 
-    public function emailExists(string $email): bool
+    public function emailExists(string $email, ?int $excludeId = null): bool
     {
-        $stmt = $this->pdo->prepare('SELECT 1 FROM users WHERE email = :email');
-        $stmt->execute(['email' => self::normalizeEmail($email)]);
+        $stmt = $this->pdo->prepare('SELECT 1 FROM users WHERE email = :email AND id <> :exclude');
+        $stmt->execute(['email' => self::normalizeEmail($email), 'exclude' => $excludeId ?? 0]);
 
         return $stmt->fetchColumn() !== false;
+    }
+
+    /**
+     * Administrative profile update. Role changes take effect on the user's
+     * next request because the user is reloaded from the database each time.
+     */
+    public function updateProfile(int $id, string $email, string $displayName, Role $role, string $locale, bool $isActive): void
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE users u JOIN roles r ON r.code = :role
+             SET u.email = :email, u.display_name = :name, u.role_id = r.id, u.locale = :locale,
+                 u.is_active = :active, u.updated_at = UTC_TIMESTAMP()
+             WHERE u.id = :id'
+        );
+        $stmt->execute([
+            'role' => $role->value,
+            'email' => self::normalizeEmail($email),
+            'name' => $displayName,
+            'locale' => $locale,
+            'active' => $isActive ? 1 : 0,
+            'id' => $id,
+        ]);
+    }
+
+    /**
+     * Invalidates every existing session of the user (sessions carry the
+     * auth_version they were created with).
+     */
+    public function bumpAuthVersion(int $id): void
+    {
+        $this->pdo->prepare('UPDATE users SET auth_version = auth_version + 1, updated_at = UTC_TIMESTAMP() WHERE id = :id')
+            ->execute(['id' => $id]);
+    }
+
+    /**
+     * Locks the active administrator rows for the rest of the current
+     * transaction, so concurrent demotions cannot remove the last admin.
+     *
+     * @return list<int>
+     */
+    public function lockActiveAdminIds(): array
+    {
+        $stmt = $this->pdo->query(
+            "SELECT u.id FROM users u JOIN roles r ON r.id = u.role_id
+             WHERE r.code = 'admin' AND u.is_active = 1 ORDER BY u.id FOR UPDATE"
+        );
+
+        return array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
     }
 
     public function create(string $email, string $displayName, Role $role, string $passwordHash, string $locale, ?int $createdBy): int

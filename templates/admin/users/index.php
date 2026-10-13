@@ -16,6 +16,7 @@
             <th scope="col"><?= $view->t('fields.role') ?></th>
             <th scope="col"><?= $view->t('fields.status') ?></th>
             <th scope="col"><?= $view->t('fields.last_login') ?></th>
+            <th scope="col"><span class="visually-hidden"><?= $view->t('actions.actions') ?></span></th>
         </tr>
         </thead>
         <tbody>
@@ -24,8 +25,9 @@
                 <td><?= $view->e($u->displayName) ?></td>
                 <td><?= $view->e($u->email) ?></td>
                 <td><?= $view->t($u->role->labelKey()) ?></td>
-                <td><?= $view->t($u->isActive ? 'admin.users.active' : 'admin.users.inactive') ?></td>
+                <td><?php if ($u->isActive): ?><?= $view->t('admin.users.active') ?><?php else: ?><span class="badge"><?= $view->t('admin.users.inactive') ?></span><?php endif; ?></td>
                 <td><?= $u->lastLoginAt !== null ? $view->e($u->lastLoginAt . ' UTC') : $view->t('admin.users.never') ?></td>
+                <td class="cell-actions"><a href="/admin/users/<?= (int) $u->id ?>/edit"><?= $view->t('actions.edit') ?></a></td>
             </tr>
         <?php endforeach; ?>
         </tbody>
