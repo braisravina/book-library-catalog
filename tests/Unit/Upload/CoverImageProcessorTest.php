@@ -44,6 +44,24 @@ final class CoverImageProcessorTest extends TestCase
         self::assertSame(hash_file('sha256', $path), $stored->sha256);
     }
 
+    public function testCreatesThumbnailAndDeletesBothFiles(): void
+    {
+        $processor = $this->processor();
+        $stored = $processor->store($this->upload($this->makeImage('png', 1000, 1500)));
+        $full = (string) $processor->path($stored->storageKey);
+        $thumb = (string) $processor->path($stored->storageKey, true);
+
+        self::assertNotSame($full, $thumb);
+        self::assertStringEndsWith('.thumb.jpg', $thumb);
+        self::assertSame([320, 480], array_slice((array) getimagesize($thumb), 0, 2));
+
+        $processor->delete($stored->storageKey);
+        self::assertFileDoesNotExist($full);
+        self::assertFileDoesNotExist($thumb);
+        $processor->delete('../../etc/passwd'); // malformed keys are ignored, never resolved
+        $this->addToAssertionCount(1);
+    }
+
     public function testLargeImagesAreDownscaled(): void
     {
         $stored = $this->processor()->store($this->upload($this->makeImage('jpeg', 3200, 1600)));

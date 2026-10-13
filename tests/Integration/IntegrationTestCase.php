@@ -14,6 +14,7 @@ use DigitalLibrary\Http\Response;
 use DigitalLibrary\Security\PasswordHasher;
 use DigitalLibrary\Security\Role;
 use DigitalLibrary\Security\Session;
+use DigitalLibrary\Upload\CoverImageProcessor;
 use PDO;
 use PHPUnit\Framework\TestCase;
 
@@ -66,6 +67,7 @@ abstract class IntegrationTestCase extends TestCase
             self::$migrated = true;
         }
         $this->truncateData();
+        self::$trustUploads = false;
     }
 
     protected function pdo(): PDO
@@ -94,17 +96,90 @@ abstract class IntegrationTestCase extends TestCase
      * Sends a request through the full middleware stack. Each call uses a
      * fresh service container (as PHP-FPM would) but the given session
      * persists between calls, standing in for the browser's cookie.
+     * A query string in $path is parsed into the request's query parameters.
      *
-     * @param array<string, string> $body
+     * @param array<string, mixed>  $body
      * @param array<string, string> $server
+     * @param array<string, mixed>  $files
      */
-    protected function request(Session $browser, string $method, string $path, array $body = [], array $server = []): Response
+    protected function request(Session $browser, string $method, string $path, array $body = [], array $server = [], array $files = []): Response
     {
         $services = new Services(self::config(), dirname(__DIR__, 2));
         $services->set(PDO::class, $this->pdo());
         $services->set(Session::class, $browser);
+        $services->set(CoverImageProcessor::class, new CoverImageProcessor(
+            self::coverDirectory(),
+            isUploadedFile: static fn (string $path): bool => self::$trustUploads,
+        ));
 
-        return (new Application($services))->handle(new Request($method, $path, [], $body, $server + ['REMOTE_ADDR' => '192.0.2.10']));
+        $query = [];
+        $parts = explode('?', $path, 2);
+        if (isset($parts[1])) {
+            parse_str($parts[1], $query);
+        }
+
+        return (new Application($services))->handle(new Request($method, $parts[0], $query, $body, $server + ['REMOTE_ADDR' => '192.0.2.10'], [], $files));
+    }
+
+    /**
+     * Whether the test cover processor treats files as genuine HTTP uploads.
+     * Tests set this explicitly; the default exercises the real defence.
+     */
+    protected static bool $trustUploads = false;
+
+    protected static function coverDirectory(): string
+    {
+        static $dir = null;
+        if ($dir === null) {
+            $dir = sys_get_temp_dir() . '/dla-test-covers-' . getmypid();
+            if (!is_dir($dir)) {
+                mkdir($dir, 0700, true);
+            }
+        }
+
+        return $dir;
+    }
+
+    /**
+     * Logs in and returns a browser session plus a fresh CSRF token.
+     *
+     * @return array{Session, string}
+     */
+    protected function signedIn(string $email): array
+    {
+        $browser = $this->browser();
+        $response = $this->login($browser, $email);
+        self::assertSame(303, $response->status(), 'Login failed for ' . $email);
+
+        return [$browser, self::csrfFrom($this->request($browser, 'GET', '/account/password'))];
+    }
+
+    /**
+     * Creates a book directly through the service layer.
+     *
+     * @param array<string, mixed> $edition overrides for the edition fields
+     * @param list<string>         $authors
+     * @param list<int>            $categories
+     *
+     * @return array{work_id: int, edition_id: int, copy_id: ?int}
+     */
+    protected function makeBook(int $userId, string $title, ?string $isbn = null, array $authors = [], array $edition = [], array $categories = [], ?int $copyOwner = null, ?int $locationId = null): array
+    {
+        $services = new Services(self::config(), dirname(__DIR__, 2));
+        $services->set(PDO::class, $this->pdo());
+        $work = new \DigitalLibrary\Catalogue\Input\WorkInput($title, '', '', '', '', '', array_map(static fn (string $n): array => ['name' => $n, 'role' => 'author'], $authors), $categories);
+        $editionInput = new \DigitalLibrary\Catalogue\Input\EditionInput(
+            $edition['title'] ?? $title, '', $edition['publisher'] ?? '', (string) ($edition['year'] ?? ''), '', $edition['language'] ?? '',
+            '', '', $isbn ?? '', '', '', [],
+        );
+        $copy = $copyOwner === null ? null : new \DigitalLibrary\Catalogue\Input\CopyInput((string) $copyOwner, $locationId === null ? '' : (string) $locationId, '', '', 'available', false, '', '', '', '', '');
+
+        return $services->books()->createBook($work, $editionInput, $copy, $userId);
+    }
+
+    protected function countRows(string $sql): int
+    {
+        return (int) $this->pdo()->query($sql)->fetchColumn();
     }
 
     protected function browser(): Session
