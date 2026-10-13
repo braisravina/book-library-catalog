@@ -7,7 +7,8 @@
   PHPUnit). Every dependency between components is wired explicitly in
   `src/Core/Services.php`.
 - **Private by default.** Everything except the landing page, sign-in,
-  language switch and health check requires authentication.
+  invitation acceptance, language switch and health check requires
+  authentication.
 - **Security in the foundation.** The foundation itself provides CSRF
   protection, escaping, authorization, rate limiting and least-privilege
   database access, so later features don't have to opt in to them.
@@ -35,7 +36,7 @@ Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ ngi
 
 | Namespace | Responsibility |
 |---|---|
-| `Core` | `Application` (kernel and middleware pipeline), `Services` (container), `Config`/`DotEnv`, `Bootstrap` |
+| `Core` | `Application` (kernel and middleware pipeline), `Services` (container), `Config`/`DotEnv`, `Bootstrap`, `MaintenanceMode` |
 | `Http` | `Request`, `Response`, `Router`, `HttpException`, middleware, controllers (`Controllers\Catalogue\*`, `Controllers\Admin\*`) |
 | `Security` | `Session`, `Csrf`, `PasswordHasher`, `PasswordPolicy`, `LoginThrottle`, `Role`, `Permission`, `Authorizer` |
 | `Auth` | `User`, `UserRepository`, `AuthService`, `UserAdministration` (admin changes with lock-out safeguards) |
@@ -49,8 +50,12 @@ Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ ngi
 | `Loans` | `LoanInput`, `LoanRepository`, `LoanService` (transactional lend/return) |
 | `Wishlist` | `WishlistInput`, `WishlistRepository`, `WishlistService` |
 | `Collections` | `CollectionInput`, `CollectionRepository`, `CollectionService` |
+| `Invitations` | `InvitationToken`, `InvitationRepository`, `InvitationService` (issue, revoke, replace, single-use redemption), `InvitationDelivery` (`ManualLinkDelivery` now; e-mail later) |
+| `Export` | `CatalogueExport`, `PersonalExport` (keyset-batched sources), `Dataset`, `CsvWriter`, `JsonWriter` |
+| `Backup` | `BackupCreator`, `BackupVerifier`, `BackupRestorer`, `DatabaseDumper`, `DumpReader`, `Manifest`, strict `TarWriter`/`TarReader`/`TarPath` |
+| `Maintenance` | `Cleanup` (retention and housekeeping) |
 | `Metadata` | `MetadataService`, providers (`Provider\OpenLibraryProvider`, `Provider\GoogleBooksProvider`), `BookMetadata`, `MetadataPrefill`, `CoverImporter`, hardened HTTP (`Http\CurlHttpClient`, `Http\OutboundPolicy`) |
-| `Console` | `bin/console` commands |
+| `Console` | `bin/console` commands (`Console`; backups, restore, maintenance and cleanup in `Operations`) |
 
 ## Request lifecycle
 
@@ -75,7 +80,9 @@ Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ ngi
    specific record is involved, and returns a `Response`.
 
 `/health` bypasses the session stack and returns only `{"status":"ok"}`, or
-503 when the database is unreachable.
+503 when the database is unreachable. While maintenance mode is on (a flag
+file toggled from the CLI), every other request gets a 503 page before any
+session or database work.
 
 ## Authorization model
 
@@ -96,6 +103,11 @@ Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ ngi
 | `wishlist.manage_own` (own wishlist only; no override) | ✔ | ✔ | |
 | `collection.manage_own` | ✔ | ✔ | |
 | `collection.manage_any` (see and manage private collections) | ✔ | | |
+| `invitation.manage` (issue, revoke, replace invitations) | ✔ | | |
+| `catalogue.export` (whole-catalogue CSV/JSON export) | ✔ | | |
+
+Personal exports need no extra permission: they are always scoped to the
+signed-in user.
 
 Object-level decisions are `Authorizer::canEditRecord($user, $createdBy)` and
 `Authorizer::canManageCopy($user, $ownerId)`; Phase 4A adds
@@ -246,6 +258,10 @@ defeat any heuristic.
 | Collections: view | `catalogue.view` | private: owner or `collection.manage_any`, else 404 |
 | Collections: create, edit, delete, items | `collection.manage_own` | owner, or `collection.manage_any` |
 | Audit-log viewer | `audit.view` | GET routes only |
+| Invitations admin | `invitation.manage` | Member/Viewer roles only; links shown once |
+| Invitation acceptance `/invite…` | `guest` | token hash in session; single-use transaction |
+| Personal export `/export/personal…` | `catalogue.view` | always the signed-in user's id; no user parameter |
+| Catalogue export `/admin/export/…` | `catalogue.export` | whitelisted datasets; no wishlists, loans or private collections |
 
 ## Administration and data quality (Phase 3)
 
@@ -385,6 +401,109 @@ POST /books ──▶ cachedRecord(id, ISBN) must match ──▶ editions.metad
 - `AuditDetails` redacts secret-looking keys again on display and
   pretty-prints the JSON. The template escapes it.
 
+## Invitations, export and recovery (Phase 4B)
+
+### Invitations
+
+- **Table:** `invitations`, created in Phase 1, hardened by migration
+  `2026_10_14_090000`:
+  - a stored generated column `open_email` with a UNIQUE index allows one open invitation per address;
+  - `CHECK (role_id IN (2, 3))` means no administrator invitations;
+  - `CHECK (expires_at > created_at)`;
+  - `revoked_by` and `replaced_by_id`.
+- **Issuing.** `InvitationService::issue()` generates 32 random bytes,
+  base64url-encoded. It stores `SHA-256(token)` and returns the raw token
+  once. An expired open invitation for the same address is revoked first; an
+  unexpired one is refused (use *New link*). Expiry is the end of an
+  administrator-chosen UTC day, at most `INVITATION_MAX_DAYS` ahead.
+- **Delivery.** `InvitationDelivery::deliver()` returns false for
+  `ManualLinkDelivery`, so the link is rendered once on the response to the
+  issuing POST. The link is never kept in the session, a flash message, a
+  redirect or the audit log. An SMTP implementation can be swapped in
+  `Services::invitationDelivery()` later.
+- **Redemption:**
+  1. `GET /invite?token=…` never renders a page. On success it puts only the
+     hash in the session (session id regenerated) and redirects to
+     `/invite/accept`; on any failure it redirects to `/invite/invalid`.
+     These redirects are sent with `Referrer-Policy: no-referrer` and
+     `no-store`. Rendered pages keep the site-wide `same-origin` policy,
+     because `no-referrer` makes browsers send `Origin: null` on form posts,
+     which `VerifyCsrf` refuses.
+  2. `POST /invite/accept` validates the form (the invitee re-types the
+     invited address; password policy). It then calls `redeem()`, which in
+     one transaction:
+     - locks the invitation row (`FOR UPDATE`);
+     - checks it is unused, unrevoked and unexpired, and that the address
+       matches;
+     - creates the active user (`created_by` = inviter);
+     - marks the invitation accepted with a conditional UPDATE.
+
+     A concurrent redemption waits on the lock and is then refused. Every
+     failure shows the same generic page.
+  3. The user signs in through the normal login.
+- **Rate limiting.** A second `LoginThrottle` instance counts failures per
+  client IP, hashed, in `login_attempts`.
+- **Logging.** The bundled nginx excludes `/invite?…` from its access log.
+
+### Export
+
+- `CatalogueExport` and `PersonalExport` expose `Dataset`s: a fixed column
+  list plus a lazy row generator.
+- Rows come from keyset-paginated queries (`(key) > (:last)`, 500 per batch)
+  with per-batch lookups for multi-valued fields. There is no
+  `GROUP_CONCAT`, so nothing is silently truncated.
+- The controller streams the result through `Response::stream()`, inside
+  `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY`. Memory stays flat
+  whatever the size; a test checks that 2,537 works add less than 8 MiB of
+  peak memory.
+- **CSV** (`CsvWriter`): UTF-8 with BOM, RFC 4180 quoting (`fputcsv` with
+  escape `""`), CRLF and stable headers. Lists are joined with `; `. Text
+  cells starting with `= + - @`, a tab or CR are prefixed with `'`; this also
+  catches cells after leading spaces and full-width variants.
+- **JSON** (`JsonWriter`): `{"export": {format, type, schema_version: 1,
+  generated_at, datasets, …}, "data": {dataset: [rows]}}`.
+  - Every column is always present, with `null` for missing values.
+  - Ids are database ids. Datetimes are ISO 8601 UTC (`…Z`); dates are
+    `YYYY-MM-DD`; prices are decimal strings.
+- **Personal datasets:** `account`, `wishlist`, `copies`, `collections`,
+  `collection_items`, `loans`.
+- **Catalogue datasets:** `works`, `editions`, `authors`, `work_authors`,
+  `edition_contributors`, `publishers`, `categories`, `locations`, `copies`,
+  `collections` and `collection_items` (shared collections only).
+
+### Backup, verify, restore
+
+See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the operator's view.
+
+- **`DatabaseDumper`.** Pure PHP; reads with the runtime account inside one
+  consistent snapshot:
+  - output is `SHOW CREATE TABLE` plus multi-row INSERTs in primary-key
+    order, keyset-batched;
+  - generated columns are skipped (they are recomputed on insert);
+  - binary columns are written as hex;
+  - each statement is length-framed (`-- dla:statement N`), so restoring
+    never parses SQL.
+- **`TarWriter` / `TarReader`.** A minimal ustar subset: regular files only,
+  conservative names (`TarPath`), mode 0600, mtime 0. The reader rejects
+  everything else (links, devices, directories, extended headers,
+  duplicates, bad checksums, truncation, size limits), and its callback
+  never touches the filesystem itself.
+- **`BackupCreator`.** Writes the dump to a temporary file, then archives
+  `database.sql`, the covers and `manifest.json` (last). It hashes while
+  writing, fsyncs, renames atomically and writes a `.sha256` sidecar.
+  Referenced covers must exist.
+- **`BackupVerifier` / `BackupRestorer`.** Verify, then extract with
+  re-hashing. Every statement is checked against an allow-list of dumper
+  shapes (`DumpReader::isAllowed`) and executed as a single prepared
+  statement. The pre-flight checks (target database empty or `--replace`,
+  cover conflicts) run before any change. The dump runs through the
+  migration account; covers are placed by temporary file and rename. Row
+  counts and covers are checked afterwards, and a mid-way failure is
+  reported as partial.
+- **Maintenance and retention.** `MaintenanceMode` is a flag file;
+  `Application` answers 503 while it exists. `Cleanup` runs retention as a
+  dry run by default and never deletes the newest verified backup.
+
 ## Database access
 
 | Account | Privileges | Used by |
@@ -505,5 +624,8 @@ No proxy address is assumed in this repository. To configure:
 - Integration tests use real MySQL, run the real migrations, use the
   least-privilege accounts, and drive `Application::handle()` in-process with
   an in-memory session standing in for the browser cookie.
+- Backup and restore tests write only to temporary directories, and restore
+  only into the disposable `DB_TEST_DATABASE`. Afterwards they rebuild its
+  schema from the migrations.
 - CI (`.github/workflows/ci.yml`) runs lint, both suites against a MySQL 8.4
   service, and a Dockerfile lint.

@@ -54,6 +54,9 @@ These rules apply to every commit, in every phase, with no exceptions.
   - Phase 4A: branch `phase-4a` from the committed Phase 3 commit
     `7e5ebe15a37caa928fda893fc00d325f368f1911` (tree
     `ef1d615edd8ec3064113a8a7f15401f5c1cabe9e`).
+  - Phase 4B: branch `phase-4b` from the committed Phase 4A commit
+    `a2e5040ae19886f8e8708e03aedb7a999196b32d` (tree
+    `963a49ed7f4de3551ead2303dfabc408186d28b6`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -123,6 +126,19 @@ These rules apply to every commit, in every phase, with no exceptions.
 - The audit-log viewer is read-only: never add write routes or repository
   write methods; keep queries bounded (date range, indexed filters, keyset
   pagination) and escape/redact everything shown.
+- Invitations: store only `InvitationToken::hash()`; show a raw link only
+  in the response that created it; never put tokens or links in sessions,
+  flashes, redirects, logs or the audit log; never allow the admin role.
+  Pages with forms must keep the `same-origin` referrer policy
+  (`no-referrer` makes browsers send `Origin: null`, which CSRF refuses).
+- Exports: personal data only for the signed-in user (no user parameter);
+  never export credentials, sessions, invitations, login attempts, the audit
+  log, wishlists, loans or private collections in the catalogue export;
+  stream with keyset batches; CSV cells go through `CsvWriter`.
+- Backups/restore/maintenance/cleanup are CLI-only (`Console\Operations`).
+  Destructive operations are dry-run or guarded by default; never add web
+  routes for them. Tests restore only into the disposable test database
+  and temporary directories.
 - Cover files are only ever reached through `CoverImageProcessor::path()` /
   `delete()`, never by building paths from input.
 

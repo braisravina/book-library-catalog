@@ -118,6 +118,32 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
   details search. Paging uses keyset pagination, and a details page shows the
   redacted, escaped JSON.
 
+### Invitations, data portability and recovery (Phase 4B)
+
+- **Invitation-only registration.**
+  - Administrators invite an e-mail address as Member or Viewer, never Administrator, with an expiry date.
+  - The single-use link is shown once, to copy and send yourself; no SMTP is needed.
+  - Invitations can be revoked or replaced with a new link, and the list shows each one's status.
+  - The invitee confirms the invited address, chooses a name and password (the same Argon2id hashing and password policy), then signs in normally.
+  - Tokens are 256-bit random values, stored only as SHA-256 hashes. Redemption is atomic and single-use, even under concurrent requests, and rate-limited per client address.
+  - The token never reaches a rendered page, a Referer header, the audit log or the nginx access log.
+- **Data export** (*Export* page, CSV or JSON):
+  - Every user can download their own data: account, wishlist, owned copies, own collections and loans they can see.
+  - Administrators can also download the catalogue: works, editions, credits, publishers, categories, locations, copies with their owners, and shared collections.
+  - JSON is a versioned, complete document with stable identifiers. CSV is UTF-8 and protected against spreadsheet formula injection.
+  - Exports are streamed in bounded batches from one consistent snapshot, never cached, and audited.
+  - Passwords, sessions, invitations, sign-in records, the audit log, other users' wishlists and private collections are never exported.
+- **Backups and restore** (CLI only):
+  - `backup:create` writes a checksummed archive (database dump, cover images, manifest) from a consistent snapshot.
+  - `backup:verify` rejects corrupted or malicious archives.
+  - `backup:restore` is guarded: it needs maintenance mode and a typed confirmation, verifies first, refuses to overwrite without `--replace`, and reports partial failure explicitly.
+  - `maintenance:on|off` switches the site to a 503 page.
+  - See [docs/OPERATIONS.md](docs/OPERATIONS.md), which includes the disaster-recovery runbook.
+- **Housekeeping:** `cleanup` prunes expired invitations, old sign-in records, stale temporary files and old backups.
+  - It is a dry run unless `--apply` is given.
+  - Orphaned covers are only reported unless explicitly requested.
+  - The newest verified backup is never deleted.
+
 ## Requirements
 
 - Docker Engine 24+ with the Compose plugin.
@@ -164,6 +190,10 @@ The database has no published port. Only the `php` service can reach it.
 | Integration tests | `docker compose exec php vendor/bin/phpunit --testsuite integration` |
 | PHP lint | `docker compose exec php composer lint` |
 | Reset the database | `docker compose down -v` (destroys all data) |
+| Create / verify a backup | `docker compose exec php php bin/console backup:create` / `backup:verify --file=…` |
+| Restore a backup | see [docs/OPERATIONS.md](docs/OPERATIONS.md#restore) (guarded; needs maintenance mode) |
+| Maintenance mode | `docker compose exec php php bin/console maintenance:on` / `maintenance:off` |
+| Housekeeping (dry run) | `docker compose exec php php bin/console cleanup` (add `--apply` to delete) |
 
 ## Testing
 
@@ -207,6 +237,12 @@ The database has no published port. Only the `php` service can reach it.
   - migration verification: released migrations are frozen by checksum, all
     migrations are non-destructive, and the new tables, indexes, generated
     columns, CHECK constraints and foreign-key actions exist on MySQL.
+- **Phase 4B tests** cover:
+  - invitations: creation, hashing (no token stored anywhere), expiry, revocation, replacement, single use, concurrent redemption (two connections), role restrictions (application and database), rate limiting, administrator-only access, and the token-free redirect and headers;
+  - exports: JSON structure and versioning, CSV quoting, BOM, no truncation and formula-injection protection, per-user isolation and IDOR attempts, administrator-only catalogue export and its exclusions, headers, and a large catalogue streamed in batches with bounded memory;
+  - backups: archive contents, permissions and no secrets; refusal of unsafe locations and missing covers; verification against corrupted, truncated and malicious archives (path traversal, links, devices, pax headers, duplicates, forged manifests); guarded restore into the disposable test database (refusals, `--replace`, an empty target, partial failure); console guards; maintenance mode;
+  - cleanup: dry runs, retention, symbolic-link safety, report-only orphaned covers, and backup retention that keeps the newest verified archive;
+  - the Phase 4B migration applied to a database holding Phase 4A data.
 - **Integration tests** (`tests/Integration`) run against the MySQL database
   named in `DB_TEST_DATABASE`, using the same least-privilege accounts as the
   application. They rebuild the schema from the migrations and drive the full
@@ -241,6 +277,13 @@ the full, commented list. Any variable can instead be supplied as a file via
   cookie to the `__Host-` prefix.
 - `DB_USERNAME` is the runtime account (DML only). `DB_MIGRATION_USERNAME` is
   used only by `bin/console migrate`.
+- `APP_URL` is also the base of invitation links.
+- `BACKUP_PATH`, `TEMP_PATH` and `MAINTENANCE_FLAG_PATH` default to
+  `storage/backups`, `storage/tmp` and `storage/maintenance.flag`, all outside
+  `public/`. Retention settings (`INVITATION_RETENTION_DAYS`,
+  `LOGIN_ATTEMPT_RETENTION_DAYS`, `TEMP_FILE_RETENTION_HOURS`,
+  `ORPHAN_COVER_MIN_AGE_HOURS`, `BACKUP_KEEP_COUNT`, `BACKUP_KEEP_DAYS`) have
+  safe defaults; see `.env.example`.
 - `METADATA_PROVIDERS` controls the online ISBN lookup (default
   `open_library,google_books`; `none` disables it). Lookups send the ISBN to
   those services. `GOOGLE_BOOKS_API_KEY` (or `_FILE`) is optional, and
@@ -267,6 +310,12 @@ These must be resolved and verified before any deployment:
 2. **Client IP forwarding is not configured.** See
    [ARCHITECTURE.md › Client IP behind a reverse proxy](ARCHITECTURE.md#client-ip-behind-a-reverse-proxy).
 3. **The CI workflow has never been executed.**
+4. **Backups are not scheduled and have no production location.** Mount
+   persistent storage at `storage/backups`, add off-site copies, enable the
+   schedules in [docs/OPERATIONS.md](docs/OPERATIONS.md#recommended-schedule-not-activated),
+   and run one restore drill on the production host.
+5. **The reverse proxy must not log query strings for `/invite`.** The
+   bundled nginx already omits these requests; check the Bravina proxy too.
 
 The production image target (`docker build --target prod -f docker/php/Dockerfile .`)
 and the requirements are described in
@@ -277,15 +326,17 @@ going live.
 ## Project layout
 
 ```
-bin/console              CLI: migrations, user creation
+bin/console              CLI: migrations, users, backups, restore, maintenance, cleanup
 config/routes.php        Route table and per-route middleware
 database/migrations/     Versioned SQL migrations (applied in filename order)
 docker/                  PHP-FPM image, Nginx vhost, MySQL init and config
+docs/OPERATIONS.md       Backup, restore, disaster recovery, retention and scheduling
 lang/{en,es,gl}.php      Translation catalogues
 public/                  Web root: front controller and static assets only
 src/                     Application code (PSR-4, namespace DigitalLibrary\)
-storage/                 Runtime files outside the web root (covers, logs);
-                         in development, storage/covers is the covers-data volume
+storage/                 Runtime files outside the web root (covers, logs, backups,
+                         tmp); in development, storage/covers and storage/backups
+                         are the covers-data and backups-data volumes
 templates/               Plain-PHP templates; all output escaped
 tests/                   PHPUnit unit and integration suites
 ```
@@ -306,6 +357,11 @@ tests/                   PHPUnit unit and integration suites
   wishlists, personal and shared collections, and the read-only audit-log
   viewer.
 - **Pending decision:** audit-database separation (see SECURITY.md).
-- **Phase 4B — proposed:** invitation-based registration, CSV export and
-  import, backups, notifications for due loans and optional shared
-  wishlists.
+- **Phase 4B — Invitations, data portability and recovery (done):**
+  invitation-only registration, CSV/JSON export, backup/verify/restore
+  tooling with maintenance mode, and retention housekeeping.
+- **Phase 5 — proposed:** production readiness: build and validate the
+  Alpine images and CI, configure the reverse proxy and client IP, implement
+  the audit-database separation, schedule and drill backups. Then optional
+  e-mail delivery (invitations, password reset) and multi-factor
+  authentication.

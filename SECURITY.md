@@ -119,6 +119,117 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 - **Residual risk:** DNS for the allowlisted domains is trusted. Network
   egress filtering at the host or container level is a sensible extra layer.
 
+### Invitations (Phase 4B)
+
+- **Tokens.**
+  - Each token is 256 bits from `random_bytes()`, base64url-encoded, and
+    only its SHA-256 hash is stored. A high-entropy token needs no slow hash.
+  - The raw link appears exactly once: in the response to the
+    administrator's POST, with `no-store` set. The page URL holds no token.
+  - The link is never in a session, a flash message, a redirect, the audit
+    log (`token`, `token_hash` and `link` keys are also redacted) or the
+    database.
+- **Link handling.**
+  - `GET /invite?token=…` never renders HTML. It stores only the hash in a
+    freshly regenerated session and redirects to a token-free URL, with
+    `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
+  - So the token is in a single request: it is not in page URLs, Referer
+    headers or cached pages.
+  - The bundled nginx keeps `/invite?…` out of its access log. The upstream
+    reverse proxy must be configured the same way (see the checklist).
+  - The link stays in the invitee's own browser history, but it is
+    single-use and expires.
+- **Single use under concurrency.**
+  - Redemption locks the invitation row, re-checks its state, creates the
+    account and marks the invitation used with a conditional UPDATE, all in
+    one transaction. The account exists only if consumption succeeded.
+  - A second, concurrent attempt waits on the lock and is refused. A unique
+    `users.email` index is the final backstop.
+- **Privilege.**
+  - Invitations can grant only Member or Viewer, enforced in the service,
+    the form and a database CHECK. There are no administrator invitations.
+  - Only `invitation.manage` (administrators) can issue, revoke or replace
+    invitations.
+- **Abuse.**
+  - Failed link and e-mail-mismatch attempts count against a per-IP limit
+    (`INVITATION_MAX_FAILURES` per `LOGIN_LOCKOUT_SECONDS`); throttled
+    clients get 429 even for valid links.
+  - Invalid, expired, revoked and used links all get the same generic page.
+  - The invited address is never shown to the invitee; they must type it.
+  - Every acceptance and rejection is audited, without tokens.
+
+### Data export (Phase 4B)
+
+- **Authorization.** All export routes require authentication.
+  - Personal exports use the session's user id only. There is no user
+    parameter, so there is nothing to tamper with; tests try `?user=…`.
+  - The catalogue export requires `catalogue.export`. It excludes:
+    - e-mail addresses and accounts, password hashes and sessions;
+    - invitations, `login_attempts` and settings;
+    - the audit log and the metadata cache;
+    - wishlists, loans and private collections.
+  - Administrators therefore cannot read private wishlists through exports.
+  - Dataset names are whitelisted; unknown names give 404.
+- **Spreadsheet formula injection** is neutralised (leading `'`).
+- **Responses.** `Content-Disposition: attachment` with server-built
+  filenames, `Cache-Control: no-store, private`, and `nosniff`. Nothing is
+  stored server-side.
+- **Bounded resources.** Streaming from keyset batches inside a read-only
+  snapshot transaction. Each export is audited (`export.personal`,
+  `export.catalogue`) with dataset and format only.
+
+### Backups, restore and maintenance (Phase 4B)
+
+- **CLI only.** There are no web routes for backups, restore, maintenance or
+  cleanup.
+- **No secrets in backups.** The database dump is read with the runtime
+  account and holds data only. `.env`, Docker secrets, sessions and
+  `login_attempts` rows are excluded. A test checks that the database
+  passwords do not appear in an archive.
+- **Storage.**
+  - Archives are created with umask 077 (`0600` files, `0700` directory),
+    and never inside `public/`.
+  - Temporary files are removed on every exit path, and the archive is
+    renamed into place atomically.
+  - Archives still hold all library data, including e-mail addresses and
+    borrower names. Store and transfer them as confidential.
+- **Hostile archives.** `TarReader` accepts regular files with conservative
+  relative names only. It rejects:
+  - `..`, absolute paths and backslashes;
+  - symbolic and hard links, devices, FIFOs and directories;
+  - pax and GNU extended headers;
+  - duplicates and bad checksums.
+
+  Further protections:
+  - Sizes are bounded, and the manifest may list only `database.sql` and
+    cover-pattern paths.
+  - Extraction happens only into a fresh `0700` work directory and re-hashes
+    every byte against the verified manifest.
+  - Cover files are placed by temporary file and rename, so symbolic links
+    at the target are never followed (they are refused), and unrelated files
+    are never touched.
+  - The dump is executed by its length frames; statements are never
+    reconstructed by parsing.
+  - Before anything changes, every statement must match one of the shapes
+    the dumper writes: the fixed `SET` statements, `CREATE TABLE … ENGINE=InnoDB`
+    without `DATA/INDEX DIRECTORY` or `CONNECTION`, or `INSERT INTO`.
+  - Each statement runs as a single prepared statement, so nothing can be
+    appended after a `;`. A forged but correctly checksummed archive
+    therefore cannot drop, grant, write files or touch other databases.
+    Still, restore only archives you created.
+- **Restore guards.** Maintenance mode is required, `--confirm=<database>`
+  must be typed, and production also needs `--allow-production` (the
+  maintenance check cannot be skipped there).
+  - Verification runs first. Non-empty targets and differing covers are
+    refused unless `--replace`.
+  - Partial failure is reported as such, with exit code 2.
+- **Retention.** `cleanup` is a dry run by default. Orphaned covers are
+  report-only unless explicitly requested. The newest verified backup is
+  never deleted. Loans, catalogue records and the audit log are never
+  pruned.
+- **Audit.** Events `backup.created`, `backup.restored` (written into the
+  restored database) and `maintenance.cleanup`.
+
 ### Library management (Phase 4A)
 
 - **Object-level checks everywhere.** Lending and returns check
@@ -238,6 +349,16 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 
 ## Known limitations and follow-ups
 
+- Phase 4B:
+  - Without trusted-proxy configuration, the per-IP invitation limit applies
+    to the proxy's address, as the login limit does.
+  - Backups are not encrypted by the application. Protect them with
+    filesystem permissions and encrypt off-site copies (for example with
+    age or GPG) under your own key management.
+  - The catalogue export can be large. It is administrator-only, streamed
+    and bounded in memory, but not rate-limited.
+  - Invitation e-mail delivery is not implemented. Administrators pass links
+    on themselves, over a channel they trust.
 - The audit log is append-only by convention only (see
   [Audit log integrity review](#audit-log-integrity-review)).
 - Without trusted-proxy configuration, the per-IP login limit applies to
@@ -273,6 +394,10 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 - Search uses LIKE with leading wildcards, which scans the editions table.
   That's fine at personal-library scale; revisit beyond tens of thousands
   of editions.
+- Audit actions added in Phase 4B: `invitation.created`, `invitation.revoked`,
+  `invitation.replaced`, `invitation.accepted`, `invitation.rejected` (reason only),
+  `user.created` (via invitation), `export.personal`, `export.catalogue`,
+  `backup.created`, `backup.restored`, `maintenance.cleanup`.
 - Audit actions added in Phase 4A: `loan.created`, `loan.returned`,
   `collection.created`, `collection.updated`, `collection.deleted`,
   `collection.item_added`, `collection.item_removed`.
@@ -326,6 +451,14 @@ integration of Phase 1; awaiting the owner's decision.
 - [ ] Audit-log integrity decision implemented (see review above)
 - [ ] `prod` image target in use (no bind mounts, no Composer, runs as `www-data`)
 - [ ] MySQL data and `storage/covers` volumes included in backups; restore tested
+- [ ] `storage/backups` on persistent storage outside the web root, copied
+      off-site; daily `backup:create` and `cleanup --apply` scheduled
+      ([docs/OPERATIONS.md](docs/OPERATIONS.md)); one restore drill done on
+      the production host
+- [ ] Secrets listed in docs/OPERATIONS.md ("Secrets to preserve") stored
+      separately from the backups
+- [ ] The Bravina reverse proxy does not log query strings for `/invite`
+      (invitation tokens), or logs no query strings at all
 - [ ] `php bin/console migrate` run, and `migrate:status` shows no `pending`/`MODIFIED`
 - [ ] First administrator created via CLI, with a strong passphrase
 - [ ] The application isn't reachable except through the reverse proxy
