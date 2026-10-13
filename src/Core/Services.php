@@ -6,6 +6,7 @@ namespace DigitalLibrary\Core;
 
 use DigitalLibrary\Audit\AuditLogger;
 use DigitalLibrary\Auth\AuthService;
+use DigitalLibrary\Auth\UserAdministration;
 use DigitalLibrary\Auth\UserRepository;
 use DigitalLibrary\Catalogue\BookService;
 use DigitalLibrary\Catalogue\CatalogueSearch;
@@ -19,6 +20,13 @@ use DigitalLibrary\Catalogue\Repository\PublisherRepository;
 use DigitalLibrary\Catalogue\Repository\WorkRepository;
 use DigitalLibrary\Database\ConnectionFactory;
 use DigitalLibrary\I18n\Translator;
+use DigitalLibrary\Metadata\CoverImporter;
+use DigitalLibrary\Metadata\Http\CurlHttpClient;
+use DigitalLibrary\Metadata\Http\HttpClient;
+use DigitalLibrary\Metadata\Http\OutboundPolicy;
+use DigitalLibrary\Metadata\MetadataService;
+use DigitalLibrary\Metadata\Provider\GoogleBooksProvider;
+use DigitalLibrary\Metadata\Provider\OpenLibraryProvider;
 use DigitalLibrary\Security\Authorizer;
 use DigitalLibrary\Security\Csrf;
 use DigitalLibrary\Security\LoginThrottle;
@@ -134,6 +142,58 @@ final class Services
             $this->session(),
             $this->csrf(),
             $this->audit(),
+        ));
+    }
+
+    public function userAdministration(): UserAdministration
+    {
+        return $this->once(UserAdministration::class, fn (): UserAdministration => new UserAdministration($this->pdo(), $this->users()));
+    }
+
+    public function httpClient(): HttpClient
+    {
+        return $this->once(HttpClient::class, fn (): HttpClient => new CurlHttpClient(
+            OutboundPolicy::defaults(),
+            max(2, min(20, $this->config->int('METADATA_TIMEOUT_SECONDS', 8))),
+        ));
+    }
+
+    /**
+     * Providers in priority order from METADATA_PROVIDERS
+     * ("open_library,google_books" by default; "none" disables lookups).
+     */
+    public function metadata(): MetadataService
+    {
+        return $this->once(MetadataService::class, function (): MetadataService {
+            $names = $this->config->get('METADATA_PROVIDERS') === null
+                ? ['open_library', 'google_books']
+                : $this->config->list('METADATA_PROVIDERS');
+            $providers = [];
+            foreach (array_unique($names) as $name) {
+                $providers[] = match ($name) {
+                    'open_library' => new OpenLibraryProvider($this->httpClient()),
+                    'google_books' => new GoogleBooksProvider($this->httpClient(), $this->config->get('GOOGLE_BOOKS_API_KEY')),
+                    'none' => null,
+                    default => throw new \DigitalLibrary\Core\ConfigException('Unknown metadata provider: ' . $name),
+                };
+            }
+
+            return new MetadataService(
+                $this->pdo(),
+                array_values(array_filter($providers)),
+                max(1, $this->config->int('METADATA_CACHE_DAYS', 30)),
+            );
+        });
+    }
+
+    public function coverImporter(): CoverImporter
+    {
+        return $this->once(CoverImporter::class, fn (): CoverImporter => new CoverImporter(
+            $this->pdo(),
+            $this->httpClient(),
+            $this->covers(),
+            $this->coverRecords(),
+            $this->config->int('UPLOAD_MAX_BYTES', 5 * 1024 * 1024),
         ));
     }
 

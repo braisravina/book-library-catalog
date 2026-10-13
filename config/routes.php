@@ -99,15 +99,23 @@ return static function (Router $router, Services $s): void {
     $router->get('/authors/{id:\d+}', $authors->show(...), $view, 'authors.show');
     $router->get('/authors/{id:\d+}/edit', $authors->edit(...), $editAny, 'authors.edit');
     $router->post('/authors/{id:\d+}', $authors->update(...), $editAny, 'authors.update');
+    $router->post('/authors/{id:\d+}/merge', $authors->merge(...), $editAny, 'authors.merge');
+    $router->post('/authors/{id:\d+}/delete', $authors->destroy(...), $editAny, 'authors.delete');
     $router->get('/publishers', $publishers->index(...), $view, 'publishers.index');
     $router->get('/publishers/{id:\d+}', $publishers->show(...), $view, 'publishers.show');
     $router->get('/publishers/{id:\d+}/edit', $publishers->edit(...), $editAny, 'publishers.edit');
     $router->post('/publishers/{id:\d+}', $publishers->update(...), $editAny, 'publishers.update');
+    $router->post('/publishers/{id:\d+}/merge', $publishers->merge(...), $editAny, 'publishers.merge');
+    $router->post('/publishers/{id:\d+}/delete', $publishers->destroy(...), $editAny, 'publishers.delete');
 
     // Administration.
     $router->get('/admin/users', $users->index(...), ['auth', 'can:user.manage'], 'admin.users');
     $router->get('/admin/users/new', $users->create(...), ['auth', 'can:user.manage'], 'admin.users.create');
     $router->post('/admin/users', $users->store(...), ['auth', 'can:user.manage'], 'admin.users.store');
+    $router->get('/admin/users/{id:\d+}/edit', $users->edit(...), ['auth', 'can:user.manage'], 'admin.users.edit');
+    $router->post('/admin/users/{id:\d+}', $users->update(...), ['auth', 'can:user.manage'], 'admin.users.update');
+    $router->post('/admin/users/{id:\d+}/password', $users->resetPassword(...), ['auth', 'can:user.manage'], 'admin.users.password');
+    $router->post('/admin/users/{id:\d+}/sessions', $users->revokeSessions(...), ['auth', 'can:user.manage'], 'admin.users.sessions');
 
     $manageCategories = ['auth', 'can:category.manage'];
     $router->get('/admin/categories', $categories->index(...), $manageCategories, 'admin.categories');
