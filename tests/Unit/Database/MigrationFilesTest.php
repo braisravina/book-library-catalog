@@ -62,7 +62,7 @@ final class MigrationFilesTest extends TestCase
     }
 
     /**
-     * Migrations already delivered (Phases 1-3) are frozen: schema changes go
+     * Migrations already delivered (Phases 1-4A) are frozen: schema changes go
      * in new files. The checksums match what the Migrator records.
      */
     public function testReleasedMigrationsAreUnchanged(): void
@@ -74,6 +74,10 @@ final class MigrationFilesTest extends TestCase
             '2026_10_10_000004_create_audit_log.sql' => '2a9a8dbc844743b8d86486b2a4d9fdc4c98c7258f90bcc36974ba3d7fe1bbab0',
             '2026_10_10_000005_add_catalogue_browse_indexes.sql' => '60a39b163add26a88838aaf443b30bc77b9503f0f94d2b7038780e88f8140646',
             '2026_10_10_215610_add_row_versions.sql' => 'f1bd8dbdf36c75090de099d68ea056c94108c89c38cc5100ccbba9be9228d5f6',
+            // Phase 4A (committed by the owner as a2e5040).
+            '2026_10_13_155738_create_loans_table.sql' => 'dc27cc81435756651c20a56043de578e6fc71192feacaf60f10945c330af9fce',
+            '2026_10_13_155739_create_wishlist_items_table.sql' => 'a877a32c260ae3700498fb4b60fecc0463b3afc161e80d62601fae343db2827b',
+            '2026_10_13_155740_add_collection_indexes.sql' => 'a29135da6954550e42f6c3ea5e4864b2bdb5ae05b1a9754be1436fb231943686',
         ];
         $files = self::migrations();
         foreach ($released as $name => $sha256) {
@@ -96,6 +100,17 @@ final class MigrationFilesTest extends TestCase
                 self::assertDoesNotMatchRegularExpression('/^\s*(DROP|TRUNCATE|RENAME|DELETE)\b|\bDROP\s+(COLUMN|INDEX|KEY|FOREIGN|CONSTRAINT|CHECK|PRIMARY)\b/i', $statement, $name);
             }
         }
+    }
+
+    public function testPhase4bInvitationMigrationOnlyAddsConstraints(): void
+    {
+        $sql = self::migrations()['2026_10_14_090000_harden_invitations.sql'] ?? self::fail('Phase 4B migration missing');
+        $statements = SqlSplitter::split($sql);
+        self::assertCount(1, $statements);
+        self::assertStringStartsWith('ALTER TABLE invitations', $statements[0]);
+        self::assertStringContainsString('CHECK (role_id IN (2, 3))', $statements[0], 'No administrator invitations');
+        self::assertStringContainsString('UNIQUE KEY uq_invitations_open_email', $statements[0]);
+        self::assertDoesNotMatchRegularExpression('/\b(DROP|MODIFY|CHANGE|RENAME)\b/i', $statements[0]);
     }
 
     public function testPhase4aTablesAreDefined(): void
