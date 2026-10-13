@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci_root_password
+          MYSQL_DATABASE: library_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci_root_password"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      APP_ENV: testing
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      DB_DATABASE: library_test
+      DB_TEST_DATABASE: library_test
+      DB_USERNAME: library_app
+      DB_PASSWORD: ci_app_password
+      DB_MIGRATION_USERNAME: library_migrator
+      DB_MIGRATION_PASSWORD: ci_migration_password
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: pdo_mysql, gd, mbstring, fileinfo, sodium
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Lint PHP
+        run: composer lint
+
+      - name: Create least-privilege database accounts
+        run: |
+          mysql -h 127.0.0.1 -uroot -pci_root_password <<'SQL'
+          CREATE USER 'library_app'@'%' IDENTIFIED BY 'ci_app_password';
+          CREATE USER 'library_migrator'@'%' IDENTIFIED BY 'ci_migration_password';
+          GRANT SELECT, INSERT, UPDATE, DELETE ON `library_test`.* TO 'library_app'@'%';
+          GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES ON `library_test`.* TO 'library_migrator'@'%';
+          SQL
+
+      - name: Run tests
+        # --fail-on-skipped: GD cover tests and the MySQL integration suite
+        # must actually run on PHP 8.4 here, never silently skip.
+        run: vendor/bin/phpunit --fail-on-skipped
+
+      - name: Lint Dockerfile
+        run: docker build --check -f docker/php/Dockerfile .
