@@ -99,7 +99,7 @@ final class CataloguePermissionTest extends IntegrationTestCase
         $this->request($browser, 'POST', "/editions/{$e}/copies", ['_csrf' => $token, 'owner_user_id' => (string) $this->bobId, 'status' => 'available']);
         $bobCopy = $this->countRows("SELECT id FROM copies WHERE owner_user_id = {$this->bobId}");
         self::assertSame(403, $this->request($browser, 'POST', "/copies/{$bobCopy}", ['_csrf' => $token, 'row_version' => $this->rowVersion('copies', (int) $bobCopy), 'owner_user_id' => (string) $this->aliceId, 'status' => 'available'])->status());
-        self::assertSame(303, $this->request($browser, 'POST', "/copies/{$bobCopy}", ['_csrf' => $token, 'row_version' => $this->rowVersion('copies', (int) $bobCopy), 'owner_user_id' => (string) $this->bobId, 'status' => 'on_loan'])->status());
+        self::assertSame(303, $this->request($browser, 'POST', "/copies/{$bobCopy}", ['_csrf' => $token, 'row_version' => $this->rowVersion('copies', (int) $bobCopy), 'owner_user_id' => (string) $this->bobId, 'status' => 'lost'])->status());
         self::assertSame(303, $this->request($browser, 'POST', "/copies/{$bobCopy}/delete", ['_csrf' => $token])->status());
         self::assertSame(0, $this->countRows("SELECT COUNT(*) FROM copies WHERE owner_user_id = {$this->bobId}"));
     }
