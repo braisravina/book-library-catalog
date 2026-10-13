@@ -9,6 +9,9 @@ final class Response
     /** @var array<string, string> */
     private array $headers = [];
 
+    /** @var (\Closure(resource): void)|null writes the body to a stream instead of $body */
+    private ?\Closure $stream = null;
+
     /**
      * @param array<string, string> $headers
      */
@@ -51,6 +54,21 @@ final class Response
     }
 
     /**
+     * A body produced incrementally (e.g. a large export). The writer
+     * receives a writable stream; nothing is buffered in memory when sent.
+     *
+     * @param callable(resource): void $writer
+     * @param array<string, string>    $headers
+     */
+    public static function stream(callable $writer, array $headers, int $status = 200): self
+    {
+        $response = new self('', $status, $headers);
+        $response->stream = \Closure::fromCallable($writer);
+
+        return $response;
+    }
+
+    /**
      * Redirects only to local, absolute paths to rule out open redirects.
      */
     public static function redirect(string $path, int $status = 303): self
@@ -75,9 +93,27 @@ final class Response
         return $this->status;
     }
 
+    /**
+     * The full body. For streamed responses this runs the writer into
+     * memory once (used by tests and HEAD handling, not by send()).
+     */
     public function body(): string
     {
+        if ($this->stream !== null) {
+            $buffer = fopen('php://temp', 'w+b');
+            ($this->stream)($buffer);
+            rewind($buffer);
+            $this->body = (string) stream_get_contents($buffer);
+            fclose($buffer);
+            $this->stream = null;
+        }
+
         return $this->body;
+    }
+
+    public function isStreamed(): bool
+    {
+        return $this->stream !== null;
     }
 
     public function setHeader(string $name, string $value): self
@@ -111,6 +147,13 @@ final class Response
             foreach ($this->headers as $name => $value) {
                 header($name . ': ' . $value, true);
             }
+        }
+        if ($this->stream !== null) {
+            $output = fopen('php://output', 'wb');
+            ($this->stream)($output);
+            fclose($output);
+
+            return;
         }
         echo $this->body;
     }
