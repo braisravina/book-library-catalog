@@ -27,6 +27,7 @@ final class CoverImageProcessor
         private readonly int $maxPixels = 24_000_000,
         private readonly int $outputMaxDimension = 1600,
         ?\Closure $isUploadedFile = null,
+        private readonly int $thumbnailMaxDimension = 480,
     ) {
         $this->isUploadedFile = $isUploadedFile ?? static fn (string $path): bool => is_uploaded_file($path);
     }
@@ -80,14 +81,6 @@ final class CoverImageProcessor
             throw new UploadException('upload.invalid_type');
         }
 
-        $scale = min(1.0, $this->outputMaxDimension / max($width, $height));
-        $outW = max(1, (int) round($width * $scale));
-        $outH = max(1, (int) round($height * $scale));
-        $canvas = imagecreatetruecolor($outW, $outH);
-        // Flatten transparency onto white; covers are always shown opaque.
-        imagefill($canvas, 0, 0, (int) imagecolorallocate($canvas, 255, 255, 255));
-        imagecopyresampled($canvas, $source, 0, 0, 0, 0, $outW, $outH, $width, $height);
-
         $key = bin2hex(random_bytes(16));
         $relative = substr($key, 0, 2) . '/' . $key . '.jpg';
         $target = rtrim($this->storageDirectory, '/') . '/' . $relative;
@@ -95,10 +88,9 @@ final class CoverImageProcessor
         if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
             throw new UploadException('upload.failed');
         }
-        if (!imagejpeg($canvas, $target, 85)) {
-            throw new UploadException('upload.failed');
-        }
-        @chmod($target, 0640);
+
+        [$outW, $outH] = $this->writeResized($source, $width, $height, $this->outputMaxDimension, $target);
+        $this->writeResized($source, $width, $height, $this->thumbnailMaxDimension, self::thumbnailPath($target));
 
         return new StoredImage(
             $relative,
@@ -114,13 +106,70 @@ final class CoverImageProcessor
      * Resolves a stored key to its absolute path, rejecting anything that is
      * not exactly the format store() produces.
      */
-    public function path(string $storageKey): ?string
+    public function path(string $storageKey, bool $thumbnail = false): ?string
+    {
+        $path = $this->unverifiedPath($storageKey);
+        if ($path === null) {
+            return null;
+        }
+        if ($thumbnail) {
+            $thumb = self::thumbnailPath($path);
+            // Fall back to the full image if the thumbnail is missing.
+            $path = is_file($thumb) ? $thumb : $path;
+        }
+
+        return is_file($path) ? $path : null;
+    }
+
+    /**
+     * Removes the image and its thumbnail. Unknown or malformed keys are ignored.
+     */
+    public function delete(string $storageKey): void
+    {
+        $path = $this->unverifiedPath($storageKey);
+        if ($path === null) {
+            return;
+        }
+        foreach ([$path, self::thumbnailPath($path)] as $file) {
+            if (is_file($file)) {
+                @unlink($file);
+            }
+        }
+    }
+
+    private function unverifiedPath(string $storageKey): ?string
     {
         if (!preg_match('#^([0-9a-f]{2})/\1[0-9a-f]{30}\.jpg$#', $storageKey)) {
             return null;
         }
-        $path = rtrim($this->storageDirectory, '/') . '/' . $storageKey;
 
-        return is_file($path) ? $path : null;
+        return rtrim($this->storageDirectory, '/') . '/' . $storageKey;
+    }
+
+    private static function thumbnailPath(string $path): string
+    {
+        return substr($path, 0, -4) . '.thumb.jpg';
+    }
+
+    /**
+     * Re-encodes onto a fresh white canvas (flattening transparency and
+     * dropping all metadata) and writes a JPEG.
+     *
+     * @return array{int, int} output width and height
+     */
+    private function writeResized(\GdImage $source, int $width, int $height, int $maxDimension, string $target): array
+    {
+        $scale = min(1.0, $maxDimension / max($width, $height));
+        $outW = max(1, (int) round($width * $scale));
+        $outH = max(1, (int) round($height * $scale));
+        $canvas = imagecreatetruecolor($outW, $outH);
+        imagefill($canvas, 0, 0, (int) imagecolorallocate($canvas, 255, 255, 255));
+        imagecopyresampled($canvas, $source, 0, 0, 0, 0, $outW, $outH, $width, $height);
+        if (!imagejpeg($canvas, $target, 85)) {
+            throw new UploadException('upload.failed');
+        }
+        @chmod($target, 0640);
+
+        return [$outW, $outH];
     }
 }
