@@ -45,6 +45,13 @@ final class Application
             if ($request->path() === '/health') {
                 return $this->dispatch($request);
             }
+            // Maintenance mode (restores): refuse everything before any session or database work.
+            if ($this->services->maintenance()->isActive()) {
+                $response = $this->renderError(new HttpException(503), $request, false);
+                $response->setHeader('Retry-After', '300');
+
+                return $response;
+            }
             $config = $this->services->config;
             $global = [
                 new SecurityHeaders($config->bool('SECURITY_HSTS', false)),
@@ -77,7 +84,7 @@ final class Application
     public function renderError(\Throwable $e, Request $request, bool $withLayout = true): Response
     {
         $status = $e instanceof HttpException ? $e->status() : 500;
-        if ($status >= 500) {
+        if ($status >= 500 && $status !== 503) {
             // Full detail goes to the server log only.
             error_log(sprintf('[digital-library] %s: %s in %s:%d', $e::class, $e->getMessage(), $e->getFile(), $e->getLine()));
         }

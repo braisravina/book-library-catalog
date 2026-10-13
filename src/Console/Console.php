@@ -26,11 +26,13 @@ final class Console
 
     /**
      * @param resource|null $stdin
+     * @param resource|null $out
+     * @param resource|null $err
      */
-    public function __construct(private readonly Services $services, private $stdin = null)
+    public function __construct(private readonly Services $services, private $stdin = null, $out = null, $err = null)
     {
-        $this->out = STDOUT;
-        $this->err = STDERR;
+        $this->out = $out ?? STDOUT;
+        $this->err = $err ?? STDERR;
         $this->stdin ??= STDIN;
     }
 
@@ -47,6 +49,13 @@ final class Console
                 'migrate' => $this->migrate(),
                 'migrate:status' => $this->migrateStatus(),
                 'user:create' => $this->createUser($options),
+                'backup:create' => $this->operations()->backupCreate($options),
+                'backup:verify' => $this->operations()->backupVerify($options),
+                'backup:restore' => $this->operations()->backupRestore($options),
+                'maintenance:on' => $this->operations()->maintenanceOn($options),
+                'maintenance:off' => $this->operations()->maintenanceOff(),
+                'maintenance:status' => $this->operations()->maintenanceStatus(),
+                'cleanup' => $this->operations()->cleanup($options),
                 'help', '--help', '-h' => $this->help(),
                 default => $this->fail("Unknown command: {$command}\n\n" . $this->usage()),
             };
@@ -70,6 +79,11 @@ final class Console
         }
 
         return $options;
+    }
+
+    private function operations(): Operations
+    {
+        return new Operations($this->services, fn (string $m) => $this->line($m), fn (string $m) => $this->error($m));
     }
 
     private function migrator(): Migrator
@@ -187,6 +201,23 @@ final class Console
               migrate:status    List migrations and whether they are applied
               user:create       Create a user; the password is read from STDIN
                                 --email=EMAIL --name="NAME" [--role=admin|member|viewer] [--locale=en|es|gl]
+
+            Backups (see README "Backup and restore"):
+              backup:create     Write a verified archive of the database and cover files
+                                [--output-dir=DIR] [--allow-missing-covers]
+              backup:verify     Check an archive's structure, manifest and checksums
+                                --file=PATH
+              backup:restore    Restore an archive (requires maintenance mode)
+                                --file=PATH --confirm=DATABASE_NAME [--database=NAME] [--replace]
+                                [--covers-dir=DIR] [--skip-maintenance-check] [--allow-production]
+
+            Maintenance:
+              maintenance:on    Put the web application in maintenance mode (503) [--reason=TEXT]
+              maintenance:off   Leave maintenance mode
+              maintenance:status
+              cleanup           Retention and housekeeping; a dry run unless --apply
+                                [--apply] [--tasks=invitations,login-attempts,temp-files,orphan-covers,backups]
+                                [--delete-orphan-covers]
             TXT;
     }
 
