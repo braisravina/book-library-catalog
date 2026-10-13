@@ -15,7 +15,7 @@ use DigitalLibrary\Validation\Validator;
 
 /**
  * Administrator-managed accounts. Public self-registration does not exist;
- * invitation-based registration is planned on top of the invitations table.
+ * invitees register through InvitationController / RegistrationController.
  */
 final class UserController extends Controller
 {

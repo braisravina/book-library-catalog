@@ -21,8 +21,14 @@ use DigitalLibrary\Catalogue\Repository\WorkRepository;
 use DigitalLibrary\Database\ConnectionFactory;
 use DigitalLibrary\I18n\Translator;
 use DigitalLibrary\Audit\AuditLogRepository;
+use DigitalLibrary\Backup\BackupCreator;
+use DigitalLibrary\Backup\BackupRestorer;
 use DigitalLibrary\Collections\CollectionRepository;
 use DigitalLibrary\Collections\CollectionService;
+use DigitalLibrary\Invitations\InvitationDelivery;
+use DigitalLibrary\Invitations\InvitationRepository;
+use DigitalLibrary\Invitations\InvitationService;
+use DigitalLibrary\Invitations\ManualLinkDelivery;
 use DigitalLibrary\Loans\LoanRepository;
 use DigitalLibrary\Loans\LoanService;
 use DigitalLibrary\Wishlist\WishlistRepository;
@@ -133,6 +139,81 @@ final class Services
             $this->config->int('LOGIN_MAX_ATTEMPTS_PER_IP', 20),
             $this->config->int('LOGIN_LOCKOUT_SECONDS', 900),
         ));
+    }
+
+    /**
+     * Separate limiter for invitation links: failures are keyed by client IP
+     * (stored hashed in login_attempts), never by token.
+     */
+    public function invitationThrottle(): LoginThrottle
+    {
+        return $this->once('invitation-throttle', fn (): LoginThrottle => new LoginThrottle(
+            $this->pdo(),
+            $this->config->int('INVITATION_MAX_FAILURES', 10),
+            $this->config->int('LOGIN_MAX_ATTEMPTS_PER_IP', 20),
+            $this->config->int('LOGIN_LOCKOUT_SECONDS', 900),
+        ));
+    }
+
+    public function maintenance(): MaintenanceMode
+    {
+        return $this->once(MaintenanceMode::class, fn (): MaintenanceMode => new MaintenanceMode(
+            $this->config->get('MAINTENANCE_FLAG_PATH', $this->basePath . '/storage/maintenance.flag'),
+        ));
+    }
+
+    public function backupDirectory(): string
+    {
+        return rtrim((string) $this->config->get('BACKUP_PATH', $this->basePath . '/storage/backups'), '/');
+    }
+
+    public function tempDirectory(): string
+    {
+        return rtrim((string) $this->config->get('TEMP_PATH', $this->basePath . '/storage/tmp'), '/');
+    }
+
+    public function coverDirectory(): string
+    {
+        return rtrim((string) $this->config->get('COVER_STORAGE_PATH', $this->basePath . '/storage/covers'), '/');
+    }
+
+    public function backupCreator(): BackupCreator
+    {
+        return new BackupCreator($this->pdo(), $this->coverDirectory(), $this->basePath . '/public');
+    }
+
+    /**
+     * Restores need DDL rights, so they use the migration account against
+     * the given database.
+     */
+    public function backupRestorer(\PDO $migrationConnection, ?string $coversDirectory = null): BackupRestorer
+    {
+        return new BackupRestorer($migrationConnection, rtrim($coversDirectory ?? $this->coverDirectory(), '/'), $this->tempDirectory());
+    }
+
+    public function invitations(): InvitationRepository
+    {
+        return $this->once(InvitationRepository::class, fn (): InvitationRepository => new InvitationRepository($this->pdo()));
+    }
+
+    public function invitationService(): InvitationService
+    {
+        return $this->once(InvitationService::class, fn (): InvitationService => new InvitationService(
+            $this->pdo(),
+            $this->invitations(),
+            $this->users(),
+            $this->authorizer(),
+            max(1, min(90, $this->config->int('INVITATION_MAX_DAYS', 30))),
+        ));
+    }
+
+    /**
+     * Phase 4B: links are shown to the administrator; swap in an e-mail
+     * implementation here once outbound mail is approved and configured.
+     */
+    public function invitationDelivery(): InvitationDelivery
+    {
+        return $this->once(InvitationDelivery::class, fn (): InvitationDelivery => new ManualLinkDelivery());
     }
 
     public function audit(): AuditLogger

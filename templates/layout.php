@@ -55,9 +55,13 @@ $can = static fn (\DigitalLibrary\Security\Permission $p): bool => $user !== nul
                     <?php if ($can(\DigitalLibrary\Security\Permission::UserManage)): ?>
                         <li><a href="/admin/users"><?= $view->t('nav.users') ?></a></li>
                     <?php endif; ?>
+                    <?php if ($can(\DigitalLibrary\Security\Permission::InvitationManage)): ?>
+                        <li><a href="/admin/invitations"><?= $view->t('nav.invitations') ?></a></li>
+                    <?php endif; ?>
                     <?php if ($can(\DigitalLibrary\Security\Permission::AuditView)): ?>
                         <li><a href="/admin/audit"><?= $view->t('nav.audit') ?></a></li>
                     <?php endif; ?>
+                    <li><a href="/export"><?= $view->t('nav.export') ?></a></li>
                     <li><a href="/account/password"><?= $view->t('nav.account') ?></a></li>
                     <li>
                         <form method="post" action="/logout" class="inline-form">

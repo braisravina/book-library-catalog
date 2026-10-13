@@ -6,6 +6,7 @@ use DigitalLibrary\Core\Services;
 use DigitalLibrary\Http\Controllers\AccountController;
 use DigitalLibrary\Http\Controllers\Admin\AuditController;
 use DigitalLibrary\Http\Controllers\Admin\CategoryController;
+use DigitalLibrary\Http\Controllers\Admin\InvitationController;
 use DigitalLibrary\Http\Controllers\Admin\LocationController;
 use DigitalLibrary\Http\Controllers\Admin\UserController;
 use DigitalLibrary\Http\Controllers\AuthController;
@@ -19,14 +20,17 @@ use DigitalLibrary\Http\Controllers\Catalogue\WorkController;
 use DigitalLibrary\Http\Controllers\HealthController;
 use DigitalLibrary\Http\Controllers\HomeController;
 use DigitalLibrary\Http\Controllers\Library\CollectionController;
+use DigitalLibrary\Http\Controllers\Library\ExportController;
 use DigitalLibrary\Http\Controllers\Library\LoanController;
 use DigitalLibrary\Http\Controllers\Library\WishlistController;
 use DigitalLibrary\Http\Controllers\LocaleController;
+use DigitalLibrary\Http\Controllers\RegistrationController;
 use DigitalLibrary\Http\Router;
 
 /*
- * Route table. Every route other than the landing page, login, locale switch
- * and health check requires authentication; the catalogue is private.
+ * Route table. Every route other than the landing page, login, invitation
+ * acceptance, locale switch and health check requires authentication; the
+ * catalogue is private.
  * Middleware aliases: auth, guest, can:<permission>.
  *
  * Route guards express role-level permissions. Record-level rules (members
@@ -53,6 +57,9 @@ return static function (Router $router, Services $s): void {
     $wishlist = new WishlistController($s);
     $collections = new CollectionController($s);
     $audit = new AuditController($s);
+    $invitations = new InvitationController($s);
+    $registration = new RegistrationController($s);
+    $export = new ExportController($s);
 
     $view = ['auth', 'can:catalogue.view'];
     $create = ['auth', 'can:catalogue.create'];
@@ -67,6 +74,13 @@ return static function (Router $router, Services $s): void {
 
     $router->get('/login', $auth->showLogin(...), ['guest'], 'login');
     $router->post('/login', $auth->login(...), ['guest'], 'login.submit');
+
+    // Invitation-only registration (no open sign-up). The token is only accepted on
+    // GET /invite and is exchanged for session state before any page is shown.
+    $router->get('/invite', $registration->open(...), ['guest'], 'invite.open');
+    $router->get('/invite/accept', $registration->show(...), ['guest'], 'invite.accept');
+    $router->get('/invite/invalid', $registration->invalidPage(...), ['guest'], 'invite.invalid');
+    $router->post('/invite/accept', $registration->accept(...), ['guest'], 'invite.accept.submit');
     $router->post('/logout', $auth->logout(...), ['auth'], 'logout');
 
     $router->get('/account/password', $account->editPassword(...), ['auth'], 'account.password');
@@ -129,6 +143,15 @@ return static function (Router $router, Services $s): void {
     $router->post('/collections/{id:\d+}/items/{edition:\d+}/remove', $collections->removeItem(...), $collectionOwn, 'collections.items.remove');
     $router->post('/collections/{id:\d+}/items/{edition:\d+}/move', $collections->moveItem(...), $collectionOwn, 'collections.items.move');
 
+    // Data export. Personal exports are scoped to the signed-in user (no user
+    // parameter); the catalogue export is administrators only (catalogue.export).
+    $router->get('/export', $export->index(...), $view, 'export.index');
+    $router->get('/export/personal.json', $export->personalJson(...), $view, 'export.personal.json');
+    $router->get('/export/personal/{dataset:[a-z_]+}.csv', $export->personalCsv(...), $view, 'export.personal.csv');
+    $exportAll = ['auth', 'can:catalogue.export'];
+    $router->get('/admin/export/catalogue.json', $export->catalogueJson(...), $exportAll, 'export.catalogue.json');
+    $router->get('/admin/export/{dataset:[a-z_]+}.csv', $export->catalogueCsv(...), $exportAll, 'export.catalogue.csv');
+
     // Audit-log viewer: administrators only, read-only (GET routes only).
     $auditView = ['auth', 'can:audit.view'];
     $router->get('/admin/audit', $audit->index(...), $auditView, 'admin.audit');
@@ -154,6 +177,12 @@ return static function (Router $router, Services $s): void {
     $router->post('/publishers/{id:\d+}/delete', $publishers->destroy(...), $editAny, 'publishers.delete');
 
     // Administration.
+    $invite = ['auth', 'can:invitation.manage'];
+    $router->get('/admin/invitations', $invitations->index(...), $invite, 'admin.invitations');
+    $router->get('/admin/invitations/new', $invitations->create(...), $invite, 'admin.invitations.create');
+    $router->post('/admin/invitations', $invitations->store(...), $invite, 'admin.invitations.store');
+    $router->post('/admin/invitations/{id:\d+}/revoke', $invitations->revoke(...), $invite, 'admin.invitations.revoke');
+    $router->post('/admin/invitations/{id:\d+}/replace', $invitations->replace(...), $invite, 'admin.invitations.replace');
     $router->get('/admin/users', $users->index(...), ['auth', 'can:user.manage'], 'admin.users');
     $router->get('/admin/users/new', $users->create(...), ['auth', 'can:user.manage'], 'admin.users.create');
     $router->post('/admin/users', $users->store(...), ['auth', 'can:user.manage'], 'admin.users.store');
