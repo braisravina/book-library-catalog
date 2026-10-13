@@ -13,6 +13,8 @@ use DigitalLibrary\Catalogue\Isbn;
 use DigitalLibrary\Catalogue\SearchCriteria;
 use DigitalLibrary\Catalogue\Vocabulary;
 use DigitalLibrary\Http\Request;
+use DigitalLibrary\Metadata\BookMetadata;
+use DigitalLibrary\Metadata\MetadataPrefill;
 use DigitalLibrary\Http\Response;
 use DigitalLibrary\Security\Permission;
 use DigitalLibrary\Validation\Validator;
@@ -59,7 +61,28 @@ final class CatalogueController extends CatalogueBaseController
             return $this->duplicate($request, $existing, 200);
         }
 
-        return $this->bookForm($request, WorkInput::blank(), EditionInput::blank($isbn->isbn13));
+        // Not catalogued yet: pre-fill from the metadata providers (if enabled).
+        // Everything is shown for review; nothing is saved until the user submits.
+        $work = WorkInput::blank();
+        $edition = EditionInput::blank($isbn->isbn13);
+        $lookup = null;
+        $metadata = $this->services->metadata();
+        if ($metadata->enabled()) {
+            $result = $metadata->lookup($isbn, $this->user($request)->id);
+            if ($result->found()) {
+                [$work, $edition] = MetadataPrefill::inputs($result->metadata, $isbn);
+            }
+            $lookup = [
+                'found' => $result->found(),
+                'sources' => $result->sources,
+                'failures' => $result->failures,
+                'record_id' => $result->found() ? $result->primaryRecordId : null,
+                'cover_available' => $result->metadata->coverUrl !== '',
+                'import_cover' => true,
+            ];
+        }
+
+        return $this->bookForm($request, $work, $edition, lookup: $lookup);
     }
 
     public function store(Request $request): Response
@@ -92,6 +115,20 @@ final class CatalogueController extends CatalogueBaseController
             $this->validateLocation($copy->locationId(), $validator, 'copy_location_id');
         }
 
+        // A cached provider record is only honoured for the same ISBN.
+        $recordInput = (string) $request->input('metadata_record_id', '');
+        $providerData = null;
+        $recordId = null;
+        if (preg_match('/^[1-9]\d{0,9}$/', $recordInput) && $edition->parsedIsbn() !== null) {
+            $providerData = $this->services->metadata()->cachedRecord((int) $recordInput, $edition->parsedIsbn());
+            $recordId = $providerData === null ? null : (int) $recordInput;
+        }
+        $importCover = $request->input('import_cover') === '1' && $providerData !== null && $providerData->coverUrl !== '';
+        $lookup = $recordId === null ? null : [
+            'found' => true, 'sources' => [], 'failures' => [], 'record_id' => $recordId,
+            'cover_available' => $providerData->coverUrl !== '', 'import_cover' => $importCover,
+        ];
+
         // Books without an ISBN: warn about same-title records unless the
         // user has confirmed this is a different book.
         $titleMatches = [];
@@ -99,11 +136,11 @@ final class CatalogueController extends CatalogueBaseController
             $titleMatches = $this->services->editions()->titleMatches($work->title);
         }
         if ($validator->fails() || $titleMatches !== []) {
-            return $this->bookForm($request, $work, $edition, $validator->errors(), $titleMatches, $addCopy, $copy, 422);
+            return $this->bookForm($request, $work, $edition, $validator->errors(), $titleMatches, $addCopy, $copy, 422, $lookup);
         }
 
         try {
-            $ids = $this->services->books()->createBook($work, $edition, $copy, $user->id);
+            $ids = $this->services->books()->createBook($work, $edition, $copy, $user->id, $recordId);
         } catch (DuplicateIsbnException $e) {
             return $this->duplicate($request, $e->existingEditionId, 409);
         }
@@ -112,6 +149,14 @@ final class CatalogueController extends CatalogueBaseController
         $this->audit($request, 'edition.created', 'edition', $ids['edition_id'], ['isbn_13' => $edition->parsedIsbn()?->isbn13]);
         if ($ids['copy_id'] !== null) {
             $this->audit($request, 'copy.created', 'copy', $ids['copy_id'], ['edition_id' => $ids['edition_id']]);
+        }
+        if ($importCover && $providerData instanceof BookMetadata) {
+            $coverId = $this->services->coverImporter()->import($ids['edition_id'], $providerData, $user->id);
+            if ($coverId !== null) {
+                $this->audit($request, 'cover.imported', 'cover', $coverId, ['edition_id' => $ids['edition_id'], 'metadata_record_id' => $recordId]);
+            } else {
+                $this->flash('info', 'metadata.cover_failed');
+            }
         }
         $this->flash('success', 'catalogue.add.created');
 
@@ -144,6 +189,7 @@ final class CatalogueController extends CatalogueBaseController
         bool $addCopy = true,
         ?CopyInput $copy = null,
         int $status = 200,
+        ?array $lookup = null,
     ): Response {
         return $this->render('catalogue/book_form', [
             'page_title' => 'catalogue.add.title',
@@ -154,6 +200,7 @@ final class CatalogueController extends CatalogueBaseController
             'add_copy' => $addCopy,
             'copy' => $copy,
             'can_add_copy' => $this->can($this->user($request), Permission::CopyManageOwn),
+            'lookup' => $lookup,
         ] + $this->formOptions(), $status);
     }
 }

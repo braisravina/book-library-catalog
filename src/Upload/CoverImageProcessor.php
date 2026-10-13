@@ -54,6 +54,29 @@ final class CoverImageProcessor
         if ($tmp === '' || !($this->isUploadedFile)($tmp)) {
             throw new UploadException('upload.failed');
         }
+
+        return $this->process($tmp);
+    }
+
+    /**
+     * Stores an image the server downloaded itself (metadata cover import).
+     * Exactly the same validation and re-encoding as uploads, minus the
+     * HTTP-upload origin check, which cannot apply to a server-side file.
+     */
+    public function storeDownloaded(string $path): StoredImage
+    {
+        if (!extension_loaded('gd')) {
+            throw new UploadException('upload.unavailable');
+        }
+        if (!is_file($path)) {
+            throw new UploadException('upload.failed');
+        }
+
+        return $this->process($path);
+    }
+
+    private function process(string $tmp): StoredImage
+    {
         $size = filesize($tmp);
         if ($size === false || $size === 0 || $size > $this->maxBytes) {
             throw new UploadException('upload.too_large');

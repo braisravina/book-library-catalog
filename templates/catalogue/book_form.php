@@ -12,6 +12,22 @@
     <?php if ($errors !== []): ?>
         <div class="alert alert-error" role="alert"><?= $view->t('validation.summary') ?></div>
     <?php endif; ?>
+    <?php if ($lookup !== null): ?>
+        <?php if ($lookup['found']): ?>
+            <div class="alert alert-info" role="status">
+                <?php if ($lookup['sources'] !== []): ?>
+                    <?= $view->t('metadata.found', ['sources' => implode(', ', array_map(static fn (string $s): string => $view->trans('metadata.providers.' . $s), $lookup['sources']))]) ?>
+                <?php else: ?>
+                    <?= $view->t('metadata.found_cached') ?>
+                <?php endif; ?>
+                <?= $view->t('metadata.review') ?>
+            </div>
+        <?php elseif ($lookup['failures'] !== []): ?>
+            <div class="alert alert-info" role="status"><?= $view->t('metadata.unavailable') ?></div>
+        <?php else: ?>
+            <div class="alert alert-info" role="status"><?= $view->t('metadata.not_found') ?></div>
+        <?php endif; ?>
+    <?php endif; ?>
     <?php if ($title_matches !== []): ?>
         <div class="alert alert-info" role="alert">
             <p><strong><?= $view->t('catalogue.possible_duplicates.title') ?></strong></p>
@@ -26,11 +42,19 @@
     <?php endif; ?>
     <form method="post" action="/books" class="form" novalidate>
         <?= $view->csrfField() ?>
+        <?php if ($lookup !== null && $lookup['record_id'] !== null): ?>
+            <input type="hidden" name="metadata_record_id" value="<?= (int) $lookup['record_id'] ?>">
+        <?php endif; ?>
         <h2><?= $view->t('catalogue.work.section') ?></h2>
         <?= $view->partial('catalogue/_work_fields', ['work' => $work, 'errors' => $errors, 'category_tree' => $category_tree]) ?>
 
         <h2><?= $view->t('catalogue.edition.section') ?></h2>
         <?= $view->partial('catalogue/_edition_fields', ['edition' => $edition, 'errors' => $errors, 'combined' => true, 'work_title' => $work->title, 'work_subtitle' => $work->subtitle]) ?>
+
+        <?php if ($lookup !== null && $lookup['record_id'] !== null && $lookup['cover_available']): ?>
+            <label class="checkbox"><input type="checkbox" name="import_cover" value="1"<?= $lookup['import_cover'] ? ' checked' : '' ?>> <?= $view->t('metadata.import_cover') ?></label>
+            <p class="hint"><?= $view->t('metadata.import_cover_hint') ?></p>
+        <?php endif; ?>
 
         <?php if ($can_add_copy): ?>
             <h2><?= $view->t('catalogue.copy.section') ?></h2>
