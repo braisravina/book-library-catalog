@@ -6,7 +6,8 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
 - **Stack:** PHP 8.4 (PHP-FPM) · MySQL 8.4 · Nginx (Alpine) · Docker Compose ·
   HTML5/CSS3/vanilla JS. No framework. PDO with prepared statements, Argon2id.
 - **Languages:** English, Spanish (Español), Galician (Galego).
-- **Status:** Phase 1 (foundation) is complete. See [Roadmap](#roadmap).
+- **Status:** Phase 1 (foundation) and Phase 2 (functional catalogue) are
+  implemented. Neither has been deployed. See [Roadmap](#roadmap).
 
 | Document | Contents |
 |---|---|
@@ -14,7 +15,9 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
 | [SECURITY.md](SECURITY.md) | Threat model, implemented controls, deployment checklist |
 | [CLAUDE.md](CLAUDE.md) | Persistent instructions for automated contributors, including Git rules |
 
-## Features (Phase 1)
+## Features
+
+### Foundation (Phase 1)
 
 - Secure sign-in and sign-out with hardened PHP sessions, idle and absolute
   timeouts, and session invalidation on password change.
@@ -28,9 +31,42 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
   collections, covers, external metadata cache, and the audit log.
 - Versioned SQL migrations and a CLI (`bin/console`).
 - Centralised translations (EN/ES/GL) with `Accept-Language` negotiation.
-- ISBN validation and conversion, and a secure cover-image upload pipeline
-  (wired into the UI in Phase 2).
+- ISBN validation and conversion, and a secure cover-image upload pipeline.
 - Responsive, accessible layout with light/dark mode. No inline scripts.
+
+### Catalogue (Phase 2)
+
+- **Add a book** in two steps. First the ISBN is validated (ISBN-10 or
+  ISBN-13) and checked against the catalogue. An existing ISBN, in either
+  form, leads to "view record" or "add another copy" instead of a duplicate.
+  Books without an ISBN are entered manually; same-title records are shown
+  as possible duplicates until the user confirms.
+- **Works and editions:** create, view and edit both. Add further editions
+  (translations, reprints) to a work. Multiple authors with roles (author,
+  editor, compiler) per work, and contributors (translator, illustrator, …)
+  per edition. Authors and publishers are found or created by name.
+- **Physical copies:** owner, hierarchical location, condition, status,
+  signed flag, inventory code, acquisition date and source, price and notes.
+  Several users can own copies of the same edition.
+- **Covers:** authenticated upload (validated and re-encoded, with a
+  thumbnail). Images are served only to signed-in users through
+  `/covers/{id}`. The newest upload becomes the main cover.
+- **Browse and search:** cover-grid and list views, search by title, author,
+  contributor or ISBN (case- and accent-insensitive), filters by category,
+  language, owner and location (sub-categories and sub-locations included),
+  sorting and pagination.
+- **Authors and publishers:** listing and detail pages; editing is
+  admin-only because they are shared records.
+- **Administration:** hierarchical categories and storage locations, with
+  cycle prevention and protection against deleting items in use.
+- **Permissions on every operation:**
+  - Viewers are read-only.
+  - Members add books and edit the works and editions they created.
+  - Members manage only the copies they own, and can't assign copies to
+    other people.
+  - Administrators can do everything; deletion is admin-only and refused
+    while dependent records exist.
+- Every catalogue change is recorded in the audit log.
 
 ## Requirements
 
@@ -84,19 +120,28 @@ The database has no published port. Only the `php` service can reach it.
 - **Unit tests** (`tests/Unit`) need no database. They cover routing, ISBN
   handling, validation, translations, escaping, sessions, CSRF, password
   hashing and policy, authorization, login throttling (SQLite in memory), the
-  SQL splitter, migration-file conventions and cover-image processing (needs `gd`).
+  SQL splitter, migration-file conventions, cover-image processing and
+  thumbnails (needs `gd`), catalogue inputs, trees, slugs and search criteria.
+- **Integration tests** cover the catalogue flows: ISBN duplicate detection,
+  manual entry, editing, editions and copies. They also cover search and
+  filters, including LIKE-wildcard and injection inputs; covers (upload,
+  serving headers, caching, malicious files, cleanup); category and location
+  administration; and a full permission matrix: guest, viewer, member, other
+  member and admin across every catalogue route, IDOR attempts on copies, and
+  CSRF on every POST route.
 - **Integration tests** (`tests/Integration`) run against the MySQL database
   named in `DB_TEST_DATABASE`, using the same least-privilege accounts as the
   application. They rebuild the schema from the migrations and drive the full
   HTTP stack in-process. They're skipped automatically when no test database
   is configured.
 
-**Cover-image (GD) tests.** `CoverImageProcessorTest` (9 tests) needs the
-`gd` extension and is skipped without it. The project's PHP image installs
-`gd`, and CI runs with `--fail-on-skipped`, so these tests must pass on
-PHP 8.4. During Phase 1 they passed only on PHP 8.3 (host); the PHP 8.4
-container used for Phase 1 lacked `gd` (see Known deployment blockers).
-To rerun them on PHP 8.4:
+**Cover-image (GD) tests.** `CoverImageProcessorTest` and the cover
+integration tests need the `gd` extension; they are skipped without it.
+The project's PHP image installs `gd`, and CI runs with
+`--fail-on-skipped`. During Phase 2 the whole suite (182 tests) passed on
+PHP 8.4 with `gd`, with no skips. That run used a sandbox stand-in image,
+not the project's Alpine image (see Known deployment blockers). To rerun
+the GD tests on PHP 8.4:
 
 ```bash
 docker compose exec php php -m | grep -i gd     # must print "gd"
@@ -127,12 +172,16 @@ Production deployment to the Bravina Docker infrastructure is **not** done yet.
 
 These must be resolved and verified before any deployment:
 
-1. **The Alpine PHP image has never been built.** During Phase 1, the build
-   environment could not reach the Alpine package mirrors. Only the
-   Dockerfile lint (`docker build --check`) and the `vendor` stage were
-   verified. Integration tests ran on a Debian-based PHP 8.4 stand-in
-   without `gd`. Build both the `dev` and `prod` targets, then run the full
-   suite with `--fail-on-skipped` inside the built image.
+1. **The Alpine PHP image has never been built successfully.** In Phases 1
+   and 2, real builds of both the `dev` and `prod` targets failed at
+   `apk add`: the cloud build environment's egress policy blocks the Alpine
+   package mirrors (HTTP 403). Only the Dockerfile lint (`docker build
+   --check`) and the `vendor` stage were verified. The test suites ran on
+   sandbox stand-in images: Debian PHP 8.4 in Phase 1, and the official
+   `wordpress:php8.4-fpm` image (PHP 8.4 with GD) plus `pdo_mysql` in
+   Phase 2. Both used the project's own `php.ini`, FPM pool and entrypoint.
+   Build both targets on a machine with normal network access, then run
+   the full suite with `--fail-on-skipped` inside the built image.
 2. **Client IP forwarding is not configured.** See
    [ARCHITECTURE.md › Client IP behind a reverse proxy](ARCHITECTURE.md#client-ip-behind-a-reverse-proxy).
 3. **The CI workflow has never been executed.**
@@ -153,7 +202,8 @@ docker/                  PHP-FPM image, Nginx vhost, MySQL init and config
 lang/{en,es,gl}.php      Translation catalogues
 public/                  Web root: front controller and static assets only
 src/                     Application code (PSR-4, namespace DigitalLibrary\)
-storage/                 Runtime files outside the web root (covers, logs)
+storage/                 Runtime files outside the web root (covers, logs);
+                         in development, storage/covers is the covers-data volume
 templates/               Plain-PHP templates; all output escaped
 tests/                   PHPUnit unit and integration suites
 ```
@@ -162,12 +212,13 @@ tests/                   PHPUnit unit and integration suites
 
 - **Phase 1 — Foundation (done):** infrastructure, schema, authentication,
   authorization, security controls, i18n, tests and docs.
-- **Phase 2 — Catalogue:** add/edit works and editions, ISBN duplicate check
-  ("view existing" or "add another copy"), authors and publishers, physical
-  copies with owner and location, cover upload and serving, cover grid and
-  list views, search (title/author/ISBN) and filters (category, language,
-  owner, location), admin management of locations and categories, user
-  deactivation and role changes.
+- **Phase 2 — Catalogue (done):** works and editions, ISBN duplicate
+  check, authors and publishers, physical copies with owner and location,
+  cover upload and serving, cover-grid and list views, search and filters,
+  and admin management of categories and locations.
+- **Next (proposed):** user deactivation, role changes and admin password
+  resets; audit-database separation (see SECURITY.md); merging duplicate
+  authors and publishers.
 - **Phase 3 — Metadata providers:** Open Library and Google Books lookups via
   a provider interface, cached in `metadata_records`, with a review step
   before saving. Remote covers are downloaded and re-encoded locally.

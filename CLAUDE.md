@@ -43,8 +43,13 @@ These rules apply to every commit, in every phase, with no exceptions.
 
 ## Working agreements
 
-- Branches: Phase 1 is integrated locally on `phase-1`. Each later phase
-  starts from the owner's committed result of the previous phase.
+- Branches: Phase 1 is integrated locally on `phase-1`; Phase 2 on
+  `phase-2`, branched from the committed `phase-1`. Each later phase starts
+  from the owner's committed result of the previous phase. Until the owner
+  reports a commit hash, identify a phase's base by its **tree hash**:
+  - Phase 1: `f6805793e10db5e24f05d1a6534221da4ad2e2e4`
+  - Phase 2: recorded in the Phase 2 delivery notes.
+- Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
   phase until the owner explicitly authorizes it.
@@ -80,13 +85,29 @@ These rules apply to every commit, in every phase, with no exceptions.
 - **Audit:** record security-relevant and catalogue-changing actions with
   `AuditLogger::log()`. Never pass secrets in details.
 - Keep ISBNs normalised through `Catalogue\Isbn` (ISBN-13 is the duplicate key).
+- **Catalogue layering:**
+  - Controllers handle HTTP, permissions and audit.
+  - `Catalogue\Input\*` parse and validate request data.
+  - `Catalogue\BookService` runs multi-table writes in one transaction.
+  - `Catalogue\Repository\*` hold all SQL.
+  - Dynamic SQL must bind every value through `Database\Params` (unique
+    placeholder names; `Params::likeContains()` for LIKE).
+- Record-level checks: `Authorizer::canEditRecord()` for works and editions
+  (by `created_by`), `Authorizer::canManageCopy()` for copies (by owner).
+  Assigning a copy to another owner requires `copy.manage_any`.
+- Templates: reuse `templates/partials/*` (`input`, `select`,
+  `tree_options`, `people_fields`, `cover`, `pagination`). Partials receive
+  only the data passed to them. Use `$view->trans()` (unescaped) only when
+  the value goes into a partial or helper that escapes it.
+- Cover files are only ever reached through `CoverImageProcessor::path()` /
+  `delete()`, never by building paths from input.
 
 ## Commands
 
 ```bash
 docker compose up -d --wait
 docker compose exec php php bin/console migrate
-docker compose exec php vendor/bin/phpunit                 # all tests
+docker compose exec php vendor/bin/phpunit --fail-on-skipped   # all tests
 docker compose exec php vendor/bin/phpunit --testsuite unit
 docker compose exec php composer lint
 ```

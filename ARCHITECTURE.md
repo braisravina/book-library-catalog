@@ -36,14 +36,14 @@ Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ ngi
 | Namespace | Responsibility |
 |---|---|
 | `Core` | `Application` (kernel and middleware pipeline), `Services` (container), `Config`/`DotEnv`, `Bootstrap` |
-| `Http` | `Request`, `Response`, `Router`, `HttpException`, middleware, controllers |
+| `Http` | `Request`, `Response`, `Router`, `HttpException`, middleware, controllers (`Controllers\Catalogue\*`, `Controllers\Admin\*`) |
 | `Security` | `Session`, `Csrf`, `PasswordHasher`, `PasswordPolicy`, `LoginThrottle`, `Role`, `Permission`, `Authorizer` |
 | `Auth` | `User`, `UserRepository`, `AuthService` |
 | `Database` | `ConnectionFactory`, `Migrator`, `SqlSplitter`, `Transaction` |
 | `I18n` | `Translator`, `LocaleNegotiator` |
 | `View` | `View` (plain-PHP templates with escaping helpers) |
 | `Validation` | `Validator` (declarative rules → translation keys) |
-| `Catalogue` | `Isbn` value object (more domain services in Phase 2) |
+| `Catalogue` | `Isbn`, `Vocabulary`, `Tree`, `Slug`, inputs (`Input\*`), repositories (`Repository\*`), `BookService` (transactional writes, duplicate detection), `CatalogueSearch` + `SearchCriteria` |
 | `Upload` | `CoverImageProcessor` (validated, re-encoded image storage) |
 | `Audit` | `AuditLogger` |
 | `Console` | `bin/console` commands |
@@ -138,6 +138,97 @@ Delete behaviour: catalogue records `RESTRICT` deletion while copies or
 editions reference them. Users are deactivated rather than deleted, so copies
 `RESTRICT` user deletion. Join tables cascade.
 
+## Catalogue (Phase 2)
+
+### Layers
+
+```
+Controller (HTTP, permissions, audit)  ──▶  Input\* (parse + validate request data)
+     │                                          │
+     ├──▶ BookService (multi-table writes in one transaction, ISBN duplicate rules)
+     │          └──▶ Repository\* (one class per aggregate; SQL lives only here)
+     └──▶ CatalogueSearch (dynamic query built with Database\Params)
+```
+
+- **Inputs** (`WorkInput`, `EditionInput`, `CopyInput`, `People`) turn
+  request data into typed values and validation errors (translation keys),
+  and map validated values to column arrays. Repositories never see raw
+  request data.
+- **Repositories** use prepared statements only. Dynamic SQL
+  (`CatalogueSearch`) adds every value through `Database\Params`, which
+  gives each placeholder a unique name, because native MySQL prepares
+  can't reuse one. It also escapes LIKE wildcards so `%` and `_` match
+  literally. Column and table names are never taken from input.
+- **BookService** wraps each multi-table write (work + authors + categories
+  + edition + contributors + optional first copy) in
+  `Transaction::run()`. ISBN uniqueness is checked first and also enforced
+  by the unique indexes; a concurrent duplicate insert is converted into
+  the same `DuplicateIsbnException`, never a 500.
+
+### Adding a book
+
+1. `GET /books/new` asks for an ISBN, or "book without ISBN".
+2. `GET /books/new?isbn=…` validates and normalises it to ISBN-13. If an
+   edition already has it (whichever form was typed), the duplicate page
+   offers **View record** or **Add another copy**. Otherwise the full form
+   opens with the ISBN pre-filled.
+3. `POST /books` creates the work, edition, authors, publisher, categories
+   and, if ticked, the user's first copy. Without an ISBN, editions with
+   the same title (case- and accent-insensitive) are listed as possible
+   duplicates until the user ticks "this is a different book".
+
+Authors and publishers are matched by name, case-insensitively but
+**accent-sensitively** (`utf8mb4_0900_as_ci`), so "José" and "Jose"
+remain distinct people. Author `sort_name` defaults to "Surname, Given
+names" and is editable, because compound Spanish and Galician surnames
+defeat any heuristic.
+
+### Search and filters (`GET /books`)
+
+- Text search splits the query into up to 8 words. Every word must match
+  the edition or work title or subtitle, the original title, an author or
+  contributor name, or a partial ISBN. LIKE with the default
+  `utf8mb4_0900_ai_ci` collation makes it case- and accent-insensitive
+  ("garcia" finds "García"). A query that parses as a full ISBN is an exact
+  ISBN-13 lookup.
+- FULLTEXT indexes exist, but LIKE is used deliberately: at personal-library
+  scale it's fast enough, and it avoids stop-word and minimum-token-length
+  surprises.
+- Category and location filters include descendants (trees are small and
+  loaded whole; `Catalogue\Tree`).
+- Owner and location filters must match **the same copy**.
+- Results are paginated at 24 per page; out-of-range pages clamp to the
+  last page. Malformed query parameters fall back to defaults.
+
+### Covers
+
+- `POST /editions/{id}/covers` (record-level edit permission) runs the
+  upload through `CoverImageProcessor`, which writes a re-encoded JPEG (at
+  most 1600 px) and a thumbnail (at most 480 px) under a random key. The
+  metadata row is inserted in a transaction and the new cover becomes
+  primary. If the database write fails, the files are deleted.
+- `GET /covers/{id}[?size=thumb]` (signed-in users with `catalogue.view`)
+  streams the file with `Content-Type: image/jpeg`, `nosniff`,
+  `Content-Security-Policy: default-src 'none'; sandbox`,
+  `Cache-Control: private`, and an ETag (304 on revalidation).
+- Deleting a cover removes both files and promotes the newest remaining
+  cover to primary.
+- Storage is `storage/covers` (`COVER_STORAGE_PATH`). In development it is
+  the `covers-data` named volume; the dev entrypoint hands it to `www-data`.
+
+### Route permissions
+
+| Area | Route guard | Record-level rule in the controller |
+|---|---|---|
+| Browse, search, view works/editions/authors/publishers/covers | `catalogue.view` | — |
+| Add book, add edition to a work | `catalogue.create` | — |
+| Edit edition/work, upload/delete covers | `catalogue.edit_own` | creator, or `catalogue.edit_any` |
+| Delete edition/work | `catalogue.delete` | refused while copies/editions exist |
+| Add copy | `copy.manage_own` | owner must be self unless `copy.manage_any` |
+| Edit/delete copy | `copy.manage_own` | owner (or `copy.manage_any`); transferring ownership needs `copy.manage_any` |
+| Edit authors/publishers | `catalogue.edit_any` | — (shared records) |
+| Categories / locations admin | `category.manage` / `location.manage` | no cycles; refuse deletion of parents or items in use |
+
 ## Database access
 
 | Account | Privileges | Used by |
@@ -158,6 +249,10 @@ reduced to a SQLSTATE before they can reach any output. Multi-step writes use
   checksum. `migrate:status` reports `MODIFIED` if an applied file has since
   been edited. Never edit an applied migration; add a new one.
 - Runs are serialised with `GET_LOCK`.
+- Phase 2 added `2026_10_10_000005_add_catalogue_browse_indexes.sql`
+  (indexes only: author names, edition titles and creation dates, copies
+  by edition and owner). It applies cleanly to a database at the Phase 1
+  schema, which was verified in the Phase 2 session.
 - MySQL commits DDL implicitly, so a migration can't be rolled back as a
   unit. Keep each file small and focused. If one fails, fix forward with a
   new migration, or repair manually and re-run.

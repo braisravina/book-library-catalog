@@ -53,6 +53,22 @@ uploads, a WAF, and hardening of the host and reverse proxy.
   inactive users have no rights.
 - Templates hide controls the user can't use, but **never** decide access.
 
+### Catalogue authorization (Phase 2)
+
+Every catalogue route has a role guard. Every action on a specific record
+also runs an object-level check in the controller:
+
+- members may edit only works and editions they created;
+- members may manage only copies they own, may not create a copy owned by
+  someone else, and may not transfer their copy to someone else;
+- only admins edit shared authors and publishers, delete records, and
+  manage categories and locations.
+
+The full matrix is in ARCHITECTURE.md › Route permissions. Integration
+tests check it for guests, viewers, two different members and admins. That
+includes IDOR attempts on copy ids, attempts to forge `owner_user_id`, and
+inactive or unknown owners.
+
 ### Request integrity
 
 - **CSRF:** a per-session synchroniser token (`hash_equals`) is required on
@@ -71,6 +87,11 @@ uploads, a WAF, and hardening of the host and reverse proxy.
   CSP (`default-src 'self'`, no `unsafe-inline`, `object-src 'none'`,
   `frame-ancestors 'none'`, `base-uri 'none'`, `form-action 'self'`)
   provides defence in depth.
+- **Catalogue search** builds SQL dynamically but binds every value
+  (`Database\Params`). LIKE wildcards in user input are escaped, so `%`
+  doesn't match everything. Tests cover quote and comment injection
+  attempts. Numeric ids from routes and filters must match `^[1-9]\d{0,9}$`
+  or the request gets a 404, or the value falls back to a default.
 - **Template and locale names** are restricted to a safe character set, so
   path traversal isn't possible.
 - **Input validation:** server-side `Validation\Validator`. Errors are
@@ -85,9 +106,17 @@ uploads, a WAF, and hardening of the host and reverse proxy.
   guard against decompression bombs.
 - **Every image is fully re-encoded** with GD into a new JPEG. This strips
   metadata and any appended or polyglot payload.
-- Files are stored **outside the web root** under random 128-bit names, and
-  will be served only through an authorised controller (Phase 2). Storage
-  keys are validated against a strict pattern.
+- Files are stored **outside the web root** under random 128-bit names. A
+  smaller re-encoded thumbnail is stored alongside. Storage keys are
+  validated against a strict pattern before any filesystem access.
+- **Serving (Phase 2):** `GET /covers/{id}` requires a signed-in user with
+  `catalogue.view` and looks covers up by numeric id only. It responds with
+  `image/jpeg`, `nosniff`, `Content-Security-Policy: default-src 'none';
+  sandbox` and `Cache-Control: private`. Guests are redirected to sign-in
+  and never receive image bytes.
+- Only users who can edit the edition may upload or delete its covers.
+  Failed database writes remove the stored files; deleting a cover removes
+  both files.
 
 ### Infrastructure
 
@@ -138,6 +167,25 @@ uploads, a WAF, and hardening of the host and reverse proxy.
 - Native PHP sessions are file-based inside the PHP container. Use a
   persistent volume or a DB-backed handler if you run multiple PHP replicas.
 
+### Phase 2 notes
+
+- Every signed-in user, viewers included, can see who owns each copy and
+  where it's stored (display names only, never e-mail addresses). That
+  suits a private shared household catalogue; reconsider if the user base
+  widens.
+- Uploads larger than PHP's `post_max_size` (8 MB) arrive without a body, so
+  they fail the CSRF check and show the "form expired" page rather than a
+  size error. Files between `UPLOAD_MAX_BYTES` (5 MB) and that limit get a
+  proper size error.
+- Catalogue edits have no optimistic-locking check yet. If two people edit
+  the same record at once, the last save wins (both are audited).
+- Search uses LIKE with leading wildcards, which scans the editions table.
+  That's fine at personal-library scale; revisit beyond tens of thousands
+  of editions.
+- Audit actions added in Phase 2: `work.*`, `edition.*`, `copy.*`,
+  `cover.uploaded`/`cover.deleted`, `author.updated`, `publisher.updated`,
+  `category.*`, `location.*`.
+
 ## Audit log integrity review
 
 **Current state.** The runtime account holds `SELECT, INSERT, UPDATE,
@@ -172,7 +220,9 @@ integration of Phase 1; awaiting the owner's decision.
 - [ ] Trusted-proxy (`set_real_ip_from`) configured with the verified proxy
       address only, and verified via the audit log
 - [ ] Alpine `dev` and `prod` images built; full test suite passes inside
-      them with `--fail-on-skipped` (includes the 9 GD tests)
+      them with `--fail-on-skipped` (includes all GD and cover tests)
+- [ ] Persistent volume for `storage/covers` mounted, writable by `www-data`
+      and included in backups
 - [ ] CI workflow executed and green
 - [ ] Audit-log integrity decision implemented (see review above)
 - [ ] `prod` image target in use (no bind mounts, no Composer, runs as `www-data`)
