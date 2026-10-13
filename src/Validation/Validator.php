@@ -51,6 +51,20 @@ final class Validator
         $this->errors[$field][] = $key;
     }
 
+    private static function between(string $value, string $range): bool
+    {
+        [$min, $max] = array_map('intval', explode(',', $range, 2) + [1 => PHP_INT_MAX]);
+
+        return preg_match('/^-?\d{1,10}$/', $value) === 1 && (int) $value >= $min && (int) $value <= $max;
+    }
+
+    private static function isDate(string $value): bool
+    {
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+
+        return $date !== false && $date->format('Y-m-d') === $value;
+    }
+
     private function run(): void
     {
         foreach ($this->rules as $field => $rules) {
@@ -73,6 +87,9 @@ final class Validator
                     'in' => in_array($value, explode(',', (string) $arg), true),
                     'integer' => preg_match('/^\d+$/', $value) === 1,
                     'no_control' => preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', $value) === 0,
+                    'between' => self::between($value, (string) $arg),
+                    'date' => self::isDate($value),
+                    'money' => preg_match('/^\d{1,7}(?:[.,]\d{1,2})?$/', $value) === 1,
                     default => throw new \InvalidArgumentException('Unknown validation rule ' . $name),
                 };
                 if (!$ok) {
