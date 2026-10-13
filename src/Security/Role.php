@@ -22,6 +22,9 @@ enum Role: string
                 Permission::CatalogueCreate,
                 Permission::CatalogueEditOwn,
                 Permission::CopyManageOwn,
+                Permission::LoanManageOwn,
+                Permission::WishlistManageOwn,
+                Permission::CollectionManageOwn,
             ],
             self::Viewer => [
                 Permission::CatalogueView,

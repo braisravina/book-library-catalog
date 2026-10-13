@@ -18,4 +18,9 @@ enum Permission: string
     case UserManage = 'user.manage';
     case SettingsManage = 'settings.manage';
     case AuditView = 'audit.view';
+    case LoanManageOwn = 'loan.manage_own';
+    case LoanManageAny = 'loan.manage_any';
+    case WishlistManageOwn = 'wishlist.manage_own';
+    case CollectionManageOwn = 'collection.manage_own';
+    case CollectionManageAny = 'collection.manage_any';
 }
