@@ -23,4 +23,6 @@ enum Permission: string
     case WishlistManageOwn = 'wishlist.manage_own';
     case CollectionManageOwn = 'collection.manage_own';
     case CollectionManageAny = 'collection.manage_any';
+    case InvitationManage = 'invitation.manage';
+    case CatalogueExport = 'catalogue.export';
 }
