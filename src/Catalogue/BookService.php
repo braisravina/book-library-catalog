@@ -40,14 +40,17 @@ final class BookService
      *
      * @throws DuplicateIsbnException
      */
-    public function createBook(WorkInput $work, EditionInput $edition, ?CopyInput $copy, int $userId): array
+    public function createBook(WorkInput $work, EditionInput $edition, ?CopyInput $copy, int $userId, ?int $metadataRecordId = null): array
     {
-        return $this->guardDuplicate(fn (): array => Transaction::run($this->pdo, function () use ($work, $edition, $copy, $userId): array {
+        return $this->guardDuplicate(fn (): array => Transaction::run($this->pdo, function () use ($work, $edition, $copy, $userId, $metadataRecordId): array {
             $this->assertIsbnFree($edition, null);
             $workId = $this->works->create($work->toRecord(), $userId);
             $this->works->setAuthors($workId, $this->resolvePeople($work->authors, $userId));
             $this->works->setCategories($workId, $work->categoryIds);
             $editionId = $this->insertEdition($workId, $edition, $userId);
+            if ($metadataRecordId !== null) {
+                $this->editions->linkMetadata($editionId, $metadataRecordId);
+            }
             $copyId = $copy === null ? null : $this->copies->create($editionId, $copy->toRecord(), $userId);
 
             return ['work_id' => $workId, 'edition_id' => $editionId, 'copy_id' => $copyId];
@@ -68,20 +71,28 @@ final class BookService
 
     /**
      * @throws DuplicateIsbnException
+     * @throws EditConflictException  the edition changed after the form was loaded
      */
-    public function updateEdition(int $editionId, EditionInput $edition, int $userId): void
+    public function updateEdition(int $editionId, EditionInput $edition, int $userId, int $expectedVersion): void
     {
-        $this->guardDuplicate(fn () => Transaction::run($this->pdo, function () use ($editionId, $edition, $userId): void {
+        $this->guardDuplicate(fn () => Transaction::run($this->pdo, function () use ($editionId, $edition, $userId, $expectedVersion): void {
             $this->assertIsbnFree($edition, $editionId);
-            $this->editions->update($editionId, $edition->toRecord($this->publisherId($edition)), $userId);
+            if (!$this->editions->update($editionId, $edition->toRecord($this->publisherId($edition)), $userId, $expectedVersion)) {
+                throw new EditConflictException();
+            }
             $this->editions->setContributors($editionId, $this->resolvePeople($edition->contributors, $userId));
         }));
     }
 
-    public function updateWork(int $workId, WorkInput $work, int $userId): void
+    /**
+     * @throws EditConflictException the work changed after the form was loaded
+     */
+    public function updateWork(int $workId, WorkInput $work, int $userId, int $expectedVersion): void
     {
-        Transaction::run($this->pdo, function () use ($workId, $work, $userId): void {
-            $this->works->update($workId, $work->toRecord(), $userId);
+        Transaction::run($this->pdo, function () use ($workId, $work, $userId, $expectedVersion): void {
+            if (!$this->works->update($workId, $work->toRecord(), $userId, $expectedVersion)) {
+                throw new EditConflictException();
+            }
             $this->works->setAuthors($workId, $this->resolvePeople($work->authors, $userId));
             $this->works->setCategories($workId, $work->categoryIds);
         });

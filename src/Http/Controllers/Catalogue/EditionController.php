@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DigitalLibrary\Http\Controllers\Catalogue;
 
 use DigitalLibrary\Catalogue\DuplicateIsbnException;
+use DigitalLibrary\Catalogue\EditConflictException;
 use DigitalLibrary\Catalogue\Input\EditionInput;
 use DigitalLibrary\Catalogue\Tree;
 use DigitalLibrary\Database\Transaction;
@@ -80,11 +81,14 @@ final class EditionController extends CatalogueBaseController
         }
 
         try {
-            $this->services->books()->updateEdition((int) $edition['id'], $input, $this->user($request)->id);
+            $this->services->books()->updateEdition((int) $edition['id'], $input, $this->user($request)->id, $this->expectedVersion($request));
         } catch (DuplicateIsbnException $e) {
             $validator->addError('isbn', 'validation.isbn_taken');
 
             return $this->form($edition, $input, $validator->errors(), 409, $e->existingEditionId);
+        } catch (EditConflictException) {
+            // Keep the stale version: saving again must not silently overwrite.
+            return $this->form(['row_version' => $this->expectedVersion($request)] + $edition, $input, [], 409, null, true);
         }
         $this->audit($request, 'edition.updated', 'edition', (int) $edition['id']);
         $this->flash('success', 'catalogue.saved');
@@ -145,11 +149,12 @@ final class EditionController extends CatalogueBaseController
      * @param array<string, mixed>        $edition
      * @param array<string, list<string>> $errors
      */
-    private function form(array $edition, EditionInput $input, array $errors, int $status = 200, ?int $duplicateId = null): Response
+    private function form(array $edition, EditionInput $input, array $errors, int $status = 200, ?int $duplicateId = null, bool $conflict = false): Response
     {
         return $this->render('catalogue/edition_form', [
             'page_title' => 'catalogue.edition.edit_title',
             'edition' => $edition,
+            'conflict' => $conflict,
             'input' => $input,
             'errors' => $errors,
             'duplicate_id' => $duplicateId,

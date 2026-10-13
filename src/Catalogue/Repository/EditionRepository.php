@@ -77,19 +77,23 @@ final class EditionRepository extends Repository
     }
 
     /**
+     * Conditional on the version the edit was based on.
+     *
      * @param array<string, mixed> $data keys from FIELDS
+     *
+     * @return bool false when the record changed in the meantime
      */
-    public function update(int $id, array $data, int $userId): void
+    public function update(int $id, array $data, int $userId, int $expectedVersion): bool
     {
-        $this->run(
+        return $this->run(
             'UPDATE editions SET title = :title, subtitle = :subtitle, publisher_id = :publisher_id,
                     publication_year = :publication_year, edition_statement = :edition_statement, language = :language,
                     page_count = :page_count, format = :format, isbn_13 = :isbn_13, isbn_10 = :isbn_10,
                     legal_deposit = :legal_deposit, description = :description,
-                    updated_by = :updated_by, updated_at = UTC_TIMESTAMP()
-             WHERE id = :id',
-            self::only($data) + ['updated_by' => $userId, 'id' => $id],
-        );
+                    updated_by = :updated_by, updated_at = UTC_TIMESTAMP(), row_version = row_version + 1
+             WHERE id = :id AND row_version = :expected',
+            self::only($data) + ['updated_by' => $userId, 'id' => $id, 'expected' => $expectedVersion],
+        )->rowCount() === 1;
     }
 
     /**
@@ -122,6 +126,14 @@ final class EditionRepository extends Repository
                 ['e' => $editionId, 'a' => $c['author_id'], 'r' => $c['role'], 'p' => $position],
             );
         }
+    }
+
+    /**
+     * Records which cached provider payload an edition was created from.
+     */
+    public function linkMetadata(int $editionId, int $recordId): void
+    {
+        $this->run('UPDATE editions SET metadata_record_id = :r WHERE id = :e', ['r' => $recordId, 'e' => $editionId]);
     }
 
     public function copyCount(int $id): int

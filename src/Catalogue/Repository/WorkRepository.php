@@ -31,17 +31,22 @@ final class WorkRepository extends Repository
     }
 
     /**
+     * Conditional on the version the edit was based on.
+     *
      * @param array<string, mixed> $data keys from FIELDS
+     *
+     * @return bool false when the record changed in the meantime
      */
-    public function update(int $id, array $data, int $userId): void
+    public function update(int $id, array $data, int $userId, int $expectedVersion): bool
     {
-        $this->run(
+        return $this->run(
             'UPDATE works SET title = :title, subtitle = :subtitle, original_title = :original_title,
                     original_language = :original_language, first_published_year = :first_published_year,
-                    description = :description, updated_by = :updated_by, updated_at = UTC_TIMESTAMP()
-             WHERE id = :id',
-            self::only($data) + ['updated_by' => $userId, 'id' => $id],
-        );
+                    description = :description, updated_by = :updated_by, updated_at = UTC_TIMESTAMP(),
+                    row_version = row_version + 1
+             WHERE id = :id AND row_version = :expected',
+            self::only($data) + ['updated_by' => $userId, 'id' => $id, 'expected' => $expectedVersion],
+        )->rowCount() === 1;
     }
 
     /**

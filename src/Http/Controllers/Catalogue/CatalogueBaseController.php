@@ -38,6 +38,17 @@ abstract class CatalogueBaseController extends Controller
         }
     }
 
+    /**
+     * The record version a submitted edit form was based on (0 if missing,
+     * which never matches and therefore reports a conflict).
+     */
+    protected function expectedVersion(\DigitalLibrary\Http\Request $request): int
+    {
+        $value = (string) $request->input('row_version', '');
+
+        return preg_match('/^[1-9]\d{0,9}$/', $value) ? (int) $value : 0;
+    }
+
     protected function validateLocation(?int $locationId, Validator $validator, string $field = 'location_id'): void
     {
         if ($locationId !== null && !$this->services->locations()->exists($locationId)) {

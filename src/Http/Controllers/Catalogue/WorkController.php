@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DigitalLibrary\Http\Controllers\Catalogue;
 
 use DigitalLibrary\Catalogue\DuplicateIsbnException;
+use DigitalLibrary\Catalogue\EditConflictException;
 use DigitalLibrary\Catalogue\Input\EditionInput;
 use DigitalLibrary\Catalogue\Input\WorkInput;
 use DigitalLibrary\Http\Request;
@@ -61,7 +62,11 @@ final class WorkController extends CatalogueBaseController
         if ($validator->fails()) {
             return $this->form($work, $input, $validator->errors(), 422);
         }
-        $this->services->books()->updateWork((int) $work['id'], $input, $this->user($request)->id);
+        try {
+            $this->services->books()->updateWork((int) $work['id'], $input, $this->user($request)->id, $this->expectedVersion($request));
+        } catch (EditConflictException) {
+            return $this->form(['row_version' => $this->expectedVersion($request)] + $work, $input, [], 409, true);
+        }
         $this->audit($request, 'work.updated', 'work', (int) $work['id']);
         $this->flash('success', 'catalogue.saved');
 
@@ -144,11 +149,12 @@ final class WorkController extends CatalogueBaseController
      * @param array<string, mixed>        $work
      * @param array<string, list<string>> $errors
      */
-    private function form(array $work, WorkInput $input, array $errors, int $status = 200): Response
+    private function form(array $work, WorkInput $input, array $errors, int $status = 200, bool $conflict = false): Response
     {
         return $this->render('catalogue/work_form', [
             'page_title' => 'catalogue.work.edit_title',
             'work' => $work,
+            'conflict' => $conflict,
             'input' => $input,
             'errors' => $errors,
         ] + $this->formOptions(), $status);
@@ -163,6 +169,7 @@ final class WorkController extends CatalogueBaseController
         return $this->render('catalogue/edition_form', [
             'page_title' => 'catalogue.edition.new_title',
             'edition' => ['work_id' => $work['id'], 'work_title' => $work['title']],
+            'conflict' => false,
             'input' => $input,
             'errors' => $errors,
             'duplicate_id' => $duplicateId,

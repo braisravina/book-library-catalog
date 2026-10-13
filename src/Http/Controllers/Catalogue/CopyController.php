@@ -74,7 +74,10 @@ final class CopyController extends CatalogueBaseController
         if ($validator->fails()) {
             return $this->form($request, $edition, $copy, $input, $validator->errors(), 422);
         }
-        $this->services->copies()->update((int) $copy['id'], $input->toRecord(), $user->id);
+        if (!$this->services->copies()->update((int) $copy['id'], $input->toRecord(), $user->id, $this->expectedVersion($request))) {
+            // Keep the stale version: saving again must not silently overwrite.
+            return $this->form($request, $edition, ['row_version' => $this->expectedVersion($request)] + $copy, $input, [], 409, true);
+        }
         $details = ['edition_id' => (int) $copy['edition_id']];
         if ((int) $copy['owner_user_id'] !== $input->ownerId()) {
             $details['owner_changed'] = ['from' => (int) $copy['owner_user_id'], 'to' => $input->ownerId()];
@@ -146,7 +149,7 @@ final class CopyController extends CatalogueBaseController
      * @param array<string, mixed>|null   $copy
      * @param array<string, list<string>> $errors
      */
-    private function form(Request $request, array $edition, ?array $copy, CopyInput $input, array $errors, int $status = 200): Response
+    private function form(Request $request, array $edition, ?array $copy, CopyInput $input, array $errors, int $status = 200, bool $conflict = false): Response
     {
         $user = $this->user($request);
         $canChooseOwner = $this->can($user, Permission::CopyManageAny);
@@ -155,6 +158,7 @@ final class CopyController extends CatalogueBaseController
             'page_title' => $copy === null ? 'catalogue.copy.new_title' : 'catalogue.copy.edit_title',
             'edition' => $edition,
             'copy' => $copy,
+            'conflict' => $conflict,
             'input' => $input,
             'errors' => $errors,
             'owners' => $canChooseOwner

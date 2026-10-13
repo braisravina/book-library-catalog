@@ -51,18 +51,23 @@ final class CopyRepository extends Repository
     }
 
     /**
+     * Conditional on the version the edit was based on.
+     *
      * @param array<string, mixed> $data keys from FIELDS
+     *
+     * @return bool false when the record changed in the meantime
      */
-    public function update(int $id, array $data, int $userId): void
+    public function update(int $id, array $data, int $userId, int $expectedVersion): bool
     {
-        $this->run(
+        return $this->run(
             'UPDATE copies SET owner_user_id = :owner_user_id, location_id = :location_id, inventory_code = :inventory_code,
                     copy_condition = :copy_condition, status = :status, is_signed = :is_signed, acquired_on = :acquired_on,
                     acquisition_source = :acquisition_source, purchase_price_cents = :purchase_price_cents,
-                    currency = :currency, notes = :notes, updated_by = :updated_by, updated_at = UTC_TIMESTAMP()
-             WHERE id = :id',
-            self::only($data) + ['updated_by' => $userId, 'id' => $id],
-        );
+                    currency = :currency, notes = :notes, updated_by = :updated_by, updated_at = UTC_TIMESTAMP(),
+                    row_version = row_version + 1
+             WHERE id = :id AND row_version = :expected',
+            self::only($data) + ['updated_by' => $userId, 'id' => $id, 'expected' => $expectedVersion],
+        )->rowCount() === 1;
     }
 
     public function delete(int $id): void

@@ -19,9 +19,13 @@ $enum = static function (array $values, string $group) use ($view): array {
 <section class="form-card form-card-wide">
     <h1><?= $view->t($page_title) ?></h1>
     <p class="muted"><a href="/editions/<?= (int) $edition['id'] ?>"><?= $view->e($edition['title']) ?></a></p>
+    <?php if (!empty($conflict)): ?>
+        <div class="alert alert-error" role="alert"><?= $view->t('catalogue.edit_conflict') ?> <a href="/editions/<?= (int) $edition['id'] ?>" target="_blank" rel="noopener"><?= $view->t('catalogue.edit_conflict_view') ?></a></div>
+    <?php endif; ?>
     <?php if ($errors !== []): ?><div class="alert alert-error" role="alert"><?= $view->t('validation.summary') ?></div><?php endif; ?>
     <form method="post" action="<?= $view->e($action) ?>" class="form" novalidate>
         <?= $view->csrfField() ?>
+        <?php if ($copy !== null): ?><input type="hidden" name="row_version" value="<?= (int) $copy['row_version'] ?>"><?php endif; ?>
         <div class="form-row">
             <?php if ($can_choose_owner): ?>
                 <?php $ownerOptions = []; foreach ($owners as $owner) { $ownerOptions[(string) $owner->id] = $owner->displayName; } ?>
