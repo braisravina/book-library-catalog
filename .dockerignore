@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+!.env.example
+vendor
+storage/covers
+storage/logs
+storage/cache
+.phpunit.cache
+coverage
+tests
+*.md
