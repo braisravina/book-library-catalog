@@ -45,7 +45,7 @@ COPY --chown=root:root src ./src
 COPY --chown=root:root templates ./templates
 COPY --from=vendor --chown=root:root /app/vendor ./vendor
 # Code is owned by root and read-only to the FPM user; only storage is writable.
-RUN mkdir -p storage/covers storage/logs storage/cache \
+RUN mkdir -p storage/covers storage/logs storage/cache storage/backups storage/tmp \
     && chown -R www-data:www-data storage \
     && chmod -R 0750 storage
 USER www-data

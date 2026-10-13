@@ -6,6 +6,9 @@ vendor
 storage/covers
 storage/logs
 storage/cache
+storage/backups
+storage/tmp
+storage/maintenance.flag
 .phpunit.cache
 coverage
 tests

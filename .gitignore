@@ -5,6 +5,9 @@
 /storage/covers/*
 /storage/logs/*
 /storage/cache/*
+/storage/backups/*
+/storage/tmp/*
+/storage/maintenance.flag
 !/storage/**/.gitkeep
 /.phpunit.cache/
 /.phpunit.result.cache

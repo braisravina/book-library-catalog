@@ -36,6 +36,9 @@ services:
       # Uploaded covers live in a named volume (writable by PHP-FPM, outside
       # the web root, and not mixed into the source tree).
       - covers-data:/var/www/html/storage/covers
+      # Backup archives: a named volume outside the source tree and the web root.
+      # In production, mount a host directory here and copy archives off-site.
+      - backups-data:/var/www/html/storage/backups
     restart: unless-stopped
 
   db:
@@ -64,3 +67,4 @@ services:
 volumes:
   db-data:
   covers-data:
+  backups-data:
