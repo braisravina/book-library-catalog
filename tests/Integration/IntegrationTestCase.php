@@ -14,6 +14,8 @@ use DigitalLibrary\Http\Response;
 use DigitalLibrary\Security\PasswordHasher;
 use DigitalLibrary\Security\Role;
 use DigitalLibrary\Security\Session;
+use DigitalLibrary\Metadata\Http\HttpClient;
+use DigitalLibrary\Tests\Support\FakeHttpClient;
 use DigitalLibrary\Upload\CoverImageProcessor;
 use PDO;
 use PHPUnit\Framework\TestCase;
@@ -40,6 +42,10 @@ abstract class IntegrationTestCase extends TestCase
             throw new \RuntimeException('DB_TEST_DATABASE is not configured.');
         }
 
+        foreach (self::$configOverrides as $key => $value) {
+            $config = $config->with($key, $value);
+        }
+
         return $config
             ->with('DB_DATABASE', $test)
             ->with('APP_ENV', 'testing')
@@ -48,8 +54,20 @@ abstract class IntegrationTestCase extends TestCase
             ->with('ARGON2_TIME_COST', '1');
     }
 
+    /**
+     * Per-test configuration overrides (reset in setUp).
+     *
+     * @var array<string, string>
+     */
+    protected static array $configOverrides = [];
+
+    /** Offline HTTP client used for every request (reset in setUp). */
+    protected static FakeHttpClient $http;
+
     protected function setUp(): void
     {
+        self::$configOverrides = [];
+        self::$http = new FakeHttpClient();
         if (self::$skipReason !== null) {
             self::markTestSkipped(self::$skipReason);
         }
@@ -107,6 +125,7 @@ abstract class IntegrationTestCase extends TestCase
         $services = new Services(self::config(), dirname(__DIR__, 2));
         $services->set(PDO::class, $this->pdo());
         $services->set(Session::class, $browser);
+        $services->set(HttpClient::class, self::$http);
         $services->set(CoverImageProcessor::class, new CoverImageProcessor(
             self::coverDirectory(),
             isUploadedFile: static fn (string $path): bool => self::$trustUploads,
@@ -175,6 +194,18 @@ abstract class IntegrationTestCase extends TestCase
         $copy = $copyOwner === null ? null : new \DigitalLibrary\Catalogue\Input\CopyInput((string) $copyOwner, $locationId === null ? '' : (string) $locationId, '', '', 'available', false, '', '', '', '', '');
 
         return $services->books()->createBook($work, $editionInput, $copy, $userId);
+    }
+
+    /**
+     * Current optimistic-locking version of a work, edition or copy.
+     */
+    protected function rowVersion(string $table, int $id): string
+    {
+        if (!in_array($table, ['works', 'editions', 'copies'], true)) {
+            throw new \InvalidArgumentException($table);
+        }
+
+        return (string) $this->pdo()->query("SELECT row_version FROM {$table} WHERE id = {$id}")->fetchColumn();
     }
 
     protected function countRows(string $sql): int

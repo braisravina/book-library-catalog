@@ -71,9 +71,9 @@ final class CataloguePermissionTest extends IntegrationTestCase
         $w = $this->aliceBook['work_id'];
 
         self::assertSame(403, $this->request($browser, 'GET', "/editions/{$e}/edit")->status());
-        self::assertSame(403, $this->request($browser, 'POST', "/editions/{$e}", ['_csrf' => $token, 'edition_title' => 'Bob was here'])->status());
+        self::assertSame(403, $this->request($browser, 'POST', "/editions/{$e}", ['_csrf' => $token, 'row_version' => $this->rowVersion('editions', (int) $e), 'edition_title' => 'Bob was here'])->status());
         self::assertSame(403, $this->request($browser, 'GET', "/works/{$w}/edit")->status());
-        self::assertSame(403, $this->request($browser, 'POST', "/works/{$w}", ['_csrf' => $token, 'title' => 'Bob was here'])->status());
+        self::assertSame(403, $this->request($browser, 'POST', "/works/{$w}", ['_csrf' => $token, 'row_version' => $this->rowVersion('works', (int) $w), 'title' => 'Bob was here'])->status());
         self::assertSame(403, $this->request($browser, 'POST', "/editions/{$e}/covers", ['_csrf' => $token])->status());
         self::assertSame(0, $this->countRows("SELECT COUNT(*) FROM editions WHERE title = 'Bob was here'"));
         self::assertSame(0, $this->countRows("SELECT COUNT(*) FROM works WHERE title = 'Bob was here'"));
@@ -90,7 +90,7 @@ final class CataloguePermissionTest extends IntegrationTestCase
         $e = $this->aliceBook['edition_id'];
 
         self::assertSame(403, $this->request($browser, 'GET', "/copies/{$aliceCopy}/edit")->status());
-        self::assertSame(403, $this->request($browser, 'POST', "/copies/{$aliceCopy}", ['_csrf' => $token, 'owner_user_id' => (string) $this->bobId, 'status' => 'lost'])->status());
+        self::assertSame(403, $this->request($browser, 'POST', "/copies/{$aliceCopy}", ['_csrf' => $token, 'row_version' => $this->rowVersion('copies', (int) $aliceCopy), 'owner_user_id' => (string) $this->bobId, 'status' => 'lost'])->status());
         self::assertSame(403, $this->request($browser, 'POST', "/copies/{$aliceCopy}/delete", ['_csrf' => $token])->status());
         self::assertSame(1, $this->countRows("SELECT COUNT(*) FROM copies WHERE id = {$aliceCopy} AND owner_user_id = {$this->aliceId} AND status = 'available'"));
 
@@ -98,8 +98,8 @@ final class CataloguePermissionTest extends IntegrationTestCase
         self::assertSame(403, $this->request($browser, 'POST', "/editions/{$e}/copies", ['_csrf' => $token, 'owner_user_id' => (string) $this->aliceId, 'status' => 'available'])->status());
         $this->request($browser, 'POST', "/editions/{$e}/copies", ['_csrf' => $token, 'owner_user_id' => (string) $this->bobId, 'status' => 'available']);
         $bobCopy = $this->countRows("SELECT id FROM copies WHERE owner_user_id = {$this->bobId}");
-        self::assertSame(403, $this->request($browser, 'POST', "/copies/{$bobCopy}", ['_csrf' => $token, 'owner_user_id' => (string) $this->aliceId, 'status' => 'available'])->status());
-        self::assertSame(303, $this->request($browser, 'POST', "/copies/{$bobCopy}", ['_csrf' => $token, 'owner_user_id' => (string) $this->bobId, 'status' => 'on_loan'])->status());
+        self::assertSame(403, $this->request($browser, 'POST', "/copies/{$bobCopy}", ['_csrf' => $token, 'row_version' => $this->rowVersion('copies', (int) $bobCopy), 'owner_user_id' => (string) $this->aliceId, 'status' => 'available'])->status());
+        self::assertSame(303, $this->request($browser, 'POST', "/copies/{$bobCopy}", ['_csrf' => $token, 'row_version' => $this->rowVersion('copies', (int) $bobCopy), 'owner_user_id' => (string) $this->bobId, 'status' => 'on_loan'])->status());
         self::assertSame(303, $this->request($browser, 'POST', "/copies/{$bobCopy}/delete", ['_csrf' => $token])->status());
         self::assertSame(0, $this->countRows("SELECT COUNT(*) FROM copies WHERE owner_user_id = {$this->bobId}"));
     }
@@ -112,7 +112,7 @@ final class CataloguePermissionTest extends IntegrationTestCase
         $this->pdo()->exec("INSERT INTO publishers (name, created_at, updated_at) VALUES ('P', UTC_TIMESTAMP(), UTC_TIMESTAMP())");
         $publisherId = (int) $this->pdo()->lastInsertId();
 
-        self::assertSame(303, $this->request($browser, 'POST', "/editions/{$e}", ['_csrf' => $token, 'edition_title' => 'Renamed by Alice'])->status());
+        self::assertSame(303, $this->request($browser, 'POST', "/editions/{$e}", ['_csrf' => $token, 'row_version' => $this->rowVersion('editions', (int) $e), 'edition_title' => 'Renamed by Alice'])->status());
         self::assertSame(403, $this->request($browser, 'POST', "/editions/{$e}/delete", ['_csrf' => $token])->status(), 'Deletion is admin-only');
         self::assertSame(403, $this->request($browser, 'POST', "/authors/{$authorId}", ['_csrf' => $token, 'name' => 'X', 'sort_name' => 'X'])->status());
         self::assertSame(403, $this->request($browser, 'POST', "/publishers/{$publisherId}", ['_csrf' => $token, 'name' => 'X'])->status());
@@ -125,7 +125,7 @@ final class CataloguePermissionTest extends IntegrationTestCase
         [$browser, $token] = $this->signedIn('admin@example.org');
         $e = $this->aliceBook['edition_id'];
 
-        self::assertSame(303, $this->request($browser, 'POST', "/editions/{$e}", ['_csrf' => $token, 'edition_title' => 'Admin edit'])->status());
+        self::assertSame(303, $this->request($browser, 'POST', "/editions/{$e}", ['_csrf' => $token, 'row_version' => $this->rowVersion('editions', (int) $e), 'edition_title' => 'Admin edit'])->status());
         self::assertSame(303, $this->request($browser, 'POST', "/editions/{$e}/copies", ['_csrf' => $token, 'owner_user_id' => (string) $this->bobId, 'status' => 'available'])->status(), 'Admins choose any owner');
         self::assertSame(1, $this->countRows("SELECT COUNT(*) FROM copies WHERE owner_user_id = {$this->bobId}"));
 
@@ -172,7 +172,7 @@ final class CataloguePermissionTest extends IntegrationTestCase
     public function testAuditTrailRecordsCatalogueChanges(): void
     {
         [$browser, $token] = $this->signedIn('alice@example.org');
-        $this->request($browser, 'POST', "/editions/{$this->aliceBook['edition_id']}", ['_csrf' => $token, 'edition_title' => 'Audited']);
+        $this->request($browser, 'POST', "/editions/{$this->aliceBook['edition_id']}", ['_csrf' => $token, 'row_version' => $this->rowVersion('editions', (int) $this->aliceBook['edition_id']), 'edition_title' => 'Audited']);
         $row = $this->pdo()->query("SELECT user_id, entity_type, entity_id FROM audit_log WHERE action = 'edition.updated'")->fetch();
         self::assertSame([$this->aliceId, 'edition', $this->aliceBook['edition_id']], [(int) $row['user_id'], $row['entity_type'], (int) $row['entity_id']]);
     }

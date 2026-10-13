@@ -1,0 +1,17 @@
+{
+  "ISBN:9788437604947": {
+    "url": "https://openlibrary.org/books/OL0000000M/Cien_anos_de_soledad",
+    "key": "/books/OL0000000M",
+    "title": "Cien años de soledad",
+    "authors": [{"url": "https://openlibrary.org/authors/OL0000000A", "name": "Gabriel García Márquez"}],
+    "number_of_pages": 471,
+    "publishers": [{"name": "Cátedra"}],
+    "publish_date": "2007",
+    "identifiers": {"isbn_13": ["9788437604947"], "isbn_10": ["843760494X"]},
+    "cover": {
+      "small": "https://covers.openlibrary.org/b/id/1-S.jpg",
+      "medium": "https://covers.openlibrary.org/b/id/1-M.jpg",
+      "large": "https://covers.openlibrary.org/b/id/1-L.jpg"
+    }
+  }
+}

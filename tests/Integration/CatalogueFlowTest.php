@@ -156,11 +156,11 @@ final class CatalogueFlowTest extends IntegrationTestCase
         $second = $this->makeBook($this->memberId, 'Second', '9788437604947');
         [$browser, $token] = $this->signedIn('member@example.org');
 
-        $response = $this->request($browser, 'POST', "/editions/{$second['edition_id']}", ['_csrf' => $token, 'edition_title' => 'Second', 'isbn' => '0306406152']);
+        $response = $this->request($browser, 'POST', "/editions/{$second['edition_id']}", ['_csrf' => $token, 'row_version' => $this->rowVersion('editions', (int) $second['edition_id']), 'edition_title' => 'Second', 'isbn' => '0306406152']);
         self::assertSame(409, $response->status());
         self::assertSame('9788437604947', $this->pdo()->query("SELECT isbn_13 FROM editions WHERE id = {$second['edition_id']}")->fetchColumn());
 
-        $ok = $this->request($browser, 'POST', "/editions/{$second['edition_id']}", ['_csrf' => $token, 'edition_title' => 'Second (revised)', 'isbn' => '', 'contributor_names' => ['Ana Translator'], 'contributor_roles' => ['translator']]);
+        $ok = $this->request($browser, 'POST', "/editions/{$second['edition_id']}", ['_csrf' => $token, 'row_version' => $this->rowVersion('editions', (int) $second['edition_id']), 'edition_title' => 'Second (revised)', 'isbn' => '', 'contributor_names' => ['Ana Translator'], 'contributor_roles' => ['translator']]);
         self::assertSame(303, $ok->status());
         self::assertNull($this->pdo()->query("SELECT isbn_13 FROM editions WHERE id = {$second['edition_id']}")->fetchColumn(), 'ISBN can be cleared');
         self::assertSame(1, $this->countRows("SELECT COUNT(*) FROM edition_contributors WHERE role = 'translator'"));
@@ -173,7 +173,7 @@ final class CatalogueFlowTest extends IntegrationTestCase
         [$browser, $token] = $this->signedIn('member@example.org');
 
         $response = $this->request($browser, 'POST', "/works/{$book['work_id']}", [
-            '_csrf' => $token, 'title' => 'Rayuela', 'original_language' => 'es', 'first_published_year' => '1963',
+            '_csrf' => $token, 'row_version' => $this->rowVersion('works', $book['work_id']), 'title' => 'Rayuela', 'original_language' => 'es', 'first_published_year' => '1963',
             'author_names' => ['Julio Cortázar', 'Julio Cortázar', 'Some Editor'], 'author_roles' => ['author', 'author', 'editor'],
             'categories' => [(string) $catId],
         ]);
@@ -181,7 +181,7 @@ final class CatalogueFlowTest extends IntegrationTestCase
         self::assertSame(2, $this->countRows("SELECT COUNT(*) FROM work_authors WHERE work_id = {$book['work_id']}"), 'Duplicate rows collapse');
         self::assertSame(1, $this->countRows("SELECT COUNT(*) FROM work_categories WHERE work_id = {$book['work_id']}"));
 
-        $bad = $this->request($browser, 'POST', "/works/{$book['work_id']}", ['_csrf' => $token, 'title' => 'Rayuela', 'categories' => ['999999']]);
+        $bad = $this->request($browser, 'POST', "/works/{$book['work_id']}", ['_csrf' => $token, 'row_version' => $this->rowVersion('works', (int) $book['work_id']), 'title' => 'Rayuela', 'categories' => ['999999']]);
         self::assertSame(422, $bad->status(), 'Unknown category ids are rejected');
 
         $edition = $this->request($browser, 'POST', "/works/{$book['work_id']}/editions", ['_csrf' => $token, 'edition_title' => 'Hopscotch', 'language' => 'en', 'isbn' => '9780394752846']);
