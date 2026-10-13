@@ -12,7 +12,7 @@ use PDO;
  */
 final class AuditLogger
 {
-    private const REDACT = ['password', 'password_hash', 'token', 'secret', '_csrf'];
+    private const REDACT = ['password', 'password_hash', 'token', 'token_hash', 'link', 'secret', '_csrf'];
 
     public function __construct(private readonly PDO $pdo)
     {

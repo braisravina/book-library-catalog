@@ -36,6 +36,24 @@
             });
         });
 
+        // Copy-to-clipboard buttons (e.g. a one-time invitation link). The
+        // button stays hidden without JavaScript; the text field can be copied by hand.
+        document.querySelectorAll('[data-copy]').forEach(function (button) {
+            var field = document.getElementById(button.getAttribute('data-copy'));
+            if (!field || !navigator.clipboard) {
+                return;
+            }
+            button.hidden = false;
+            button.addEventListener('click', function () {
+                navigator.clipboard.writeText(field.value).then(function () {
+                    button.textContent = button.getAttribute('data-copied') || button.textContent;
+                });
+            });
+        });
+        document.querySelectorAll('input[readonly][id="invitation-link"]').forEach(function (field) {
+            field.addEventListener('focus', function () { field.select(); });
+        });
+
         // Repeating author/contributor rows: clone the last row on demand.
         document.querySelectorAll('[data-repeat]').forEach(function (group) {
             var button = group.querySelector('[data-repeat-add]');
