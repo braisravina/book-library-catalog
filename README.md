@@ -91,6 +91,33 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
   Failures fall back to manual entry. Set `METADATA_PROVIDERS=none` to turn
   lookups off.
 
+### Library management (Phase 4A)
+
+- **Lending and returns** of physical copies. The borrower is a library user
+  or a free-text name; no contact details are stored. Loans have an optional
+  due date, are listed under *Loans* (lent by me, borrowed by me and, for
+  administrators, all) and keep a full history per copy. Overdue status is
+  derived from the due date (UTC), with no background job. Availability is
+  shown on book and copy pages; only the owner, administrators and the
+  borrowing user see who has a copy. A copy can have at most one active loan
+  (enforced by a unique index and row locks), only available copies can be
+  lent, and members lend only their own copies.
+- **Private wishlists.** Entries come from a catalogue edition or are typed
+  in (title, author, optional ISBN), with priority and notes. Their status
+  moves between wanted, acquired and archived and is never deleted.
+  Duplicates (same ISBN, edition or title and author) are refused. *Add to
+  catalogue* on an acquired entry opens the add-book or add-copy form; no
+  copy is created automatically. Wishlists are visible to their owner only,
+  administrators included.
+- **Collections** of editions, private (owner and administrators) or shared
+  (every signed-in user). Create, edit, delete with confirmation, add from a
+  book's page, remove and reorder. Viewing never implies editing, and there
+  is no anonymous access.
+- **Audit-log viewer** (`/admin/audit`, administrators only, read-only).
+  Filter by date range (UTC, at most 366 days), event, user, record and a
+  details search. Paging uses keyset pagination, and a details page shows the
+  redacted, escaped JSON.
+
 ## Requirements
 
 - Docker Engine 24+ with the Compose plugin.
@@ -165,6 +192,21 @@ The database has no published port. Only the `php` service can reach it.
     negative caching, provider failure, hostile payloads, cover import and
     rejected cover bytes.
   Tests never touch the network.
+- **Phase 4A tests** cover:
+  - loans: lending, return, history, duplicate active loans (service and
+    unique index), concurrent lending (two connections and lock timeouts),
+    cross-user and viewer attempts, borrower privacy, derived overdue state,
+    invalid dates, missing copies and copy status and deletion rules;
+  - wishlists: CRUD, ISBN normalisation, duplicates, status history, the
+    hand-off to the add-book flow, invalid input and strict isolation (other
+    users and administrators get 404);
+  - collections: lifecycle, items and ordering, private and shared
+    visibility, read-only sharing and IDOR attempts;
+  - the audit viewer: admin-only access, no write routes, filters, bounded
+    ranges, keyset pagination, redaction and escaping of stored values;
+  - migration verification: released migrations are frozen by checksum, all
+    migrations are non-destructive, and the new tables, indexes, generated
+    columns, CHECK constraints and foreign-key actions exist on MySQL.
 - **Integration tests** (`tests/Integration`) run against the MySQL database
   named in `DB_TEST_DATABASE`, using the same least-privilege accounts as the
   application. They rebuild the schema from the migrations and drive the full
@@ -260,6 +302,10 @@ tests/                   PHPUnit unit and integration suites
   administration with lock-out safeguards, edit-conflict detection, merging
   of authors and publishers, and Open Library / Google Books lookup with
   review before saving and local cover import.
+- **Phase 4A — Library management (done):** lending and returns, private
+  wishlists, personal and shared collections, and the read-only audit-log
+  viewer.
 - **Pending decision:** audit-database separation (see SECURITY.md).
-- **Phase 4 — Circulation and lists:** loans, wishlists, collections UI,
-  invitation-based registration, audit-log viewer, CSV export and backups.
+- **Phase 4B — proposed:** invitation-based registration, CSV export and
+  import, backups, notifications for due loans and optional shared
+  wishlists.

@@ -119,6 +119,46 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 - **Residual risk:** DNS for the allowlisted domains is trusted. Network
   egress filtering at the host or container level is a sensible extra layer.
 
+### Library management (Phase 4A)
+
+- **Object-level checks everywhere.** Lending and returns check
+  `canManageLoans()` in the controller and again in `LoanService` under row
+  locks. Wishlist entries are owner-only (`canManageWishlistItem()`), with no
+  administrator override. Collections use `canViewCollection()` and
+  `canManageCollection()`. Records a user may not see are answered with 404,
+  so IDs can't be probed. Records they may see but not change get 403.
+- **Borrower privacy.** Only a name or a user link is stored, never contact
+  details. The borrower and loan history are visible to the copy owner,
+  administrators and the borrowing user. Everyone else sees only
+  "On loan" and the due date. Audit entries for loans record copy ID,
+  borrower user ID and due date, never the free-text name.
+- **Integrity under concurrency.** A unique index on the generated
+  `active_copy_id` column guarantees one active loan per copy, even if two
+  requests race. Wishlist duplicate checks run under a per-user row lock,
+  backed by a unique `(user_id, wanted_isbn_13)` index.
+- **Collections** are private or shared. There is no public or anonymous
+  visibility: the input is validated, the column is an ENUM, and the
+  authorizer denies unknown values. New collections are private.
+- **Audit-log viewer** (`audit.view`, administrators only) has GET routes
+  only and no write methods. It re-redacts secret-looking keys (password,
+  token, secret, CSRF, API keys, session, cookie, authorization, hash) and
+  escapes every value, including the pretty-printed JSON. Each query is
+  bounded: at most 366 UTC days, indexed filters, keyset pagination and a
+  5-second `MAX_EXECUTION_TIME` hint. The viewer shows IP addresses and
+  browser strings to administrators; treat exports of these pages as
+  personal data.
+- **Viewer limitations.**
+  - The viewer doesn't make the log tamper-proof. The runtime database
+    account can still `UPDATE`/`DELETE` audit rows (see the review below);
+    the separation recommended there is still pending and wasn't
+    implemented in Phase 4A.
+  - Rows written before a redaction rule existed are masked on display only,
+    not in the database.
+  - The details search scans rows inside the chosen date range, which is
+    acceptable at this project's scale but not indexed full-text.
+  - Wishlist changes aren't audited by design (private, not catalogue
+    data).
+
 ### Request integrity
 
 - **CSRF:** a per-session synchroniser token (`hash_equals`) is required on
@@ -233,6 +273,9 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 - Search uses LIKE with leading wildcards, which scans the editions table.
   That's fine at personal-library scale; revisit beyond tens of thousands
   of editions.
+- Audit actions added in Phase 4A: `loan.created`, `loan.returned`,
+  `collection.created`, `collection.updated`, `collection.deleted`,
+  `collection.item_added`, `collection.item_removed`.
 - Audit actions added in Phase 3: `user.updated`, `user.password_reset`,
   `user.sessions_revoked`, `author.merged`, `author.deleted`,
   `publisher.merged`, `publisher.deleted`, `cover.imported`.

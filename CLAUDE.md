@@ -51,6 +51,9 @@ These rules apply to every commit, in every phase, with no exceptions.
   - Phase 2: `943ca00257f67123698eb8dabf73056f71f24662`
   - Phase 3: recorded in the Phase 3 delivery notes (branch `phase-3`,
     created from the committed `phase-2`).
+  - Phase 4A: branch `phase-4a` from the committed Phase 3 commit
+    `7e5ebe15a37caa928fda893fc00d325f368f1911` (tree
+    `ef1d615edd8ec3064113a8a7f15401f5c1cabe9e`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -111,6 +114,15 @@ These rules apply to every commit, in every phase, with no exceptions.
   the network.
 - Administrative account changes go through `Auth\UserAdministration`
   (lock-out safeguards).
+- Loans change `copies.status` only through `Loans\LoanService` (copy lock,
+  one active loan per copy via the `active_copy_id` unique index); never set
+  `on_loan` from other code. Copies with loan history are withdrawn, not deleted.
+- Wishlists are owner-only (no admin override; others get 404) and are not
+  audited. Collections are `private` or `shared` only; never add anonymous or
+  public access without an explicit owner decision.
+- The audit-log viewer is read-only: never add write routes or repository
+  write methods; keep queries bounded (date range, indexed filters, keyset
+  pagination) and escape/redact everything shown.
 - Cover files are only ever reached through `CoverImageProcessor::path()` /
   `delete()`, never by building paths from input.
 

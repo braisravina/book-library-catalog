@@ -45,7 +45,10 @@ Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ ngi
 | `Validation` | `Validator` (declarative rules → translation keys) |
 | `Catalogue` | `Isbn`, `Vocabulary`, `Tree`, `Slug`, inputs (`Input\*`), repositories (`Repository\*`), `BookService` (transactional writes, duplicate detection), `CatalogueSearch` + `SearchCriteria` |
 | `Upload` | `CoverImageProcessor` (validated, re-encoded image storage) |
-| `Audit` | `AuditLogger` |
+| `Audit` | `AuditLogger`, read-only viewer support (`AuditLogRepository`, `AuditQuery`, `AuditDetails`) |
+| `Loans` | `LoanInput`, `LoanRepository`, `LoanService` (transactional lend/return) |
+| `Wishlist` | `WishlistInput`, `WishlistRepository`, `WishlistService` |
+| `Collections` | `CollectionInput`, `CollectionRepository`, `CollectionService` |
 | `Metadata` | `MetadataService`, providers (`Provider\OpenLibraryProvider`, `Provider\GoogleBooksProvider`), `BookMetadata`, `MetadataPrefill`, `CoverImporter`, hardened HTTP (`Http\CurlHttpClient`, `Http\OutboundPolicy`) |
 | `Console` | `bin/console` commands |
 
@@ -88,9 +91,16 @@ Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ ngi
 | `copy.manage_any` | ✔ | | |
 | `location.manage`, `category.manage` | ✔ | | |
 | `user.manage`, `settings.manage`, `audit.view` | ✔ | | |
+| `loan.manage_own` (lend copies they own) | ✔ | ✔ | |
+| `loan.manage_any` | ✔ | | |
+| `wishlist.manage_own` (own wishlist only; no override) | ✔ | ✔ | |
+| `collection.manage_own` | ✔ | ✔ | |
+| `collection.manage_any` (see and manage private collections) | ✔ | | |
 
 Object-level decisions are `Authorizer::canEditRecord($user, $createdBy)` and
-`Authorizer::canManageCopy($user, $ownerId)`. Templates may use the same
+`Authorizer::canManageCopy($user, $ownerId)`; Phase 4A adds
+`canManageLoans()`, `canSeeLoanDetails()`, `canManageWishlistItem()`,
+`canViewCollection()` and `canManageCollection()`. Templates may use the same
 methods to hide controls, but only the server-side checks are authoritative.
 Inactive users have no permissions.
 
@@ -230,6 +240,12 @@ defeat any heuristic.
 | Edit, merge or delete authors/publishers | `catalogue.edit_any` | merges need a different existing target; deletion only when unused |
 | User administration | `user.manage` | no self-demotion or self-deactivation; last active admin protected |
 | Categories / locations admin | `category.manage` / `location.manage` | no cycles; refuse deletion of parents or items in use |
+| Copy page `/copies/{id}`, loan list `/loans` | `catalogue.view` | borrower and history only for owner/admin (and the borrowing user) |
+| Lend, return | `loan.manage_own` | copy owner, or `loan.manage_any`; re-checked under row locks |
+| Wishlist | `wishlist.manage_own` | owner only; other users' entries are 404 |
+| Collections: view | `catalogue.view` | private: owner or `collection.manage_any`, else 404 |
+| Collections: create, edit, delete, items | `collection.manage_own` | owner, or `collection.manage_any` |
+| Audit-log viewer | `audit.view` | GET routes only |
 
 ## Administration and data quality (Phase 3)
 
@@ -309,6 +325,65 @@ POST /books ──▶ cachedRecord(id, ISBN) must match ──▶ editions.metad
   key. Live transport and error handling were exercised, but a successful
   live parse wasn't. Provider parsing is tested against fixtures in the
   documented response formats.
+
+## Library management (Phase 4A)
+
+### Loans (`loans` table)
+
+- Each loan references a copy and either a user (`borrower_user_id`) or a
+  free-text `borrower_name`, as a CHECK constraint requires. The dates are
+  `loaned_on`, the optional `due_on` and `returned_on`.
+- **One active loan per copy:** the stored generated column
+  `active_copy_id = IF(returned_on IS NULL, copy_id, NULL)` carries a UNIQUE
+  index. Returned loans hold NULL, so history is unlimited.
+- `LoanService::lend()` and `returnLoan()` run in one transaction. Each locks
+  the copy row (`FOR UPDATE`), re-checks `canManageLoans()` against the
+  locked owner, and keeps `copies.status` in step (`available` and
+  `on_loan`), bumping `row_version` so open copy-edit forms conflict.
+  Duplicate-key and lock-timeout errors map to friendly refusals.
+- The copy edit form can no longer set or clear `on_loan` by hand, and a copy
+  with loan history can't be deleted (the FK is `RESTRICT`). Withdraw it
+  instead.
+- **Overdue** is `returned_on IS NULL AND due_on < UTC_DATE()`, computed in
+  queries. There is no scheduler. All loan dates are UTC calendar dates.
+
+### Wishlists (`wishlist_items`)
+
+- Rows are private per user. Title and author are always stored. The links
+  to an edition or work are `SET NULL` on catalogue deletion, so entries
+  survive.
+- Status is wanted, acquired or archived, with `status_changed_at`. Entries
+  are never deleted by the application, and they go with their owner
+  (`CASCADE`).
+- Duplicates are checked under the owner's `users` row lock: the same ISBN-13
+  (normalised through `Catalogue\Isbn`), the same edition, or the same title
+  and author when neither is set (collation-insensitive). A unique index on
+  `(user_id, wanted_isbn_13)` backs this up.
+- Wishlist changes are personal and are not written to the audit log.
+
+### Collections (`collections`, `collection_items`, Phase 1 tables)
+
+- Items are editions. Positions are assigned `MAX + 1` under the collection
+  row lock. Moves (up, down, top or bottom) renumber `1..n`.
+- Collections are capped at 2,000 items. Pages show 50 items or 25
+  collections.
+- A new index `(collection_id, position)` supports ordered pages, and
+  `(visibility, name)` supports the shared list.
+
+### Audit-log viewer
+
+- `AuditQuery` validates the filters. Dates are UTC days, defaulting to the
+  last 30 and capped at 366. Malformed values are dropped, never passed to
+  SQL.
+- `AuditLogRepository::page()` filters on the indexed columns (`created_at`,
+  `(action, created_at)`, `(user_id, created_at)` and `(entity_type,
+  entity_id)`), with a LIKE search over details, IP and user agent inside the
+  range.
+- Pages use keyset pagination on the primary key (`id < :before`, fetching
+  `LIMIT 51`), with no OFFSET or full COUNT. A `MAX_EXECUTION_TIME(5000)`
+  optimizer hint bounds each statement; a timeout shows a message.
+- `AuditDetails` redacts secret-looking keys again on display and
+  pretty-prints the JSON. The template escapes it.
 
 ## Database access
 
