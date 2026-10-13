@@ -33,6 +33,9 @@ services:
         condition: service_healthy
     volumes:
       - ./:/var/www/html
+      # Uploaded covers live in a named volume (writable by PHP-FPM, outside
+      # the web root, and not mixed into the source tree).
+      - covers-data:/var/www/html/storage/covers
     restart: unless-stopped
 
   db:
@@ -60,3 +63,4 @@ services:
 
 volumes:
   db-data:
+  covers-data:

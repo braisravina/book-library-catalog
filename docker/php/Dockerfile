@@ -22,6 +22,9 @@ WORKDIR /var/www/html
 FROM base AS dev
 RUN cp "$PHP_INI_DIR/php.ini-development" "$PHP_INI_DIR/php.ini"
 COPY --from=composer /usr/bin/composer /usr/bin/composer
+COPY docker/php/entrypoint-dev.sh /usr/local/bin/entrypoint-dev.sh
+ENTRYPOINT ["entrypoint-dev.sh"]
+CMD ["php-fpm"]
 
 FROM composer AS vendor
 WORKDIR /app
