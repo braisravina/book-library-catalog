@@ -86,6 +86,21 @@ final class Request
     }
 
     /**
+     * A list-valued form field (name="field[]"). Non-scalar entries are dropped.
+     *
+     * @return list<string>
+     */
+    public function inputList(string $key): array
+    {
+        $value = $this->body[$key] ?? [];
+        if (!is_array($value)) {
+            return [];
+        }
+
+        return array_values(array_map('strval', array_filter($value, 'is_scalar')));
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function file(string $key): ?array

@@ -7,6 +7,16 @@ namespace DigitalLibrary\Core;
 use DigitalLibrary\Audit\AuditLogger;
 use DigitalLibrary\Auth\AuthService;
 use DigitalLibrary\Auth\UserRepository;
+use DigitalLibrary\Catalogue\BookService;
+use DigitalLibrary\Catalogue\CatalogueSearch;
+use DigitalLibrary\Catalogue\Repository\AuthorRepository;
+use DigitalLibrary\Catalogue\Repository\CategoryRepository;
+use DigitalLibrary\Catalogue\Repository\CopyRepository;
+use DigitalLibrary\Catalogue\Repository\CoverRepository;
+use DigitalLibrary\Catalogue\Repository\EditionRepository;
+use DigitalLibrary\Catalogue\Repository\LocationRepository;
+use DigitalLibrary\Catalogue\Repository\PublisherRepository;
+use DigitalLibrary\Catalogue\Repository\WorkRepository;
 use DigitalLibrary\Database\ConnectionFactory;
 use DigitalLibrary\I18n\Translator;
 use DigitalLibrary\Security\Authorizer;
@@ -138,6 +148,63 @@ final class Services
             $this->config->get('COVER_STORAGE_PATH', $this->basePath . '/storage/covers'),
             $this->config->int('UPLOAD_MAX_BYTES', 5 * 1024 * 1024),
         ));
+    }
+
+    public function works(): WorkRepository
+    {
+        return $this->once(WorkRepository::class, fn (): WorkRepository => new WorkRepository($this->pdo()));
+    }
+
+    public function editions(): EditionRepository
+    {
+        return $this->once(EditionRepository::class, fn (): EditionRepository => new EditionRepository($this->pdo()));
+    }
+
+    public function authors(): AuthorRepository
+    {
+        return $this->once(AuthorRepository::class, fn (): AuthorRepository => new AuthorRepository($this->pdo()));
+    }
+
+    public function publishers(): PublisherRepository
+    {
+        return $this->once(PublisherRepository::class, fn (): PublisherRepository => new PublisherRepository($this->pdo()));
+    }
+
+    public function copies(): CopyRepository
+    {
+        return $this->once(CopyRepository::class, fn (): CopyRepository => new CopyRepository($this->pdo()));
+    }
+
+    public function coverRecords(): CoverRepository
+    {
+        return $this->once(CoverRepository::class, fn (): CoverRepository => new CoverRepository($this->pdo()));
+    }
+
+    public function categories(): CategoryRepository
+    {
+        return $this->once(CategoryRepository::class, fn (): CategoryRepository => new CategoryRepository($this->pdo()));
+    }
+
+    public function locations(): LocationRepository
+    {
+        return $this->once(LocationRepository::class, fn (): LocationRepository => new LocationRepository($this->pdo()));
+    }
+
+    public function books(): BookService
+    {
+        return $this->once(BookService::class, fn (): BookService => new BookService(
+            $this->pdo(),
+            $this->works(),
+            $this->editions(),
+            $this->authors(),
+            $this->publishers(),
+            $this->copies(),
+        ));
+    }
+
+    public function search(): CatalogueSearch
+    {
+        return $this->once(CatalogueSearch::class, fn (): CatalogueSearch => new CatalogueSearch($this->pdo(), $this->categories(), $this->locations()));
     }
 
     /**

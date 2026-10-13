@@ -40,6 +40,17 @@ final class Response
     }
 
     /**
+     * Raw bytes (e.g. an image). Callers set the content type explicitly.
+     */
+    public static function binary(string $bytes, string $contentType, int $status = 200): self
+    {
+        return new self($bytes, $status, [
+            'Content-Type' => $contentType,
+            'Content-Length' => (string) strlen($bytes),
+        ]);
+    }
+
+    /**
      * Redirects only to local, absolute paths to rule out open redirects.
      */
     public static function redirect(string $path, int $status = 303): self

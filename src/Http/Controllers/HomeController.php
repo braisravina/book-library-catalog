@@ -32,6 +32,7 @@ final class HomeController extends Controller
             'page_title' => 'nav.dashboard',
             'stats' => array_map('intval', $stats ?: []),
             'my_copies' => (int) $mine->fetchColumn(),
+            'recent' => $this->services->editions()->recent(12),
         ]);
     }
 }
