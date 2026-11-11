@@ -107,15 +107,19 @@ final class CleanupTest extends IntegrationTestCase
             touch($covers . '/' . $file, $old);
         }
         touch($covers . '/ab/ab' . str_repeat('3', 30) . '.jpg', $this->now); // a fresh upload in flight
+        // Batch 6: a cover temporary left by an interrupted restore.
+        file_put_contents($covers . '/ab/.restore-0123456789ab', 'partial');
+        touch($covers . '/ab/.restore-0123456789ab', $old);
 
         $report = $this->cleanup()->run(['temp-files', 'orphan-covers'], false, false, null, $this->now);
-        self::assertSame(3, $report['temp-files']['found']);
+        self::assertSame(4, $report['temp-files']['found']);
         self::assertSame(2, $report['orphan-covers']['found']);
         self::assertStringContainsString('report only', implode(' ', $report['orphan-covers']['details']));
 
         // --apply alone still does not delete covers.
         $applied = $this->cleanup()->run(['temp-files', 'orphan-covers'], true, false, null, $this->now);
-        self::assertSame(3, $applied['temp-files']['removed']);
+        self::assertSame(4, $applied['temp-files']['removed']);
+        self::assertFileDoesNotExist($covers . '/ab/.restore-0123456789ab');
         self::assertSame(0, $applied['orphan-covers']['removed']);
         self::assertFileExists($covers . '/ab/ab' . str_repeat('2', 30) . '.jpg');
         self::assertDirectoryDoesNotExist($tmp . '/restore-0123456789abcdef');

@@ -47,6 +47,29 @@ final class LoginThrottleTest extends TestCase
         self::assertFalse($this->throttle->isLocked('fresh@example.org', '10.0.0.2', $now + 1));
     }
 
+    public function testIpv6ClientsAreBucketedByTheirSlash64(): void
+    {
+        $now = 1_700_000_000;
+        // Rotating through addresses of one /64 does not escape the per-IP limit...
+        for ($i = 1; $i <= 5; $i++) {
+            $this->throttle->recordFailure("user{$i}@example.org", sprintf('2001:db8:1:2::%x', $i), $now);
+        }
+        self::assertTrue($this->throttle->isLocked('fresh@example.org', '2001:db8:1:2:ffff::1', $now + 1));
+        // ...while another /64, and IPv4 clients, keep their own buckets.
+        self::assertFalse($this->throttle->isLocked('fresh@example.org', '2001:db8:1:3::1', $now + 1));
+        self::assertFalse($this->throttle->isLocked('fresh@example.org', '10.0.0.1', $now + 1));
+        self::assertSame(['2001:db8:1:2::/64'], $this->pdo->query('SELECT DISTINCT ip_address FROM login_attempts')->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    public function testEquivalentSpellingsShareABucket(): void
+    {
+        $now = 1_700_000_000;
+        foreach (['10.0.0.1', '::ffff:10.0.0.1', '::FFFF:A00:1', '10.0.0.1', '::ffff:10.0.0.1'] as $i => $ip) {
+            $this->throttle->recordFailure("user{$i}@example.org", $ip, $now);
+        }
+        self::assertTrue($this->throttle->isLocked('fresh@example.org', '10.0.0.1', $now + 1));
+    }
+
     public function testSuccessClearsAccountFailures(): void
     {
         $now = 1_700_000_000;

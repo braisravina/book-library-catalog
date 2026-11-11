@@ -29,8 +29,9 @@ final class TarWriter
     public function addFile(string $name, string $sourcePath): string
     {
         TarPath::assertSafe($name);
-        $size = filesize($sourcePath);
-        $in = fopen($sourcePath, 'rb');
+        // A source that vanished or is unreadable is reported, not warned about.
+        $size = @filesize($sourcePath);
+        $in = @fopen($sourcePath, 'rb');
         if ($size === false || $in === false) {
             throw new BackupException('Cannot read ' . $name);
         }

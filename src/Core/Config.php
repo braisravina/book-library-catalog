@@ -99,9 +99,36 @@ final class Config
         return new self($values);
     }
 
+    /**
+     * Identity of the raw settings (including *_FILE paths, not the secret
+     * files' contents), for per-process caches. Never log or display it.
+     */
+    public function fingerprint(): string
+    {
+        $values = $this->values;
+        ksort($values);
+
+        return hash('sha256', serialize($values));
+    }
+
+    public const ENVIRONMENTS = ['production', 'development', 'testing'];
+
+    /**
+     * Fail-closed: only the exact values "development" and "testing" are
+     * non-production. A missing, empty or unknown APP_ENV (e.g. "prod")
+     * is treated as production. ConfigValidator reports unknown values.
+     */
     public function isProduction(): bool
     {
-        return $this->get('APP_ENV', 'production') === 'production';
+        return !in_array($this->get('APP_ENV'), ['development', 'testing'], true);
+    }
+
+    /**
+     * The APP_ENV value as configured (null when unset), for reporting.
+     */
+    public function environment(): ?string
+    {
+        return $this->get('APP_ENV');
     }
 
     public function debug(): bool

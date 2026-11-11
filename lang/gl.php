@@ -234,6 +234,7 @@ return [
         'back_home' => 'Volver á páxina de inicio',
         'csrf' => 'O formulario caducou. Volve atrás, recarga a páxina e téntao de novo.',
         'generic' => ['title' => 'Algo fallou', 'message' => 'Non se puido completar a solicitude.'],
+        '400' => ['title' => 'Solicitude incorrecta', 'message' => 'Non se puido procesar a solicitude.'],
         '403' => ['title' => 'Acceso denegado', 'message' => 'Non tes permiso para acceder a esta páxina.'],
         '404' => ['title' => 'Páxina non atopada', 'message' => 'A páxina solicitada non existe.'],
         '405' => ['title' => 'Método non permitido', 'message' => 'Esta acción non está admitida.'],
@@ -749,6 +750,13 @@ return [
             'password_confirmation' => 'Repite o contrasinal',
             'submit' => 'Crear a conta',
             'done' => 'A túa conta está lista. Inicia sesión co teu enderezo de correo e o teu contrasinal.',
+        ],
+        'redeem' => [
+            'title' => 'Aceptar o convite',
+            'intro' => 'Abrindo o teu convite… Se non pasa nada, pega abaixo o código do convite: é a parte da ligazón de convite que vai despois do signo «#».',
+            'code' => 'Código do convite',
+            'code_hint' => '43 caracteres: letras, díxitos, «-» e «_». Só se pode usar unha vez e caduca.',
+            'submit' => 'Continuar',
         ],
         'invalid' => [
             'title' => 'Convite non válido',

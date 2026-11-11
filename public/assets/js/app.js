@@ -54,6 +54,24 @@
             field.addEventListener('focus', function () { field.select(); });
         });
 
+        // Fragment invitation links (/invite/redeem#CODE): the code never reaches
+        // the server in a URL. Move it into the form (POST body, CSRF-protected),
+        // drop it from the address bar and this history entry, then submit.
+        document.querySelectorAll('form[data-invitation-fragment]').forEach(function (form) {
+            var code = window.location.hash.replace(/^#/, '');
+            if (code === '') {
+                return;
+            }
+            if (window.history && window.history.replaceState) {
+                window.history.replaceState(null, '', window.location.pathname);
+            }
+            var field = form.querySelector('input[name="invitation_code"]');
+            if (field && /^[A-Za-z0-9_-]{43}$/.test(code)) {
+                field.value = code;
+                form.submit();
+            }
+        });
+
         // Repeating author/contributor rows: clone the last row on demand.
         document.querySelectorAll('[data-repeat]').forEach(function (group) {
             var button = group.querySelector('[data-repeat-add]');

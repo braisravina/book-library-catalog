@@ -135,10 +135,44 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
     `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
   - So the token is in a single request: it is not in page URLs, Referer
     headers or cached pages.
-  - The bundled nginx keeps `/invite?…` out of its access log. The upstream
-    reverse proxy must be configured the same way (see the checklist).
+  - The bundled nginx keeps every request carrying a `token` parameter out
+    of its access log, whatever the path spelling (`/invite/?token=`,
+    `//invite?token=`, percent-encoded paths). The upstream reverse proxy and
+    CDN must be configured the same way (see the checklist).
   - The link stays in the invitee's own browser history, but it is
     single-use and expires.
+- **Fragment links (Phase 5A, `INVITATION_LINK_FORMAT=fragment`).**
+  - Links become `APP_URL/invite/redeem#TOKEN`. Browsers never send the
+    fragment to a server or in a `Referer`, so the token is in no request
+    line: not at Cloudflare, cloudflared, nginx (access or error log) or any
+    other intermediary.
+  - `GET /invite/redeem` renders a CSRF-protected form (same-origin referrer
+    policy, `no-store`, no token). `assets/js/app.js` copies the fragment
+    into it, removes it from the address bar and the current history entry
+    with `history.replaceState`, and submits. Without JavaScript the invitee
+    pastes the code (the part after `#`).
+  - `POST /invite/redeem` goes through the normal CSRF and `Origin` checks,
+    then behaves exactly like `GET /invite?token=`: hash-only session state,
+    token-free `no-referrer` redirect, generic failures, the same per-IP
+    limit and audit entries (reason `redeem`).
+  - Both entry points accept tokens from either format, so the setting can
+    be changed at any time without invalidating links already sent. The
+    query format is kept (default) in Phase 5A; retiring it needs an owner
+    decision.
+- **Logging (Phase 5A review).**
+  - The application never logs tokens or their hashes; an integration test
+    captures the PHP error log, audit log, sessions and every response
+    across both flows and asserts the raw tokens appear in none of them.
+  - In the Docker image PHP logs to the FPM process's stderr, not through
+    FastCGI, so application errors are not paired with nginx's request line.
+  - Residual risk (query format only): nginx's own upstream errors (for
+    example PHP-FPM unreachable) include the request line, and therefore the
+    token. They are kept, because they are needed for diagnosis; restrict
+    access to and retention of the nginx error log, or use fragment links.
+  - A native PHP-FPM pool without `error_log` (e.g. Debian's default
+    `www.conf`, used for local development) sends PHP errors through
+    FastCGI, and nginx then logs them with the request line. Development
+    only; never used for production.
 - **Single use under concurrency.**
   - Redemption locks the invitation row, re-checks its state, creates the
     account and marks the invitation used with a conditional UPDATE, all in
@@ -217,18 +251,39 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
     appended after a `;`. A forged but correctly checksummed archive
     therefore cannot drop, grant, write files or touch other databases.
     Still, restore only archives you created.
+  - Phase 5A: `INSERT` statements may carry only literal values (`NULL`,
+    integers, quoted strings, `X'…'`), one per column; functions,
+    subqueries, variables and comments are refused, so a forged archive
+    cannot read other tables or call functions through the migration
+    account.
 - **Restore guards.** Maintenance mode is required, `--confirm=<database>`
   must be typed, and production also needs `--allow-production` (the
-  maintenance check cannot be skipped there).
+  maintenance check cannot be skipped there) and waits 35 s after
+  maintenance:on as a best-effort grace period for in-flight requests (not
+  a guarantee: stop the web PHP service for one; docs/OPERATIONS.md).
   - Verification runs first. Non-empty targets and differing covers are
-    refused unless `--replace`.
-  - Partial failure is reported as such, with exit code 2.
+    refused unless `--replace`; free space is checked before extraction.
+  - A non-empty target is backed up first (safety backup); if that fails,
+    nothing is changed.
+  - Partial failure is reported as such, with exit code 2 and the rollback
+    command; a restore into the live database leaves a marker that keeps the
+    site in maintenance mode until a restore succeeds or an operator
+    acknowledges it with `--acknowledge-incomplete-restore=<database>`;
+    the acknowledgement is audited first and refused if it cannot be. Foreign-key integrity is checked after loading.
+- **Role separation.** Operations commands (migrate, user creation, backup,
+  restore, maintenance on/off, cleanup) are refused by the web container
+  (`APP_ROLE=web`) and, in production, by anything but `APP_ROLE=ops`;
+  this is enforced in code (`Console`), not only by which secrets are
+  mounted.
+- **Concurrency.** Backup, restore, migrate, cleanup and maintenance:off
+  never overlap (`OperationLock`, kernel-released `flock`).
 - **Retention.** `cleanup` is a dry run by default. Orphaned covers are
   report-only unless explicitly requested. The newest verified backup is
   never deleted. Loans, catalogue records and the audit log are never
   pruned.
 - **Audit.** Events `backup.created`, `backup.restored` (written into the
-  restored database) and `maintenance.cleanup`.
+  restored database), `maintenance.cleanup` and
+  `maintenance.restore_marker_acknowledged`.
 
 ### Library management (Phase 4A)
 
@@ -328,7 +383,20 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   `vendor/` aren't reachable. `server_tokens` is off.
 - PHP: `expose_php=Off`, `display_errors=Off`, `allow_url_fopen=Off`. FPM
   disables process-execution functions.
-- Production images run as `www-data` with code owned by root (read-only).
+- Production images run as `www-data` (PHP) and `nginx` (port 8080) with
+  code and configuration owned by root, read-only root filesystems, all
+  capabilities dropped and `no-new-privileges` (`docker-compose.prod.yml`).
+  No production service publishes a port; application and database networks
+  are internal.
+- **Credential separation:** the web container (`APP_ROLE=web`) holds only
+  the runtime database account; migration or root credentials there are a
+  configuration error. Migrations, backups and restores run in the one-off
+  `ops` container. The MySQL root password exists only in the `db` container
+  (`root@localhost`).
+- **Fail-closed start-up:** the PHP container runs `config:check` before
+  PHP-FPM; the nginx container refuses to start without an explicit,
+  placeholder-free client IP policy acknowledged by `DLA_TRUSTED_PROXY`.
+- Base images are pinned by version and digest.
 - **Secrets** come from the environment or `*_FILE` Docker secrets. `.env` is
   git-ignored, and `.env.example` contains placeholders only.
 
@@ -363,18 +431,27 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   [Audit log integrity review](#audit-log-integrity-review)).
 - Without trusted-proxy configuration, the per-IP login limit applies to
   the reverse proxy's IP, which lets one attacker lock everyone out. A
-  too-broad trusted range lets clients forge their IP. **Blocker:**
-  configure and verify it before deployment, following
-  [ARCHITECTURE.md › Client IP behind a reverse proxy](ARCHITECTURE.md#client-ip-behind-a-reverse-proxy).
-- The production (Alpine) image has never been built or tested. **Blocker**
-  until verified.
+  too-broad trusted range lets clients forge their IP. **Blocker:** the
+  production nginx refuses to start until an approved policy exists
+  (docs/DEPLOYMENT.md, section 0;
+  [ARCHITECTURE.md › Client IP behind a reverse proxy](ARCHITECTURE.md#client-ip-behind-a-reverse-proxy)).
+- The production images have never been built or run (CI has not executed).
+  **Blocker** until the `production-stack` CI job and a production-host
+  deployment have verified them.
+- PHP-FPM listens on port 9000 on all of the php container's networks,
+  including `egress` (needed for ISBN lookups). Only containers of this
+  Compose project share those networks, but FastCGI has no authentication:
+  keep the Docker host's forwarding rules strict (current Docker Engine
+  versions block routed access to unpublished container ports from other
+  hosts) and never attach other containers to the project's networks.
+  Unverified on the production host.
 - Login throttling uses fixed thresholds with no progressive back-off or
   CAPTCHA. Account lockout can be triggered deliberately by someone who knows
   a user's e-mail (the trade-off accepted by NIST guidance).
 - There's no MFA or password-reset flow yet (e-mail delivery isn't
   configured). Administrators reset passwords in Phase 2.
-- `login_attempts` needs periodic pruning (`LoginThrottle::prune()`); a
-  scheduled job is planned.
+- `login_attempts` is pruned by `cleanup --apply` (task `login-attempts`),
+  which still has to be scheduled on the production host.
 - Native PHP sessions are file-based inside the PHP container. Use a
   persistent volume or a DB-backed handler if you run multiple PHP replicas.
 
@@ -434,31 +511,59 @@ integration of Phase 1; awaiting the owner's decision.
 
 ## Production deployment checklist
 
-- [ ] `APP_ENV=production`, `APP_DEBUG=false`
-- [ ] `APP_URL=https://library.bravina.co.uk` (exact origin)
-- [ ] `SESSION_SECURE_COOKIE=true`, `SECURITY_HSTS=true`
-- [ ] Unique random secrets for the app, migrator and root accounts, supplied
-      as Docker secrets
-- [ ] Trusted-proxy (`set_real_ip_from`) configured with the verified proxy
-      address only, and verified via the audit log
-- [ ] Alpine `dev` and `prod` images built; full test suite passes inside
-      them with `--fail-on-skipped` (includes all GD and cover tests)
-- [ ] Decide on `METADATA_PROVIDERS` (privacy). If enabled, allow egress
-      only to the provider domains and supply any API key as a Docker secret
-- [ ] Persistent volume for `storage/covers` mounted, writable by `www-data`
-      and included in backups
-- [ ] CI workflow executed and green
+Procedures: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Nothing below has been
+done on the production host yet.
+
+**Configuration and secrets**
+- [ ] `.env.production` from `.env.production.example`, reviewed: `APP_ENV=production`,
+      `APP_DEBUG=false`, `APP_URL=https://library.bravina.co.uk`,
+      `SESSION_SECURE_COOKIE=true`, `SECURITY_HSTS=true`,
+      `INVITATION_LINK_FORMAT=fragment`
+- [ ] Unique random secrets in `./secrets/` with the owners and modes of
+      DEPLOYMENT.md section 2, copies kept in your password manager
+      (OPERATIONS.md, "Secrets to preserve")
+- [ ] `config:check --strict` passes in the `php` (`APP_ROLE=web`) and `ops`
+      (`APP_ROLE=ops`) containers
+- [ ] `METADATA_PROVIDERS` decided (privacy); if enabled, host egress limited
+      to the provider domains and any API key supplied as a secret file
+
+**Ingress and client IP (blocked on the topology review)**
+- [ ] Discovery reports from `docker/discovery/` produced and reviewed by you;
+      trusted-proxy design approved
+- [ ] `docker/nginx/production/client-ip.conf` (one verified proxy address,
+      the approved header) and `DLA_TRUSTED_PROXY` set; `nginx -t` and
+      `php tests/nginx/run.php` pass with that policy
+- [ ] The proxy forwards `Host: library.bravina.co.uk` (cloudflared
+      `originRequest.httpHostHeader` unset or equal); other hosts get 400
+- [ ] A forged `CF-Connecting-IP` / `X-Forwarded-For` sent directly to the
+      origin does not change the logged client address (audit log, access
+      log `peer=`); 403 for direct requests enabled only after routing and
+      health checks are verified
+- [ ] The application is not reachable except through the approved ingress
+- [ ] If query-format invitation links are used: Cloudflare and cloudflared
+      (log level info or lower) verified not to retain `/invite?token=` URLs;
+      nginx error log access and retention restricted
+
+**Images, stack and CI**
+- [ ] CI executed and green on GitHub (all four jobs, including
+      `production-stack`); shellcheck findings resolved
+- [ ] Images built on the Docker host from the release commit
+      (`APP_IMAGE_TAG`); base-image digests refreshed deliberately
+- [ ] `docker compose -f docker-compose.prod.yml config` reviewed: no
+      published ports except the approved ingress, no extra mounts
+- [ ] Every health check healthy; `/health` ok through the ingress
+- [ ] `migrate` run from the `ops` container; `migrate:status` shows nothing
+      `pending` or `MODIFIED`
+- [ ] First administrator created via `user:create`, with a strong passphrase
+
+**Backups and recovery**
+- [ ] `backup:create` and `cleanup --apply` scheduled from the `ops`
+      container; failures alert you
+- [ ] Off-host, encrypted copies of archives and `.sha256` files, verified
+- [ ] One restore drill done on the production host, time recorded (RTO)
+- [ ] Recovery point objective decided (backup frequency)
+
+**Open decisions**
 - [ ] Audit-log integrity decision implemented (see review above)
-- [ ] `prod` image target in use (no bind mounts, no Composer, runs as `www-data`)
-- [ ] MySQL data and `storage/covers` volumes included in backups; restore tested
-- [ ] `storage/backups` on persistent storage outside the web root, copied
-      off-site; daily `backup:create` and `cleanup --apply` scheduled
-      ([docs/OPERATIONS.md](docs/OPERATIONS.md)); one restore drill done on
-      the production host
-- [ ] Secrets listed in docs/OPERATIONS.md ("Secrets to preserve") stored
-      separately from the backups
-- [ ] The Bravina reverse proxy does not log query strings for `/invite`
-      (invitation tokens), or logs no query strings at all
-- [ ] `php bin/console migrate` run, and `migrate:status` shows no `pending`/`MODIFIED`
-- [ ] First administrator created via CLI, with a strong passphrase
-- [ ] The application isn't reachable except through the reverse proxy
+- [ ] PHP-FPM worker count and MySQL memory settings measured and tuned
+      (DEPLOYMENT.md, "Resource planning")

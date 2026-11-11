@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Security;
 
+use DigitalLibrary\Http\ClientIp;
 use PDO;
 
 /**
  * Database-backed login rate limiter. Failures are counted per account
  * identifier (a hash of the e-mail, so failed addresses are not stored in
- * clear) and per client IP within a sliding window.
+ * clear) and per client IP within a sliding window. The per-IP bucket is
+ * ClientIp::throttleKey(): the IPv4 address, or the IPv6 /64 network.
  */
 final class LoginThrottle
 {
@@ -40,7 +42,7 @@ final class LoginThrottle
         $since = gmdate('Y-m-d H:i:s', $now - $this->windowSeconds);
 
         $retry = 0;
-        foreach ([['identifier_hash', self::identifier($email), $this->maxPerAccount], ['ip_address', $ip, $this->maxPerIp]] as [$column, $value, $limit]) {
+        foreach ([['identifier_hash', self::identifier($email), $this->maxPerAccount], ['ip_address', ClientIp::throttleKey($ip), $this->maxPerIp]] as [$column, $value, $limit]) {
             $stmt = $this->pdo->prepare(
                 "SELECT COUNT(*) AS c, MIN(attempted_at) AS oldest FROM login_attempts
                  WHERE {$column} = :value AND succeeded = 0 AND attempted_at > :since"
@@ -87,7 +89,7 @@ final class LoginThrottle
         );
         $stmt->execute([
             'id' => self::identifier($email),
-            'ip' => mb_substr($ip, 0, 45),
+            'ip' => ClientIp::throttleKey($ip),
             'ok' => $succeeded ? 1 : 0,
             'at' => gmdate('Y-m-d H:i:s', $now ?? time()),
         ]);

@@ -17,31 +17,51 @@ use PDO;
  *     member against the manifest (the archive cannot be swapped between
  *     verification and use), validating the whole dump's framing and that
  *     every statement has a shape the dumper writes (DumpReader::isAllowed);
- *  3. pre-flight: the target database must be empty unless $replace, and
- *     no existing cover file may differ from the backup unless $replace;
+ *  3. pre-flight: free space for the extraction (temporary directory) and
+ *     the cover files (covers directory); the target database must be
+ *     empty unless $replace, and no existing cover file may differ from
+ *     the backup unless $replace; then the caller's $beforeChanges hook
+ *     (Operations: safety backup of the current state, restore marker);
  *  4. database: optional DROP of existing tables, then the dump;
  *  5. covers: each file written to a temporary name and renamed into
  *     place; unrelated files are never touched or deleted;
- *  6. post-check: per-table row counts and referenced covers.
+ *  6. post-check: per-table row counts, foreign-key integrity and
+ *     referenced covers.
  *
- * A failure in step 4 or 5 is reported as PARTIAL; the restorer never
- * claims success after a partial failure.
+ * NOT atomic: MySQL DDL (DROP/CREATE TABLE) commits implicitly and cannot
+ * be rolled back, so a failure in step 4 or 5 leaves the target PARTIALLY
+ * restored. Such failures are reported as PARTIAL/INCOMPLETE (exit 2 from
+ * the console), never as success; recovery is to restore again, or to
+ * restore the safety backup taken before step 4.
  */
 final class BackupRestorer
 {
+    /** Head-room kept free on each filesystem (bytes). */
+    public const SPACE_MARGIN = 16 * 1024 * 1024;
+
+    /** @var \Closure(string): (float|false) */
+    private readonly \Closure $freeSpace;
+
+    /**
+     * @param (\Closure(string): (float|false))|null $freeSpace free bytes of a directory's filesystem (tests)
+     */
     public function __construct(
         private readonly PDO $pdo,
         private readonly string $coversDirectory,
         private readonly string $tempDirectory,
+        ?\Closure $freeSpace = null,
     ) {
+        $this->freeSpace = $freeSpace ?? static fn (string $dir): float|false => @disk_free_space($dir);
     }
 
     /**
-     * @param (\Closure(string): void)|null $log
+     * @param (\Closure(string): void)|null                                    $log
+     * @param (\Closure(array{tables: list<string>, covers: int}): void)|null $beforeChanges called once all
+     *                                                                         checks passed, before the first change; may throw to abort
      *
      * @return array{tables: array<string, int>, covers_written: int, covers_unchanged: int}
      */
-    public function restore(string $archive, bool $replace, ?\Closure $log = null): array
+    public function restore(string $archive, bool $replace, ?\Closure $log = null, ?\Closure $beforeChanges = null): array
     {
         $log ??= static function (string $line): void {
         };
@@ -58,6 +78,7 @@ final class BackupRestorer
 
         $work = $this->workDirectory();
         try {
+            $this->requireSpace($work, array_sum(array_column($manifest['files'], 'size')), 'the temporary directory (extraction)');
             $log('Extracting into a temporary directory…');
             $this->extract($archive, $work, $expected);
             $dump = $work . '/' . Manifest::DATABASE;
@@ -93,6 +114,16 @@ final class BackupRestorer
             if ($conflicts !== [] && !$replace) {
                 throw new BackupException(sprintf('%d cover file(s) in the target directory differ from the backup (e.g. %s). Pass --replace to overwrite them.', count($conflicts), $conflicts[0]));
             }
+            $toWrite = 0;
+            foreach ($covers as $relative) {
+                if (!is_file($this->coversDirectory . '/' . $relative) || in_array($relative, $conflicts, true)) {
+                    $toWrite += $expected['covers/' . $relative]['size'];
+                }
+            }
+            $this->requireSpace($this->coversDirectory, $toWrite, 'the covers directory');
+            if ($beforeChanges !== null) {
+                $beforeChanges(['tables' => $existing, 'covers' => count($covers)]);
+            }
 
             // Database.
             $log(sprintf('Restoring the database (%d statements)…', $statementCount));
@@ -124,6 +155,10 @@ final class BackupRestorer
                     throw new BackupException(sprintf('DATABASE RESTORE INCOMPLETE: table %s has %d rows, the backup has %d.', $table, $actual, $rows));
                 }
             }
+            $violations = self::foreignKeyViolations($this->pdo);
+            if ($violations !== []) {
+                throw new BackupException('DATABASE RESTORE INCOMPLETE: foreign-key violations after loading (' . implode(', ', array_slice($violations, 0, 5)) . '). The data in the backup is inconsistent; the target database must not be used.');
+            }
 
             // Covers.
             $log(sprintf('Restoring %d cover files…', count($covers)));
@@ -151,6 +186,62 @@ final class BackupRestorer
             return ['tables' => $counts, 'covers_written' => $written, 'covers_unchanged' => $unchanged];
         } finally {
             $this->removeTree($work);
+        }
+    }
+
+    /**
+     * Rows whose foreign key points at no parent row. The dump is loaded with
+     * FOREIGN_KEY_CHECKS=0 (tables arrive in name order), so integrity is
+     * checked afterwards for every constraint of the current database.
+     * Composite keys follow MySQL's MATCH SIMPLE: a row with any NULL key
+     * column is not checked.
+     *
+     * @return list<string> "table.constraint (N rows)"
+     */
+    public static function foreignKeyViolations(PDO $pdo): array
+    {
+        $constraints = [];
+        $rows = $pdo->query(
+            'SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+             FROM information_schema.KEY_COLUMN_USAGE
+             WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME IS NOT NULL
+             ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION'
+        )->fetchAll(PDO::FETCH_NUM);
+        foreach ($rows as [$table, $name, $column, $parent, $parentColumn]) {
+            $key = $table . '.' . $name;
+            $constraints[$key]['table'] = (string) $table;
+            $constraints[$key]['parent'] = (string) $parent;
+            $constraints[$key]['pairs'][] = [(string) $column, (string) $parentColumn];
+        }
+        $violations = [];
+        foreach ($constraints as $key => $c) {
+            $notNull = implode(' AND ', array_map(static fn (array $p): string => 'c.' . DatabaseDumper::ident($p[0]) . ' IS NOT NULL', $c['pairs']));
+            $match = implode(' AND ', array_map(static fn (array $p): string => 'p.' . DatabaseDumper::ident($p[1]) . ' = c.' . DatabaseDumper::ident($p[0]), $c['pairs']));
+            $count = (int) $pdo->query(sprintf(
+                'SELECT COUNT(*) FROM %s c WHERE %s AND NOT EXISTS (SELECT 1 FROM %s p WHERE %s)',
+                DatabaseDumper::ident($c['table']),
+                $notNull,
+                DatabaseDumper::ident($c['parent']),
+                $match,
+            ))->fetchColumn();
+            if ($count > 0) {
+                $violations[] = sprintf('%s (%d rows)', $key, $count);
+            }
+        }
+
+        return $violations;
+    }
+
+    private function requireSpace(string $directory, int $bytes, string $what): void
+    {
+        $free = ($this->freeSpace)($directory);
+        if ($free !== false && $free < $bytes + self::SPACE_MARGIN) {
+            throw new BackupException(sprintf(
+                'Not enough free space in %s: about %d MiB needed, %d MiB available. Nothing was changed.',
+                $what,
+                (int) ceil(($bytes + self::SPACE_MARGIN) / 1048576),
+                (int) floor($free / 1048576),
+            ));
         }
     }
 

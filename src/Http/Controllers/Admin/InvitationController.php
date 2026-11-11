@@ -67,6 +67,8 @@ final class InvitationController extends Controller
         if ($validator->fails()) {
             return $this->form($input, $validator->errors(), 422);
         }
+        // Fail on a bad INVITATION_LINK_FORMAT before a token is issued (it could not be shown).
+        $this->services->invitationLink();
         try {
             $issued = $this->services->invitationService()->issue($admin, $input['email'], Role::from($input['role']), $input['expires_on']);
         } catch (InvitationException $e) {
@@ -115,6 +117,7 @@ final class InvitationController extends Controller
     {
         $id = $this->id($params);
         $expiresOn = trim((string) $request->input('expires_on', ''));
+        $this->services->invitationLink();
         try {
             $issued = $this->services->invitationService()->replace($this->user($request), $id, $expiresOn === '' ? $this->defaultExpiry() : $expiresOn);
         } catch (InvitationException $e) {
@@ -148,7 +151,7 @@ final class InvitationController extends Controller
      */
     private function link(int $id, #[\SensitiveParameter] string $token, string $email, string $role, string $expiresAt, bool $replaced): Response
     {
-        $link = rtrim((string) $this->services->config->get('APP_URL', ''), '/') . '/invite?token=' . $token;
+        $link = $this->services->invitationLink()->build($token);
         $delivered = $this->services->invitationDelivery()->deliver(
             $email,
             $link,

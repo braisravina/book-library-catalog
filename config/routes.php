@@ -76,8 +76,11 @@ return static function (Router $router, Services $s): void {
     $router->post('/login', $auth->login(...), ['guest'], 'login.submit');
 
     // Invitation-only registration (no open sign-up). The token is only accepted on
-    // GET /invite and is exchanged for session state before any page is shown.
+    // GET /invite (query links) or POST /invite/redeem (fragment links, paste-in form)
+    // and is exchanged for session state before any page is shown.
     $router->get('/invite', $registration->open(...), ['guest'], 'invite.open');
+    $router->get('/invite/redeem', $registration->redeemPage(...), ['guest'], 'invite.redeem');
+    $router->post('/invite/redeem', $registration->redeem(...), ['guest'], 'invite.redeem.submit');
     $router->get('/invite/accept', $registration->show(...), ['guest'], 'invite.accept');
     $router->get('/invite/invalid', $registration->invalidPage(...), ['guest'], 'invite.invalid');
     $router->post('/invite/accept', $registration->accept(...), ['guest'], 'invite.accept.submit');

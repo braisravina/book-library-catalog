@@ -6,6 +6,7 @@ namespace DigitalLibrary\Tests\Integration;
 
 use DigitalLibrary\Core\Application;
 use DigitalLibrary\Core\Config;
+use DigitalLibrary\Core\DotEnv;
 use DigitalLibrary\Core\Services;
 use DigitalLibrary\Database\ConnectionFactory;
 use DigitalLibrary\Database\Migrator;
@@ -16,6 +17,8 @@ use DigitalLibrary\Security\Role;
 use DigitalLibrary\Security\Session;
 use DigitalLibrary\Metadata\Http\HttpClient;
 use DigitalLibrary\Tests\Support\FakeHttpClient;
+use DigitalLibrary\Tests\Support\TestDatabaseGuard;
+use DigitalLibrary\Tests\Support\TestDatabaseSafetyException;
 use DigitalLibrary\Upload\CoverImageProcessor;
 use PDO;
 use PHPUnit\Framework\TestCase;
@@ -34,20 +37,24 @@ abstract class IntegrationTestCase extends TestCase
     private static ?PDO $migrationPdo = null;
     private static ?string $skipReason = null;
 
+    /**
+     * Configuration for the test database. TestDatabaseGuard refuses unsafe
+     * settings (production environment file, a test database that is not
+     * "*_test" or equals DB_DATABASE, incomplete dedicated test accounts).
+     */
     protected static function config(): Config
     {
-        $config = Config::fromEnvironment(dirname(__DIR__, 2) . '/.env');
-        $test = $config->get('DB_TEST_DATABASE');
-        if ($test === null) {
-            throw new \RuntimeException('DB_TEST_DATABASE is not configured.');
-        }
+        $config = TestDatabaseGuard::testConfig(self::baseConfig(), ...self::declaredEnvironment());
 
         foreach (self::$configOverrides as $key => $value) {
+            if (str_starts_with($key, 'DB_')) {
+                // Database settings come only from the guarded configuration.
+                throw new TestDatabaseSafetyException('Tests may not override ' . $key . '.');
+            }
             $config = $config->with($key, $value);
         }
 
         return $config
-            ->with('DB_DATABASE', $test)
             ->with('APP_ENV', 'testing')
             ->with('APP_URL', 'http://library.test')
             ->with('ARGON2_MEMORY_KIB', '8192')
@@ -71,13 +78,29 @@ abstract class IntegrationTestCase extends TestCase
         if (self::$skipReason !== null) {
             self::markTestSkipped(self::$skipReason);
         }
+        if (self::baseConfig()->get('DB_TEST_DATABASE') === null) {
+            // Not configured at all (e.g. a unit-only checkout): skip, as before.
+            self::$skipReason = 'Integration database unavailable: DB_TEST_DATABASE is not configured.';
+            self::markTestSkipped(self::$skipReason);
+        }
+        // Unsafe configuration is an error, never a skip; checked before connecting.
+        $config = self::config();
         try {
-            $config = self::config();
-            self::$appPdo ??= ConnectionFactory::fromConfig($config);
-            self::$migrationPdo ??= ConnectionFactory::forMigrations($config);
+            $appPdo = self::$appPdo ?? ConnectionFactory::fromConfig($config);
+            $migrationPdo = self::$migrationPdo ?? ConnectionFactory::forMigrations($config);
         } catch (\Throwable $e) {
             self::$skipReason = 'Integration database unavailable: ' . $e->getMessage();
             self::markTestSkipped(self::$skipReason);
+        }
+        if (self::$appPdo === null) {
+            // Both connections must report the test database before anything is reset.
+            $base = self::baseConfig();
+            $dedicated = TestDatabaseGuard::usesDedicatedAccounts($base);
+            foreach ([$appPdo, $migrationPdo] as $pdo) {
+                TestDatabaseGuard::verifyConnection($pdo, (string) $config->get('DB_DATABASE'), $base->get('DB_DATABASE'), $dedicated);
+            }
+            self::$appPdo = $appPdo;
+            self::$migrationPdo = $migrationPdo;
         }
         if (!self::$migrated) {
             $this->resetSchema();
@@ -86,6 +109,37 @@ abstract class IntegrationTestCase extends TestCase
         }
         $this->truncateData();
         self::$trustUploads = false;
+    }
+
+    /**
+     * The environment as the application would see it (process environment
+     * over the .env file), before any test-database substitution.
+     */
+    protected static function baseConfig(): Config
+    {
+        return Config::fromEnvironment(self::envFile());
+    }
+
+    /**
+     * APP_ENV as declared in the .env file (PHPUnit forces the process
+     * environment to "testing", so it cannot be read from there).
+     *
+     * @return array{?string, bool}
+     */
+    private static function declaredEnvironment(): array
+    {
+        $file = self::envFile();
+        if (!is_file($file)) {
+            return [null, false];
+        }
+        $values = DotEnv::parse((string) file_get_contents($file));
+
+        return [isset($values['APP_ENV']) && $values['APP_ENV'] !== '' ? $values['APP_ENV'] : null, true];
+    }
+
+    private static function envFile(): string
+    {
+        return dirname(__DIR__, 2) . '/.env';
     }
 
     protected function pdo(): PDO
@@ -137,7 +191,7 @@ abstract class IntegrationTestCase extends TestCase
             parse_str($parts[1], $query);
         }
 
-        return (new Application($services))->handle(new Request($method, $parts[0], $query, $body, $server + ['REMOTE_ADDR' => '192.0.2.10'], [], $files));
+        return (new Application($services))->handle(new Request($method, $parts[0], $query, $body, $server + ['REMOTE_ADDR' => '192.0.2.10', 'HTTP_HOST' => 'library.test'], [], $files));
     }
 
     /**

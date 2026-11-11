@@ -331,8 +331,12 @@ final class BackupTest extends IntegrationTestCase
             'no confirmation' => [['backup:restore', '--file=' . $backup, '--skip-maintenance-check'], [], 'confirm the target'],
             'wrong confirmation' => [['backup:restore', '--file=' . $backup, '--confirm=library', '--skip-maintenance-check'], [], 'confirm the target'],
             'live application' => [['backup:restore', '--file=' . $backup, '--confirm=' . $db], [], 'maintenance:on'],
-            'production' => [['backup:restore', '--file=' . $backup, '--confirm=' . $db], ['APP_ENV' => 'production'], '--allow-production'],
-            'production without maintenance check' => [['backup:restore', '--file=' . $backup, '--confirm=' . $db, '--allow-production', '--skip-maintenance-check'], ['APP_ENV' => 'production'], 'not allowed in production'],
+            'production' => [['backup:restore', '--file=' . $backup, '--confirm=' . $db], ['APP_ENV' => 'production', 'APP_ROLE' => 'ops'], '--allow-production'],
+            // Phase 5A: an unset or misspelled APP_ENV is production too (fail closed).
+            // (APP_ROLE=ops: production also requires the ops role; see BackupRecoveryTest.)
+            'unset environment' => [['backup:restore', '--file=' . $backup, '--confirm=' . $db, '--skip-maintenance-check'], ['APP_ENV' => '', 'APP_ROLE' => 'ops'], '--allow-production'],
+            'misspelled environment' => [['backup:restore', '--file=' . $backup, '--confirm=' . $db, '--skip-maintenance-check'], ['APP_ENV' => 'prod', 'APP_ROLE' => 'ops'], '--allow-production'],
+            'production without maintenance check' => [['backup:restore', '--file=' . $backup, '--confirm=' . $db, '--allow-production', '--skip-maintenance-check'], ['APP_ENV' => 'production', 'APP_ROLE' => 'ops'], 'not allowed in production'],
             'covers in web root' => [['backup:restore', '--file=' . $backup, '--confirm=' . $db, '--skip-maintenance-check', '--covers-dir=' . dirname(__DIR__, 2) . '/public'], [], 'public web root'],
             'missing file' => [['backup:restore', '--file=/nonexistent.tar.gz', '--confirm=' . $db, '--skip-maintenance-check'], [], 'Usage'],
         ];

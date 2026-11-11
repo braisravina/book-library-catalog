@@ -21,20 +21,36 @@ use PDO;
  *
  * Safety: output only outside the web root, umask 077 (files 0600), work
  * files are hidden temporaries in the output directory, the archive is
- * renamed into place only when complete (atomic on one filesystem), and
- * temporaries are always removed. No secrets, environment files or
- * session files are read; transient login-attempt rows are not included.
+ * fully verified (BackupVerifier) and its .sha256 file written BEFORE it is
+ * renamed into place (atomic on one filesystem), so a file with the final
+ * name is always a complete, verified backup; an interrupted or failed run
+ * leaves only .tmp-dla-* files, which are removed here or by
+ * `cleanup --tasks=temp-files`. No secrets, environment files or session
+ * files are read; transient login-attempt rows are not included.
+ * Concurrent runs are prevented by the console's OperationLock.
+ *
+ * Resources: rows are read in keyset batches of 1000 and written as they
+ * are read; archive members are streamed in 1 MiB chunks. Peak disk use in
+ * the output directory is the uncompressed dump plus the archive.
  */
 final class BackupCreator
 {
     public const PREFIX = 'dla-backup-';
     public const SUFFIX = '.tar.gz';
 
+    /** @var \Closure(string): (float|false) */
+    private readonly \Closure $freeSpace;
+
+    /**
+     * @param (\Closure(string): (float|false))|null $freeSpace free bytes of a directory's filesystem (tests)
+     */
     public function __construct(
         private readonly PDO $pdo,
         private readonly string $coversDirectory,
         private readonly string $publicDirectory,
+        ?\Closure $freeSpace = null,
     ) {
+        $this->freeSpace = $freeSpace ?? static fn (string $dir): float|false => @disk_free_space($dir);
     }
 
     /**
@@ -91,7 +107,7 @@ final class BackupCreator
             $files[] = ['path' => Manifest::DATABASE, 'size' => (int) filesize($tmpDump), 'sha256' => $tar->addFile(Manifest::DATABASE, $tmpDump)];
             foreach ($coverFiles as $relative) {
                 $source = $this->coversDirectory . '/' . $relative;
-                $size = filesize($source);
+                $size = @filesize($source);
                 $files[] = ['path' => 'covers/' . $relative, 'size' => (int) $size, 'sha256' => $tar->addFile('covers/' . $relative, $source)];
             }
             $manifest = [
@@ -129,18 +145,27 @@ final class BackupCreator
             $tar->close();
             @chmod($tmpArchive, 0600);
             $this->sync($tmpArchive);
+            @unlink($tmpDump);
 
-            $sha256 = (string) hash_file('sha256', $tmpArchive);
+            $log('Verifying the archive…');
+            $check = (new BackupVerifier())->verify($tmpArchive);
+            if (!$check['ok']) {
+                throw new BackupException('The new archive failed verification (' . implode('; ', $check['errors']) . ')');
+            }
+            $sha256 = (string) $check['sha256'];
             $final = $this->finalName($dir);
-            if (!rename($tmpArchive, $final)) {
+            $tmpSidecar = $dir . '/.tmp-dla-' . $id . '.sha256';
+            if (file_put_contents($tmpSidecar, $sha256 . '  ' . basename($final) . "\n") === false) {
+                throw new BackupException('Cannot write the checksum file (disk full?)');
+            }
+            @chmod($tmpSidecar, 0600);
+            // Sidecar first: an archive under its final name always has one.
+            if (!rename($tmpSidecar, $final . '.sha256') || !rename($tmpArchive, $final)) {
+                @unlink($final . '.sha256');
                 throw new BackupException('Cannot move the finished archive into place');
             }
-            $sidecar = $final . '.sha256';
-            $tmpSidecar = $dir . '/.tmp-dla-' . $id . '.sha256';
-            file_put_contents($tmpSidecar, $sha256 . '  ' . basename($final) . "\n");
-            @chmod($tmpSidecar, 0600);
-            rename($tmpSidecar, $sidecar);
-            $log('Backup written: ' . basename($final));
+            $this->sync($dir);
+            $log('Backup written and verified: ' . basename($final));
 
             return ['path' => $final, 'sha256' => $sha256, 'size' => (int) filesize($final), 'manifest' => $manifest, 'warnings' => $warnings];
         } finally {
@@ -224,15 +249,18 @@ final class BackupCreator
         }
         // Worst case: an uncompressed dump plus the archive; keep a margin.
         $needed = 2 * $database + $covers + 64 * 1024 * 1024;
-        $free = @disk_free_space($dir);
+        $free = ($this->freeSpace)($dir);
         if ($free !== false && $free < $needed) {
             throw new BackupException(sprintf('Not enough free space: about %d MiB needed, %d MiB available', (int) ceil($needed / 1048576), (int) floor($free / 1048576)));
         }
     }
 
+    /**
+     * fsync a file, or a directory (so a rename survives a power loss).
+     */
     private function sync(string $path): void
     {
-        $handle = fopen($path, 'rb');
+        $handle = @fopen($path, 'rb');
         if ($handle !== false) {
             @fsync($handle);
             fclose($handle);

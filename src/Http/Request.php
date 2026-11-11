@@ -133,9 +133,16 @@ final class Request
         return is_scalar($value) ? (string) $value : null;
     }
 
+    /**
+     * The verified client address (see ClientIp): REMOTE_ADDR as set by
+     * Nginx, normalised; ClientIp::UNKNOWN when missing or malformed.
+     * Forwarding headers are never consulted here.
+     */
     public function remoteAddress(): string
     {
-        return (string) ($this->server['REMOTE_ADDR'] ?? '0.0.0.0');
+        $value = $this->server['REMOTE_ADDR'] ?? null;
+
+        return ClientIp::normalize(is_string($value) ? $value : null) ?? ClientIp::UNKNOWN;
     }
 
     public function userAgent(): string

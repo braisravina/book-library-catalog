@@ -82,4 +82,16 @@ final class ConfigTest extends TestCase
         self::assertFalse((new Config(['APP_DEBUG' => 'true']))->debug(), 'Missing APP_ENV must default to production');
         self::assertTrue((new Config(['APP_ENV' => 'development', 'APP_DEBUG' => 'true']))->debug());
     }
+
+    public function testUnknownEnvironmentsFailClosedToProduction(): void
+    {
+        foreach (['production', 'prod', 'staging', 'Development', 'development ', 'dev', ''] as $env) {
+            $config = new Config(['APP_ENV' => $env, 'APP_DEBUG' => 'true']);
+            self::assertTrue($config->isProduction(), var_export($env, true));
+            self::assertFalse($config->debug(), var_export($env, true));
+        }
+        self::assertTrue((new Config([]))->isProduction());
+        self::assertFalse((new Config(['APP_ENV' => 'development']))->isProduction());
+        self::assertFalse((new Config(['APP_ENV' => 'testing']))->isProduction());
+    }
 }

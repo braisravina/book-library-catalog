@@ -136,7 +136,8 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
 - **Backups and restore** (CLI only):
   - `backup:create` writes a checksummed archive (database dump, cover images, manifest) from a consistent snapshot.
   - `backup:verify` rejects corrupted or malicious archives.
-  - `backup:restore` is guarded: it needs maintenance mode and a typed confirmation, verifies first, refuses to overwrite without `--replace`, and reports partial failure explicitly.
+  - `backup:restore` is guarded: it needs maintenance mode and a typed confirmation, verifies first, accepts only literal data, checks free space, takes a safety backup of a non-empty target, refuses to overwrite without `--replace`, checks foreign keys afterwards, and reports partial failure explicitly (the site stays in maintenance mode until a restore succeeds). It is not atomic; the safety backup is the rollback path.
+  - Operations commands run only in the ops role in production and never overlap (operation lock).
   - `maintenance:on|off` switches the site to a 503 page.
   - See [docs/OPERATIONS.md](docs/OPERATIONS.md), which includes the disaster-recovery runbook.
 - **Housekeeping:** `cleanup` prunes expired invitations, old sign-in records, stale temporary files and old backups.
@@ -241,6 +242,7 @@ The database has no published port. Only the `php` service can reach it.
   - invitations: creation, hashing (no token stored anywhere), expiry, revocation, replacement, single use, concurrent redemption (two connections), role restrictions (application and database), rate limiting, administrator-only access, and the token-free redirect and headers;
   - exports: JSON structure and versioning, CSV quoting, BOM, no truncation and formula-injection protection, per-user isolation and IDOR attempts, administrator-only catalogue export and its exclusions, headers, and a large catalogue streamed in batches with bounded memory;
   - backups: archive contents, permissions and no secrets; refusal of unsafe locations and missing covers; verification against corrupted, truncated and malicious archives (path traversal, links, devices, pax headers, duplicates, forged manifests); guarded restore into the disposable test database (refusals, `--replace`, an empty target, partial failure); console guards; maintenance mode;
+  - disaster recovery end to end (back up, lose every table and cover, restore, compare checksums and foreign keys), rollback from the safety backup after a failed restore, the incomplete-restore marker, role separation (`APP_ROLE`), operation locks including a killed holder, snapshot consistency under concurrent writes, vanished covers, full disks, literal-only dumps and foreign-key violations;
   - cleanup: dry runs, retention, symbolic-link safety, report-only orphaned covers, and backup retention that keeps the newest verified archive;
   - the Phase 4B migration applied to a database holding Phase 4A data.
 - **Integration tests** (`tests/Integration`) run against the MySQL database
@@ -292,36 +294,36 @@ the full, commented list. Any variable can instead be supplied as a file via
 ## Deployment
 
 Production deployment to the Bravina Docker infrastructure is **not** done yet.
+The production stack is prepared in `docker-compose.prod.yml` (unprivileged,
+read-only containers, private networks, no published ports, file-based
+secrets, separate web/ops roles, pinned images, health checks). Follow the
+operator runbook **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**; the design is
+in [ARCHITECTURE.md › Deployment](ARCHITECTURE.md#deployment) and the
+go-live checklist in [SECURITY.md](SECURITY.md#production-deployment-checklist).
 
 ### Known deployment blockers
 
 These must be resolved and verified before any deployment:
 
-1. **The Alpine PHP image has never been built successfully.** In Phases 1
-   and 2, real builds of both the `dev` and `prod` targets failed at
-   `apk add`: the cloud build environment's egress policy blocks the Alpine
-   package mirrors (HTTP 403). Only the Dockerfile lint (`docker build
-   --check`) and the `vendor` stage were verified. The test suites ran on
-   sandbox stand-in images: Debian PHP 8.4 in Phase 1, and the official
-   `wordpress:php8.4-fpm` image (PHP 8.4 with GD) plus `pdo_mysql` in
-   Phase 2. Both used the project's own `php.ini`, FPM pool and entrypoint.
-   Build both targets on a machine with normal network access, then run
-   the full suite with `--fail-on-skipped` inside the built image.
-2. **Client IP forwarding is not configured.** See
-   [ARCHITECTURE.md › Client IP behind a reverse proxy](ARCHITECTURE.md#client-ip-behind-a-reverse-proxy).
-3. **The CI workflow has never been executed.**
-4. **Backups are not scheduled and have no production location.** Mount
-   persistent storage at `storage/backups`, add off-site copies, enable the
-   schedules in [docs/OPERATIONS.md](docs/OPERATIONS.md#recommended-schedule-not-activated),
+1. **Ingress and client IP forwarding are not configured.** The path from
+   Cloudflare through cloudflared and Traefik (Raspberry Pi) to the Docker
+   server is unverified. Run the read-only discovery scripts
+   (docs/DEPLOYMENT.md, section 0), share sanitized reports, and approve a
+   trusted-proxy design. Until then the production nginx container refuses
+   to start (by design).
+2. **The images have never been built and the stack has never run.** No
+   container runtime is used on the development machine. The CI job
+   `production-stack` builds the images, starts the stack and runs a restore
+   drill, but CI has not been executed yet (earlier phases' build attempts
+   failed only because a sandbox blocked the Alpine mirrors).
+3. **The CI workflow has never been executed.** Only static checks of it ran
+   locally (docs/DEPLOYMENT.md, "First CI run").
+4. **Backups are not scheduled and there is no off-host copy.** Enable the
+   schedules in [docs/OPERATIONS.md](docs/OPERATIONS.md#recommended-schedule-not-activated)
    and run one restore drill on the production host.
-5. **The reverse proxy must not log query strings for `/invite`.** The
-   bundled nginx already omits these requests; check the Bravina proxy too.
-
-The production image target (`docker build --target prod -f docker/php/Dockerfile .`)
-and the requirements are described in
-[ARCHITECTURE.md › Deployment](ARCHITECTURE.md#deployment). Work through the
-checklist in [SECURITY.md](SECURITY.md#production-deployment-checklist) before
-going live.
+5. **Proxy logging of invitation URLs** must be checked on the real
+   Cloudflare/cloudflared/Traefik setup if query-format invitation links are
+   used (the default production template uses fragment links).
 
 ## Project layout
 

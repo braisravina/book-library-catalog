@@ -9,7 +9,10 @@ storage/cache
 storage/backups
 storage/tmp
 storage/maintenance.flag
+storage/maintenance.flag.restore-incomplete
 .phpunit.cache
 coverage
 tests
 *.md
+secrets
+docker/discovery

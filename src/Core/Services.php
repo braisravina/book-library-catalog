@@ -26,6 +26,7 @@ use DigitalLibrary\Backup\BackupRestorer;
 use DigitalLibrary\Collections\CollectionRepository;
 use DigitalLibrary\Collections\CollectionService;
 use DigitalLibrary\Invitations\InvitationDelivery;
+use DigitalLibrary\Invitations\InvitationLink;
 use DigitalLibrary\Invitations\InvitationRepository;
 use DigitalLibrary\Invitations\InvitationService;
 use DigitalLibrary\Invitations\ManualLinkDelivery;
@@ -211,6 +212,11 @@ final class Services
      * Phase 4B: links are shown to the administrator; swap in an e-mail
      * implementation here once outbound mail is approved and configured.
      */
+    public function invitationLink(): InvitationLink
+    {
+        return $this->once(InvitationLink::class, fn (): InvitationLink => InvitationLink::fromConfig($this->config));
+    }
+
     public function invitationDelivery(): InvitationDelivery
     {
         return $this->once(InvitationDelivery::class, fn (): InvitationDelivery => new ManualLinkDelivery());

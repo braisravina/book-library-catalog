@@ -234,6 +234,7 @@ return [
         'back_home' => 'Volver a la página de inicio',
         'csrf' => 'El formulario ha caducado. Vuelve atrás, recarga la página e inténtalo de nuevo.',
         'generic' => ['title' => 'Algo ha fallado', 'message' => 'No se ha podido completar la solicitud.'],
+        '400' => ['title' => 'Solicitud incorrecta', 'message' => 'No se ha podido procesar la solicitud.'],
         '403' => ['title' => 'Acceso denegado', 'message' => 'No tienes permiso para acceder a esta página.'],
         '404' => ['title' => 'Página no encontrada', 'message' => 'La página solicitada no existe.'],
         '405' => ['title' => 'Método no permitido', 'message' => 'Esta acción no está admitida.'],
@@ -749,6 +750,13 @@ return [
             'password_confirmation' => 'Repite la contraseña',
             'submit' => 'Crear la cuenta',
             'done' => 'Tu cuenta está lista. Inicia sesión con tu dirección de correo y tu contraseña.',
+        ],
+        'redeem' => [
+            'title' => 'Aceptar la invitación',
+            'intro' => 'Abriendo tu invitación… Si no ocurre nada, pega abajo el código de invitación: es la parte del enlace de invitación que va después del signo «#».',
+            'code' => 'Código de invitación',
+            'code_hint' => '43 caracteres: letras, cifras, «-» y «_». Solo se puede usar una vez y caduca.',
+            'submit' => 'Continuar',
         ],
         'invalid' => [
             'title' => 'Invitación no válida',

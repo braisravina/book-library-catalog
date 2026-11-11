@@ -18,9 +18,17 @@
 ## Runtime topology
 
 ```
-Browser ──HTTPS──▶ Bravina reverse proxy (TLS) ──HTTP──▶ nginx:1.27-alpine ──FastCGI──▶ php:8.4-fpm-alpine ──▶ mysql:8.4
-                                                         serves /assets only          runs public/index.php    no published port
+Browser ──HTTPS──▶ (ingress: Cloudflare / cloudflared / Traefik — PENDING verification)
+                   ──HTTP──▶ nginx 1.30 (unprivileged, :8080) ──FastCGI──▶ php 8.4-fpm ──▶ mysql 8.4.13
+                             serves /assets only                   runs public/index.php    no published port
 ```
+
+The ingress path in front of nginx is **not yet verified**. The Bravina
+infrastructure has a Debian Docker server and a Raspberry Pi running
+cloudflared and Traefik; how requests travel between them, and therefore
+which peer nginx may trust, is established by the read-only scripts in
+`docker/discovery/` before any trusted-proxy setting is chosen (see
+[Production ingress (pending)](#production-ingress-pending)).
 
 - **nginx** serves `public/assets` directly. Every other path is routed
   internally to `public/index.php`. Direct requests to any `.php` file,
@@ -490,19 +498,37 @@ See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the operator's view.
   never touches the filesystem itself.
 - **`BackupCreator`.** Writes the dump to a temporary file, then archives
   `database.sql`, the covers and `manifest.json` (last). It hashes while
-  writing, fsyncs, renames atomically and writes a `.sha256` sidecar.
-  Referenced covers must exist.
+  writing, fsyncs, **verifies the finished temporary archive**, writes the
+  `.sha256` sidecar, and only then renames both into place (a final name
+  always means a complete, verified backup). Referenced covers must exist.
+  Free space is checked first (injectable for tests).
 - **`BackupVerifier` / `BackupRestorer`.** Verify, then extract with
   re-hashing. Every statement is checked against an allow-list of dumper
   shapes (`DumpReader::isAllowed`) and executed as a single prepared
   statement. The pre-flight checks (target database empty or `--replace`,
-  cover conflicts) run before any change. The dump runs through the
+  cover conflicts, free space for extraction and covers) run before any
+  change; INSERT values must be literals only (`DumpReader::isLiteralInsert`).
+  A `$beforeChanges` hook lets the console take a **safety backup** of a
+  non-empty target and write the restore marker. The dump runs through the
   migration account; covers are placed by temporary file and rename. Row
-  counts and covers are checked afterwards, and a mid-way failure is
-  reported as partial.
+  counts, **foreign-key integrity** (`foreignKeyViolations()`, as the dump
+  loads with checks off) and covers are checked afterwards, and a mid-way
+  failure is reported as partial. A restore is **not atomic** (MySQL DDL
+  commits implicitly); the safety backup is the rollback path.
 - **Maintenance and retention.** `MaintenanceMode` is a flag file;
-  `Application` answers 503 while it exists. `Cleanup` runs retention as a
-  dry run by default and never deletes the newest verified backup.
+  `Application` answers 503 while it exists, or while a restore into the
+  live database is marked incomplete (`<flag>.restore-incomplete`), which
+  `maintenance:off` clears only with `--acknowledge-incomplete-restore=<database>`,
+  after recording it in the audit log. The 35-second pre-restore wait in
+  production is best effort only (see docs/OPERATIONS.md).
+  `Cleanup` runs retention as a dry run by default and never deletes the
+  newest verified backup.
+- **Role separation and locking (Console).** In production, `migrate`,
+  `user:create`, `backup:create`, `backup:restore`, `maintenance:on|off` and
+  `cleanup` require `APP_ROLE=ops`; `APP_ROLE=web` refuses them everywhere.
+  Commands that must not overlap take `OperationLock` (`flock` on
+  `TEMP_PATH/operations.lock`; released by the kernel when the process
+  exits, so locks never go stale).
 
 ## Database access
 
@@ -563,59 +589,216 @@ reduced to a SQLSTATE before they can reach any output. Multi-step writes use
 
 ## Deployment
 
-Production deployment hasn't been performed or verified. Requirements:
+Production deployment hasn't been performed. The production stack below is
+prepared in the repository and validated statically and with local nginx,
+but it has **never been built or run**: Docker is not used on the
+development machine. See [Verification that needs Docker](#verification-that-needs-docker).
+The operator procedures (secrets, migration, health checks, updates,
+rollback, emergency shutdown, resource planning) are in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-1. **TLS** terminates at the existing Bravina reverse proxy, which forwards to
-   the `nginx` service. Set `APP_URL=https://library.bravina.co.uk`,
-   `SESSION_SECURE_COOKIE=true` and `SECURITY_HSTS=true`.
-2. **Client IP:** configure trusted-proxy handling as described in
-   [Client IP behind a reverse proxy](#client-ip-behind-a-reverse-proxy).
-3. **Image (blocker until verified):** the Alpine image has not yet been
-   built or tested anywhere. Build `docker build --target prod -f docker/php/Dockerfile .`
-   and run it instead of the bind-mounted dev target. Nginx needs the same
-   `public/` files (bake a small nginx image or share a read-only volume).
-4. **Secrets:** use Docker secrets (`DB_PASSWORD_FILE`, …). Set
-   `APP_ENV=production`.
-5. **Persistence:** volumes for MySQL data and `storage/covers`. Include both
-   in backups.
-6. **Migrations:** run `php bin/console migrate` as a one-off task on each
-   release, before the new image takes traffic.
+### Production stack (`docker-compose.prod.yml`)
+
+A separate Compose file; the development `docker-compose.yml` is never used
+in production. Run from the repository checkout on the Docker host with
+`docker compose -f docker-compose.prod.yml --env-file .env.production …`
+(the header of the file lists the steps).
+
+| Service | Image | Runs as | Networks | Credentials |
+|---|---|---|---|---|
+| `nginx` | `docker/nginx/Dockerfile`: pinned nginx, `nginx.prod.conf`, `default.conf`, `public/assets` baked in | `nginx` (101), port 8080 | `frontend` | none |
+| `php` | `docker/php/Dockerfile` target `prod` | `www-data` (82) | `frontend`, `backend`, `egress` | runtime DB account (`APP_ROLE=web`) |
+| `ops` | same image, profile `ops`, `run --rm` only | `www-data` (82) | `backend` | runtime + migration accounts (`APP_ROLE=ops`) |
+| `db` | pinned `mysql:8.4.13` | image entrypoint, then `mysql` (999) | `backend` | root (`root@localhost` only) |
+
+- **No published ports.** `frontend` (nginx ↔ php) and `backend`
+  (php/ops ↔ MySQL) are `internal` networks with no route outside Docker.
+  Only `php` joins `egress`, for ISBN metadata lookups (restrict it on the
+  host firewall; drop it with `METADATA_PROVIDERS=none`). All networks
+  belong to the Compose project (`digital-library-prod`); none is external
+  or attachable.
+- **Least privilege.** `nginx`, `php` and `ops` have a read-only root
+  filesystem, drop all capabilities, use `no-new-privileges` and a private
+  `/tmp` tmpfs. `db` uses `no-new-privileges` (the MySQL entrypoint needs
+  its default capabilities to switch to the `mysql` user).
+- **Credential separation** (`APP_ROLE`, enforced by `ConfigValidator`): the
+  web container receives only `secrets/db_password` and has the migration
+  and root settings explicitly cleared; with `APP_ROLE=web`, any migration
+  or root credential is a configuration **error** (refuse to start / 503).
+  `ops` requires the migration account. The MySQL root password exists only
+  in the `db` container, and `MYSQL_ROOT_HOST=localhost` keeps root off the
+  network.
+- **Startup validation.** The PHP image's entrypoint runs
+  `bin/console config:check` before PHP-FPM; errors stop the container.
+  The nginx entrypoint refuses to start without an explicit client IP
+  policy (below). Production still refuses to serve (503) on errors.
+- **Pinned images.** Base images are pinned by version and multi-architecture
+  index digest (`php:8.4.27-fpm-alpine3.24`, `composer:2.11.2`,
+  `nginx:1.30.6-alpine3.24`, `mysql:8.4.13`); development uses the same
+  nginx and MySQL pins. Update tag and digest together
+  (`docker buildx imagetools inspect <image>:<tag>` on the Docker host),
+  then rebuild and rerun the suite.
+- **Health checks** (all `CMD`, no shell): nginx `GET /health` on
+  127.0.0.1:8080 (end to end through PHP to MySQL; `/health` is exempt from
+  the Host and trusted-proxy checks); php: TCP connect to FPM on 9000; db:
+  `mysqladmin ping` over TCP without credentials (succeeds whenever the
+  server answers, and fails while the image initialises with networking
+  off). `nginx` waits for a healthy `php`, `php` and `ops` for a healthy `db`.
+- **Restart and logs:** `unless-stopped` (ops: `no`); `json-file` logs,
+  10 MB × 5 files per container.
+- **Migrations:** `run --rm ops php bin/console migrate` on each release,
+  before the new image takes traffic. Backups, restores, maintenance mode and
+  cleanup run the same way (docs/OPERATIONS.md).
+
+### Production secrets
+
+Files in `./secrets/` on the Docker host (git- and docker-ignored), one
+random value each (`openssl rand -hex 32`). Compose file-based secrets are
+bind mounts, so the host file's numeric owner and mode are what the
+container sees:
+
+| File | Used by | Owner:group | Mode |
+|---|---|---|---|
+| `secrets/db_root_password` | db (999) | `999:999` | `0400` |
+| `secrets/db_password` | php/ops (82), db init (999) | `82:999` | `0440` |
+| `secrets/db_migration_password` | ops (82), db init (999) | `82:999` | `0440` |
+
+The directory itself: `root:root`, `0750` (or owned by the deploying admin).
+The MySQL init script (`docker/mysql/init/01-create-users.sh`) reads
+`DB_PASSWORD_FILE`/`DB_MIGRATION_PASSWORD_FILE` (refusing both a value and a
+file, or an unreadable/empty file) and runs only when the data volume is
+first initialised. Keep copies in the password manager (docs/OPERATIONS.md,
+"Secrets to preserve").
+
+### Persistent storage and permissions
+
+| Volume | Mounted at | Containers | Contents |
+|---|---|---|---|
+| `db-data` | `/var/lib/mysql` | db | MySQL data (owned by `mysql`, 999) |
+| `app-storage` | `/var/www/html/storage` | php, ops | covers, tmp, cache, logs, maintenance flag |
+| `app-backups` | `/var/www/html/storage/backups` | ops only | backup archives |
+
+The prod image creates `storage/{covers,logs,cache,backups,tmp}` owned by
+`www-data` (82) with mode `0750`; Docker copies that ownership into a new,
+empty named volume on first use. To use a host directory for backups
+instead (e.g. for off-site copies), create it as `82:82`, mode `0750`, and
+bind it at `storage/backups` in the `ops` service. The web container never
+mounts the backups.
+
+### Production ingress (pending)
+
+**Blocked on the topology discovery** (`docker/discovery/docker-host.sh` on
+the Docker server, `docker/discovery/ingress-host.sh` on the Raspberry Pi;
+both read-only, report-only, secret-withholding). Until the results are
+reviewed and a design approved, the stack deliberately has no ingress:
+
+- `nginx` joins only the internal `frontend` network and publishes nothing.
+- `docker/nginx/production/` (mounted at `/etc/nginx/dla/`) holds no
+  `client-ip.conf`, and `DLA_TRUSTED_PROXY` is unset: the nginx entrypoint
+  refuses to start (fail closed). It also refuses a template placeholder,
+  a trust-everything range (`0.0.0.0/0`, `::/0`), `required` without a
+  trusted proxy, `none` with one, and anything `nginx -t` rejects.
+
+Decided only after discovery, with your approval: the path (Cloudflare →
+cloudflared → Traefik → nginx, or otherwise), which peer nginx trusts and
+the header it reads (`CF-Connecting-IP` or `X-Forwarded-For`), how traffic
+reaches nginx (a published port on a specific host address, or a dedicated
+network with a fixed proxy address), whether direct requests are refused
+(403) after routing and health checks are verified, and the Host header the
+proxy forwards.
+
+### Verification that needs Docker
+
+Not possible on the development machine (no container runtime), to do on
+the Docker host before go-live: build both images (`apk` and Composer
+access), `docker compose -f docker-compose.prod.yml config`, start-up with
+read-only root filesystems and dropped capabilities, health checks turning
+healthy, named-volume ownership on first use, secret file permissions as
+seen by uid 82 and 999, `MYSQL_ROOT_HOST=localhost` and the init script with
+`*_FILE` secrets on a fresh volume, the credential-less MySQL health check,
+egress filtering, the full test suite inside the built PHP image
+(`--fail-on-skipped`), and the nginx entrypoint refusing to start until the
+policy is installed. Once it runs, the CI job `production-stack` covers the
+build, start-up, health checks, users, read-only filesystems, secret
+ownership, role refusals and a restore drill on a GitHub runner; the
+production host itself still needs its own check (DEPLOYMENT.md).
 
 ### Client IP behind a reverse proxy
 
-The application uses only `REMOTE_ADDR`, never a forwarded header itself.
-Behind a reverse proxy, `REMOTE_ADDR` is the proxy's address unless Nginx
-is told which peers to trust. Without that:
+**Trust model.** The application never reads forwarding headers. Its only
+input is `REMOTE_ADDR`, which `Http\ClientIp` normalises (one canonical
+form; IPv4-mapped IPv6 becomes IPv4; anything that is not exactly one
+address becomes the shared `0.0.0.0` bucket). Login throttling, invitation
+throttling and the audit log all use that same value. Rate-limit buckets
+are the IPv4 address or the IPv6 `/64` (`ClientIp::throttleKey()`), so an
+IPv6 client cannot rotate through its own subnet.
 
-- every user shares one IP for the per-IP login limit (20 failures in
-  15 minutes), so one attacker can lock out everyone;
-- audit-log IP addresses are meaningless.
+Nginx decides what `REMOTE_ADDR` is:
 
-Configuring it wrongly is worse than not configuring it. If an untrusted
-host is listed as trusted, any client can forge its IP address and bypass
-the per-IP limit.
+- `docker/nginx/client-ip.conf` (mounted at `/etc/nginx/dla/client-ip.conf`)
+  is the **only** place where proxies are trusted. The shipped file trusts
+  **no** proxy: `REMOTE_ADDR` is the TCP peer.
+- `default.conf` removes every forwarding header (`X-Forwarded-*`,
+  `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`, `True-Client-IP`, …)
+  before FastCGI, whatever the policy, and logs the TCP peer
+  (`peer=$realip_remote_addr`) next to the client address.
+- With a policy that requires a trusted proxy, requests that did not come
+  from it with a valid client address get **403**, except `/health`
+  (local container probes).
 
-No proxy address is assumed in this repository. To configure:
+Without a trusted proxy, every visitor behind Cloudflare or a reverse proxy
+shares the proxy's address: one per-IP login bucket for everyone (an
+attacker can lock everyone out for 15 minutes) and meaningless audit IPs.
+Trusting the wrong peer is worse: anyone who can reach nginx from that
+address can choose their IP and bypass the per-IP limit.
 
-1. Find the address the proxy connects **from**, as seen by the `nginx`
-   container. For a proxy on a shared Docker network, use that container's
-   address on the network (`docker network inspect <network>`); for a proxy
-   on the host, use the gateway address of the Compose network. Docker may
-   reassign container addresses on restart. Prefer a dedicated network with
-   a fixed subnet, or a static address for the proxy.
-2. In `docker/nginx/default.conf`, uncomment the block and replace
-   `<PROXY_ADDRESS_OR_NARROW_CIDR>` with that address, or the narrowest
-   CIDR containing only the proxy.
-3. Make sure the proxy **overwrites or appends** `X-Forwarded-For` with the
-   real client address. With `real_ip_recursive on`, Nginx walks the header
-   from the right and stops at the first untrusted address.
-4. Make sure the application port is reachable **only** through the proxy.
-   Compose binds it to `127.0.0.1` for this reason.
-5. Verify: sign in from a known IP, then confirm that
-   `SELECT ip_address FROM audit_log ORDER BY id DESC LIMIT 1` shows that
-   IP rather than the proxy's. Also confirm that a request sending a forged
-   `X-Forwarded-For` directly to the container (bypassing the proxy) does
-   not change the logged IP.
+**The production topology is not verified.** The owner reports a Debian
+Docker server and a Raspberry Pi running cloudflared and Traefik; the actual
+path between them is established by `docker/discovery/` (DEPLOYMENT.md,
+section 0). Two reviewed templates exist; `nginx -t` rejects both until
+their placeholder is replaced with a real address:
+
+| Template | Topology | Header | Trusted peer |
+|---|---|---|---|
+| `client-ip.cloudflared.conf.example` | Cloudflare → cloudflared → nginx | `CF-Connecting-IP` (single value, not walked) | cloudflared's fixed address |
+| `client-ip.reverse-proxy.conf.example` | proxy → nginx | `X-Forwarded-For`, walked from the right | the proxy's fixed address |
+
+To configure:
+
+1. Establish the topology (discovery reports) and which component connects
+   to nginx; get the design approved.
+2. Make that component's address, as nginx sees it, **single and fixed**:
+   - same Docker host: a **dedicated** internal network shared only with
+     nginx, with a fixed subnet and static address (a shared or default
+     network is not a trust boundary);
+   - another host (e.g. the Raspberry Pi): publish nginx only on the
+     Docker server's specific LAN address and port, trust only that host's
+     address, and restrict the port to it on the host firewall.
+
+   Never trust a whole Docker subnet, a LAN range or `0.0.0.0/0`.
+3. Copy the matching template to `docker/nginx/production/client-ip.conf`
+   (the production mount; `docker/nginx/client-ip.conf` stays the
+   development trust-nothing policy), replace the placeholder with that
+   single address, set `DLA_TRUSTED_PROXY=required`, and run `nginx -t`.
+4. Never publish PHP-FPM; publish nginx only as step 2 describes.
+5. Run `php tests/nginx/run.php` (local nginx + PHP-FPM, unprivileged).
+6. Verify on the deployment: sign in from a known IP, then check
+   `SELECT ip_address FROM audit_log ORDER BY id DESC LIMIT 1` and the
+   access log's `peer=` field. Send a request with a forged
+   `CF-Connecting-IP`/`X-Forwarded-For` directly to nginx (bypassing the
+   proxy); it must be refused (403) or, without the requirement, logged
+   with its real peer address.
+
+### Host header
+
+The application answers only the host and port of `APP_URL`
+(`Http\HostPolicy`). Nginx passes the raw `Host` header
+(`fastcgi_param HTTP_HOST $http_host`, explicit so it does not depend on the
+distribution's `fastcgi_params`) and refuses absolute-form requests whose
+target host differs from the `Host` header (400). Note: Debian's packaged
+`fastcgi_params` maps `HTTP_HOST` to `$host`, which drops the port; this
+affects only a native Debian nginx (e.g. the local `books.test` vhost),
+where the application cannot see the port.
 
 ## Testing strategy
 
@@ -627,5 +810,39 @@ No proxy address is assumed in this repository. To configure:
 - Backup and restore tests write only to temporary directories, and restore
   only into the disposable `DB_TEST_DATABASE`. Afterwards they rebuild its
   schema from the migrations.
-- CI (`.github/workflows/ci.yml`) runs lint, both suites against a MySQL 8.4
-  service, and a Dockerfile lint.
+- CI (`.github/workflows/ci.yml`; **written and statically tested, never
+  executed yet**) has four jobs:
+  - `test` (PHP 8.4): `composer validate --strict`, `composer audit`, lint,
+    the full suite with `--fail-on-skipped --fail-on-warning` against the
+    production MySQL image (dedicated test accounts), and
+    `tests/nginx/run.php`;
+  - `unit-php83`: lint and the unit suite on PHP 8.3 (tooling compatibility);
+  - `static`: shellcheck on every shell script, `docker build --check` on
+    both Dockerfiles, `docker compose config` on both Compose files (and no
+    published production port);
+  - `production-stack`: builds the production images, starts
+    `docker-compose.prod.yml` with health checks, checks users, read-only
+    filesystems, secrets per role, the web role refusing ops commands, the
+    Host check and `config:check --strict` in both roles, then migrates,
+    backs up, verifies and runs a restore drill (maintenance mode, web PHP
+    stopped). It uses the trust-nothing client IP policy with
+    `DLA_TRUSTED_PROXY=none`, so it tests no ingress design.
+
+  Least privilege: `contents: read`, no secrets, no `pull_request_target`,
+  checkout without persisted credentials, actions pinned to commit SHAs,
+  every job time-limited; a weekly schedule repeats the audit and the drill.
+  `tests/Unit/Deployment/CiWorkflowTest.php` enforces these properties and
+  that every `run` block parses (`bash -n`).
+- `php tests/nginx/run.php` tests `docker/nginx/default.conf` and the client
+  IP policies against a local nginx and PHP-FPM (unprivileged, temporary
+  directory, loopback high ports; `127.0.0.2` plays the trusted proxy),
+  and serves the production main configuration (`nginx.prod.conf`) as a
+  non-root process with `/tmp`-only paths.
+  Exit status 2 means nginx or PHP-FPM is not installed.
+- `tests/Unit/Deployment/` checks the production stack without Docker:
+  the Compose structure (parsed by the strict `Tests\Support\BlockYaml`
+  reader), image pins, networks, credential separation per `APP_ROLE`
+  against `.env.production.example`, the nginx and PHP entrypoints and the
+  MySQL init script (run with stub binaries), and the discovery scripts
+  (read-only commands only; planted tokens, e-mail addresses, password
+  hashes and public client addresses never reach the report).

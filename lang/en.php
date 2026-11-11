@@ -234,6 +234,7 @@ return [
         'back_home' => 'Back to the start page',
         'csrf' => 'Your form has expired. Please go back, reload the page and try again.',
         'generic' => ['title' => 'Something went wrong', 'message' => 'The request could not be completed.'],
+        '400' => ['title' => 'Bad request', 'message' => 'The request could not be processed.'],
         '403' => ['title' => 'Access denied', 'message' => 'You do not have permission to access this page.'],
         '404' => ['title' => 'Page not found', 'message' => 'The page you requested does not exist.'],
         '405' => ['title' => 'Method not allowed', 'message' => 'This action is not supported.'],
@@ -749,6 +750,13 @@ return [
             'password_confirmation' => 'Repeat the password',
             'submit' => 'Create account',
             'done' => 'Your account is ready. Sign in with your e-mail address and password.',
+        ],
+        'redeem' => [
+            'title' => 'Accept your invitation',
+            'intro' => 'Opening your invitation… If nothing happens, paste the invitation code below: it is the part of your invitation link after the “#” sign.',
+            'code' => 'Invitation code',
+            'code_hint' => '43 characters: letters, digits, “-” and “_”. It can be used only once and expires.',
+            'submit' => 'Continue',
         ],
         'invalid' => [
             'title' => 'Invitation not valid',

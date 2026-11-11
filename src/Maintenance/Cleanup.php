@@ -125,9 +125,10 @@ final class Cleanup
     }
 
     /**
-     * Stale work files: storage/tmp/restore-* and backup-directory
-     * .tmp-dla-* items older than the retention period. Symbolic links are
-     * removed as links, never followed.
+     * Stale work files: storage/tmp/restore-*, backup-directory .tmp-dla-*
+     * items and covers/<bucket>/.restore-* files (left by an interrupted
+     * restore) older than the retention period. Symbolic links are removed
+     * as links, never followed.
      *
      * @return array{found: int, removed: int, details: list<string>}
      */
@@ -135,7 +136,13 @@ final class Cleanup
     {
         $cutoff = $now - $this->policy['temp_hours'] * 3600;
         $candidates = [];
-        foreach ([[$this->tempDirectory, '/^restore-[0-9a-f]{16}$/'], [$this->backupDirectory, '/^\.tmp-dla-[0-9a-f]{16}\.(sql|tar\.gz|sha256)$/']] as [$dir, $pattern]) {
+        $places = [[$this->tempDirectory, '/^restore-[0-9a-f]{16}$/'], [$this->backupDirectory, '/^\.tmp-dla-[0-9a-f]{16}\.(sql|tar\.gz|sha256)$/']];
+        foreach (is_dir($this->coversDirectory) && !is_link($this->coversDirectory) ? scandir($this->coversDirectory) ?: [] : [] as $bucket) {
+            if (preg_match('/^[0-9a-f]{2}$/', $bucket) === 1) {
+                $places[] = [$this->coversDirectory . '/' . $bucket, '/^\.restore-[0-9a-f]{12}$/'];
+            }
+        }
+        foreach ($places as [$dir, $pattern]) {
             if (!is_dir($dir) || is_link($dir)) {
                 continue;
             }

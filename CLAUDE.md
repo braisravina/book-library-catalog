@@ -57,6 +57,9 @@ These rules apply to every commit, in every phase, with no exceptions.
   - Phase 4B: branch `phase-4b` from the committed Phase 4A commit
     `a2e5040ae19886f8e8708e03aedb7a999196b32d` (tree
     `963a49ed7f4de3551ead2303dfabc408186d28b6`).
+  - Phase 5A: branch `phase-5a` from the committed Phase 4B commit
+    `5c1bbb5b86cb75c2ef77484519f3a99d0488cf45` (tree
+    `27fe5a79fefc4eee5402184f426704ab10ec6024`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -65,7 +68,12 @@ These rules apply to every commit, in every phase, with no exceptions.
   tests passed unless they actually ran. Clearly separate completed work
   from planned work.
 - Keep documentation current: `README.md`, `ARCHITECTURE.md`, `SECURITY.md`,
-  `.env.example` and this file.
+  `docs/OPERATIONS.md` (backups, restore, maintenance), `docs/DEPLOYMENT.md`
+  (operator runbook), `.env.example`, `.env.production.example` and this file.
+- Owner-only infrastructure: never connect to, probe or run commands on the
+  owner's servers, Cloudflare or production databases (see the
+  `infrastructure-access-boundary` skill); write commands for the owner to
+  run instead, and never invent topology-dependent values.
 
 ## Architecture conventions
 
@@ -135,7 +143,23 @@ These rules apply to every commit, in every phase, with no exceptions.
   never export credentials, sessions, invitations, login attempts, the audit
   log, wishlists, loans or private collections in the catalogue export;
   stream with keyset batches; CSV cells go through `CsvWriter`.
+- CI (`.github/workflows/ci.yml`): keep `contents: read`, actions pinned to
+  full commit SHAs with a version comment, no secrets or
+  `pull_request_target`, and no `! cmd` in `run` blocks (it never fails a
+  `set -e` script). New shell scripts and Dockerfiles must be added to the
+  shellcheck and `docker build --check` steps (`CiWorkflowTest` enforces it).
+- Production stack: `docker-compose.prod.yml` (never the development file).
+  Keep its guarantees, which `tests/Unit/Deployment/` enforces: no published
+  ports, internal app/database networks, non-root read-only containers, image
+  pins with digests, `APP_ROLE=web` containers without migration or root
+  credentials. Never add trusted-proxy addresses, ingress networks or 403
+  enforcement without an owner-approved, verified production topology.
 - Backups/restore/maintenance/cleanup are CLI-only (`Console\Operations`).
+  Operations commands are listed in `Console::OPS_COMMANDS` (ops role only
+  in production, never `APP_ROLE=web`) and, when they must not overlap, in
+  `Console::EXCLUSIVE_COMMANDS` (`OperationLock`); add new ones there. Never
+  describe a restore as atomic; keep the safety backup, restore marker and
+  literal-only INSERT validation.
   Destructive operations are dry-run or guarded by default; never add web
   routes for them. Tests restore only into the disposable test database
   and temporary directories.
@@ -153,3 +177,24 @@ docker compose exec php composer lint
 ```
 
 Without Docker, unit tests run with a local PHP ≥ 8.3: `composer install && vendor/bin/phpunit --testsuite unit`.
+
+## Mandatory infrastructure access restriction
+
+Only the repository owner is authorized to access servers
+and production infrastructure.
+
+Claude must never connect to, inspect, probe, modify, or
+execute commands on remote infrastructure, even when
+credentials or network access are available.
+
+Claude may prepare diagnostic scripts and deployment
+instructions, but only the owner may execute them.
+
+Claude may analyze sanitized outputs explicitly provided
+by the owner.
+
+Before any infrastructure-related task, follow:
+`.claude/skills/infrastructure-access-boundary/SKILL.md`
+
+This restriction applies to all tools, agents, delegated
+tasks, and future sessions.

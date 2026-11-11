@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Http\Controllers;
 
+use DigitalLibrary\Http\ClientIp;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Http\Response;
 use DigitalLibrary\Invitations\InvitationException;
@@ -25,6 +26,16 @@ use DigitalLibrary\Validation\Validator;
  *    chooses a display name and password; the account is created and the
  *    invitation consumed in one transaction. The user then signs in.
  *
+ * Fragment links (INVITATION_LINK_FORMAT=fragment, Phase 5A) keep the
+ * token out of every request line instead:
+ * 1'. GET /invite/redeem#…  renders a small form; the fragment never reaches
+ *     the server. A same-origin script copies it into the form, removes it
+ *     from the address bar and history entry, and submits; without
+ *     JavaScript the invitee pastes the code.
+ * 1''. POST /invite/redeem  (CSRF- and origin-checked) carries the token in
+ *     the body and then behaves exactly like step 1.
+ * Both entry points accept any valid token, whichever format the link used.
+ *
  * Failures share one generic message and count towards an IP-based limit.
  */
 final class RegistrationController extends Controller
@@ -34,15 +45,43 @@ final class RegistrationController extends Controller
 
     public function open(Request $request): Response
     {
+        return $this->begin($request, (string) $request->query('token', ''), 'open');
+    }
+
+    /**
+     * Landing page of fragment links (no token in the URL the server sees).
+     */
+    public function redeemPage(Request $request): Response
+    {
+        if (($retry = $this->retryAfter($request->remoteAddress())) > 0) {
+            return $this->throttled($retry);
+        }
+
+        return $this->private($this->render('invitations/redeem', ['page_title' => 'invitations.redeem.title']));
+    }
+
+    /**
+     * Token submitted in a POST body (fragment links and the paste-in form).
+     */
+    public function redeem(Request $request): Response
+    {
+        return $this->begin($request, trim((string) $request->input('invitation_code', '')), 'redeem');
+    }
+
+    /**
+     * Exchanges a token for session state (its hash only) and redirects to
+     * a token-free page. Every failure looks the same and is counted.
+     */
+    private function begin(Request $request, #[\SensitiveParameter] string $token, string $via): Response
+    {
         $ip = $request->remoteAddress();
         if ($this->retryAfter($ip) > 0) {
             return $this->tokenless(Response::redirect('/invite/invalid'));
         }
-        $token = (string) $request->query('token', '');
         $hash = InvitationToken::isWellFormed($token) ? InvitationToken::hash($token) : null;
         $invitation = $hash === null ? null : $this->services->invitationService()->redeemable($hash);
         if ($invitation === null) {
-            $this->recordFailure($request, 'open');
+            $this->recordFailure($request, $via);
 
             return $this->tokenless(Response::redirect('/invite/invalid'));
         }
@@ -199,7 +238,7 @@ final class RegistrationController extends Controller
      */
     private function bucket(string $ip): string
     {
-        return 'invitation:' . $ip;
+        return 'invitation:' . ClientIp::throttleKey($ip);
     }
 
     /**

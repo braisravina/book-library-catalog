@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Core;
 
+use DigitalLibrary\Http\HostPolicy;
 use DigitalLibrary\Http\HttpException;
 use DigitalLibrary\Http\Middleware\Authenticate;
 use DigitalLibrary\Http\Middleware\Middleware;
@@ -41,9 +42,24 @@ final class Application
     public function handle(Request $request): Response
     {
         try {
-            // The health check stays outside the session/CSRF stack.
+            $config = $this->services->config;
+            // Fail closed: production refuses to serve with an invalid configuration
+            // (the same rules as `bin/console config:check`).
+            if ($this->misconfiguredProduction()) {
+                return $request->path() === '/health'
+                    ? self::unavailable(Response::json(['status' => 'unavailable'], 503))
+                    : self::unavailable($this->renderError(new HttpException(503), $request, false));
+            }
+            // The health check stays outside the Host, session and CSRF stack
+            // (container probes address the container directly).
             if ($request->path() === '/health') {
                 return $this->dispatch($request);
+            }
+            // Only the host of APP_URL is answered; malformed or foreign Host
+            // headers are refused before any session or database work.
+            $hosts = HostPolicy::fromAppUrl($config->get('APP_URL'));
+            if ($hosts !== null && !$hosts->allows($request->header('Host'))) {
+                return $this->renderError(new HttpException(400, 'errors.400.message'), $request, false);
             }
             // Maintenance mode (restores): refuse everything before any session or database work.
             if ($this->services->maintenance()->isActive()) {
@@ -52,7 +68,6 @@ final class Application
 
                 return $response;
             }
-            $config = $this->services->config;
             $global = [
                 new SecurityHeaders($config->bool('SECURITY_HSTS', false)),
                 new StartSession($this->services->session(), $this->services->csrf(), $this->services->view()),
@@ -79,6 +94,49 @@ final class Application
         } catch (\Throwable $e) {
             return $this->renderError($e, $request, false);
         }
+    }
+
+    /**
+     * Production validation results per worker process, keyed by the raw
+     * configuration (Config::fingerprint()): the setting names in error, or
+     * an empty list. The environment of a PHP-FPM worker does not change
+     * while it runs, so validating once per process and configuration is
+     * equivalent to validating every request; a changed configuration (new
+     * container or worker) is validated again. Bounded in size.
+     *
+     * @var array<string, list<string>>
+     */
+    private static array $productionErrors = [];
+
+    private function misconfiguredProduction(): bool
+    {
+        $config = $this->services->config;
+        if (!$config->isProduction()) {
+            return false;
+        }
+        $key = $config->fingerprint();
+        if (!array_key_exists($key, self::$productionErrors)) {
+            $errors = (new ConfigValidator($this->services->basePath))->validate($config)['errors'];
+            $keys = array_values(array_unique(array_column($errors, 0)));
+            if (count(self::$productionErrors) >= 8) {
+                self::$productionErrors = [];
+            }
+            self::$productionErrors[$key] = $keys;
+            if ($keys !== []) {
+                // Logged once per process and configuration; keys only, never values.
+                error_log('[digital-library] refusing to serve: invalid production configuration (' . implode(', ', $keys) . '); run bin/console config:check');
+            }
+        }
+
+        return self::$productionErrors[$key] !== [];
+    }
+
+    private static function unavailable(Response $response): Response
+    {
+        $response->setHeader('Retry-After', '300');
+        $response->setHeader('Cache-Control', 'no-store');
+
+        return $response;
     }
 
     public function renderError(\Throwable $e, Request $request, bool $withLayout = true): Response
