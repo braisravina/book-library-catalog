@@ -27,6 +27,88 @@ final class CiWorkflowTest extends TestCase
         self::$workflow = BlockYaml::parseFile(self::path(self::FILE));
     }
 
+    /**
+     * Replays every job's shell lines in order, tracking which variables
+     * .env.production holds (cp of the template, sed -i, echo >>), and
+     * checks each production Compose invocation: positive ones only once
+     * the file exists and every mandatory ${VAR:?} variable has a value,
+     * always with an explicit --env-file; negative "config" checks only
+     * inside refuse, and only while a mandatory variable is really missing.
+     */
+    public function testComposeInputsAreCompleteBeforeEveryProductionComposeCall(): void
+    {
+        preg_match_all('/\$\{([A-Z0-9_]+):\?/', (string) file_get_contents(self::path('docker-compose.prod.yml')), $m);
+        $mandatory = array_values(array_unique($m[1]));
+        self::assertContains('DLA_HTTP_BIND', $mandatory);
+        self::assertContains('DLA_HTTP_PORT', $mandatory);
+        self::assertContains('DLA_EDGE_SUBNET', $mandatory);
+        self::assertContains('DLA_EDGE_GATEWAY', $mandatory);
+        self::assertContains('DLA_STORAGE_ROOT', $mandatory);
+        self::assertContains('DLA_DATA_ROOT', $mandatory);
+        self::assertNotContains('DLA_HTTP_PORT', array_keys(self::assignments((string) file_get_contents(self::path('.env.production.example')))), 'The port has no default anywhere');
+
+        $positives = 0;
+        $negatives = 0;
+        foreach (self::jobs() as $name => $job) {
+            $env = null; // .env.production does not exist yet
+            foreach ($job['steps'] ?? [] as $step) {
+                foreach (explode("\n", (string) ($step['run'] ?? '')) as $line) {
+                    $line = trim($line);
+                    if ($line === '' || str_starts_with($line, '#')) {
+                        continue;
+                    }
+                    if ($line === 'cp .env.production.example .env.production') {
+                        $env = self::assignments((string) file_get_contents(self::path('.env.production.example')));
+                    } elseif (preg_match('/^echo \'([A-Z0-9_]+)=(.+)\' >> \.env\.production$/', $line, $e) === 1) {
+                        self::assertNotNull($env, "{$name}: .env.production is created before it is appended to");
+                        $env[$e[1]] = $e[2];
+                    } elseif (preg_match('/^sed -i ["\']s#\^([A-Z0-9_]+)=\.\*#\1=([^#]*)#["\'] \.env\.production$/', $line, $e) === 1) {
+                        self::assertNotNull($env, "{$name}: .env.production is created before it is edited");
+                        self::assertArrayHasKey($e[1], $env, "{$name}: sed replaces a line the template has");
+                        $env[$e[1]] = $e[2];
+                    }
+                    if (str_starts_with($line, 'dc() {')) {
+                        self::assertStringContainsString('docker compose -f docker-compose.prod.yml --env-file .env.production "$@"', $line, "{$name}: dc always loads the env file explicitly");
+                        continue;
+                    }
+                    if (preg_match('/(^|\s|\$\()(docker compose -f docker-compose\.prod\.yml|dc)\s/', $line) !== 1) {
+                        continue;
+                    }
+                    if (str_contains($line, 'docker compose -f docker-compose.prod.yml')) {
+                        self::assertStringContainsString('docker compose -f docker-compose.prod.yml --env-file .env.production ', $line, "{$name}: explicit env file, never only the shell environment: {$line}");
+                    }
+                    self::assertNotNull($env, "{$name}: .env.production exists before: {$line}");
+                    $missing = array_values(array_filter($mandatory, static fn (string $k): bool => ($env[$k] ?? '') === ''));
+                    if (preg_match('/^refuse env ([A-Z0-9_]+)= /', $line, $o) === 1) {
+                        self::assertContains($o[1], $mandatory, "{$name}: the override empties a mandatory variable");
+                        $missing[] = $o[1];
+                    }
+                    if (str_starts_with($line, 'refuse ') && str_contains($line, ' config')) {
+                        self::assertNotSame([], $missing, "{$name}: a negative config test must really lack a mandatory variable: {$line}");
+                        $negatives++;
+                    } elseif (!str_starts_with($line, 'refuse ')) {
+                        self::assertSame([], $missing, "{$name}: mandatory Compose variables unset before: {$line}");
+                        $positives++;
+                    }
+                }
+            }
+        }
+        self::assertGreaterThanOrEqual(3, $negatives, 'The negative interpolation tests are kept');
+        self::assertGreaterThan(10, $positives);
+    }
+
+    /**
+     * KEY=value lines of an env file (comments and blank values ignored).
+     *
+     * @return array<string, string>
+     */
+    private static function assignments(string $content): array
+    {
+        preg_match_all('/^([A-Z0-9_]+)=(.+)$/m', $content, $m);
+
+        return array_combine($m[1], $m[2]);
+    }
+
     public function testLeastPrivilegeAndSafeTriggers(): void
     {
         self::assertSame(['contents' => 'read'], self::$workflow['permissions']);

@@ -431,7 +431,7 @@ final class PersistentStorageTest extends TestCase
         self::assertStringContainsString('test -z "$(git ls-files -- mysql secrets mysql-init-guard)"', $ci);
         self::assertStringContainsString('for path in mysql secrets mysql-init-guard; do test ! -e "$path"; done', $ci);
         self::assertStringContainsString("test \"\$(stat -c '%u %a' " . self::INSTALLED . ")\" = '0 755'", $ci);
-        self::assertStringContainsString("jq -c '[.services[] | .restart] | unique')\" = '[\"no\"]'", $ci, 'Compose resolves restart "no" everywhere');
+        self::assertStringContainsString("jq -c '[.services[] | .restart] | unique')\" '[\"no\"]'", $ci, 'Compose resolves restart "no" everywhere');
         self::assertStringContainsString('test "$policies" = \'[{"restart":"no","service":"db"},{"restart":"no","service":"nginx"},{"restart":"no","service":"php"}]\'', $ci, 'Docker holds restart "no"');
         self::assertStringContainsString('refuse dc exec -T php touch /var/www/html/storage/backups/ci-write-test', $ci);
         self::assertStringContainsString('refuse dc exec -T php test -e /var/lib/mysql/mysql.ibd', $ci);

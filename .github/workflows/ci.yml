@@ -187,7 +187,12 @@ jobs:
           for name in db_root_password db_password db_migration_password; do
             openssl rand -hex 32 > "/srv/dla-ci-data/secrets/$name"
           done
-          refuse() { if "$@"; then echo "UNEXPECTED SUCCESS: $*" >&2; exit 1; fi; }
+          # Negative tests: each "required variable ... is missing a value"
+          # message in this log is EXPECTED (Compose refusing on purpose);
+          # "ok: refused as expected" follows it. Every positive check names
+          # itself and prints the expected and actual values when it fails.
+          refuse() { if "$@"; then echo "UNEXPECTED SUCCESS: $*" >&2; exit 1; fi; echo "ok: refused as expected: $*"; }
+          expect() { if [ "$2" != "$3" ]; then printf '::error::%s\nexpected: %s\nactual:   %s\n' "$1" "$3" "$2" >&2; exit 1; fi; echo "ok: $1"; }
           # Fail closed: no default bind address or port for the published port.
           refuse docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
           # CI only: throwaway port and edge subnet (production: checked by the owner).
@@ -197,20 +202,20 @@ jobs:
           docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
           # Only nginx publishes, one port, on the configured address.
           published=$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -c '[.services | to_entries[] | select((.value.ports // []) | length > 0) | {service: .key, ports: [.value.ports[] | {host_ip, published: (.published | tostring), target}]}]')
-          test "$published" = '[{"service":"nginx","ports":[{"host_ip":"127.0.0.1","published":"8089","target":8080}]}]'
+          expect 'published ports' "$published" '[{"service":"nginx","ports":[{"host_ip":"127.0.0.1","published":"8089","target":8080}]}]'
           # Persistent storage: no default root (Compose refuses to run
           # without it), and exactly these bind mounts, none created on demand.
           refuse env DLA_STORAGE_ROOT= docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
           refuse env DLA_DATA_ROOT= docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
           # The Docker daemon never starts these containers by itself (only
           # digital-library.service does, after the storage preflight).
-          test "$(docker compose -f docker-compose.prod.yml --env-file .env.production --profile ops config --format json | jq -c '[.services[] | .restart] | unique')" = '["no"]'
+          expect 'restart policies' "$(docker compose -f docker-compose.prod.yml --env-file .env.production --profile ops config --format json | jq -c '[.services[] | .restart] | unique')" '["no"]'
           # Every mount from the two data roots (the read-only repository
           # files under ./docker are checked elsewhere).
           storage=$(docker compose -f docker-compose.prod.yml --env-file .env.production --profile ops config --format json | jq -cS '{named_volumes: ((.volumes // {}) | keys), services: [.services | to_entries[] | {service: .key, mounts: ([(.value.volumes // [])[] | select(.type != "bind" or ((.source // "") | (startswith("/mnt/") or startswith("/srv/dla-ci-data/")))) | {type, source, target, read_only: (.read_only // false), create_host_path: .bind.create_host_path}] | sort_by(.target))}] | sort_by(.service)}')
-          test "$storage" = '{"named_volumes":[],"services":[{"mounts":[{"create_host_path":false,"read_only":true,"source":"/srv/dla-ci-data/mysql-init-guard","target":"/run/dla-db-init","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/srv/dla-ci-data/mysql","target":"/var/lib/mysql","type":"bind"}],"service":"db"},{"mounts":[],"service":"nginx"},{"mounts":[{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/backups","target":"/var/www/html/storage/backups","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"ops"},{"mounts":[{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"php"}]}'
+          expect 'storage mounts' "$storage" '{"named_volumes":[],"services":[{"mounts":[{"create_host_path":false,"read_only":true,"source":"/srv/dla-ci-data/mysql-init-guard","target":"/run/dla-db-init","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/srv/dla-ci-data/mysql","target":"/var/lib/mysql","type":"bind"}],"service":"db"},{"mounts":[],"service":"nginx"},{"mounts":[{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/backups","target":"/var/www/html/storage/backups","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"ops"},{"mounts":[{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"php"}]}'
           # Secrets come from the data root, outside the checkout.
-          test "$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -c '[.secrets[].file] | sort')" = '["/srv/dla-ci-data/secrets/db_migration_password","/srv/dla-ci-data/secrets/db_password","/srv/dla-ci-data/secrets/db_root_password"]'
+          expect 'secret files' "$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -c '[.secrets[].file] | sort')" '["/srv/dla-ci-data/secrets/db_migration_password","/srv/dla-ci-data/secrets/db_password","/srv/dla-ci-data/secrets/db_root_password"]'
 
   production-stack:
     name: Production images, hardening and restore drill
