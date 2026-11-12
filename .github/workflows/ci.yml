@@ -211,9 +211,15 @@ jobs:
           # digital-library.service does, after the storage preflight).
           expect 'restart policies' "$(docker compose -f docker-compose.prod.yml --env-file .env.production --profile ops config --format json | jq -c '[.services[] | .restart] | unique')" '["no"]'
           # Every mount from the two data roots (the read-only repository
-          # files under ./docker are checked elsewhere).
-          storage=$(docker compose -f docker-compose.prod.yml --env-file .env.production --profile ops config --format json | jq -cS '{named_volumes: ((.volumes // {}) | keys), services: [.services | to_entries[] | {service: .key, mounts: ([(.value.volumes // [])[] | select(.type != "bind" or ((.source // "") | (startswith("/mnt/") or startswith("/srv/dla-ci-data/")))) | {type, source, target, read_only: (.read_only // false), create_host_path: .bind.create_host_path}] | sort_by(.target))}] | sort_by(.service)}')
-          expect 'storage mounts' "$storage" '{"named_volumes":[],"services":[{"mounts":[{"create_host_path":false,"read_only":true,"source":"/srv/dla-ci-data/mysql-init-guard","target":"/run/dla-db-init","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/srv/dla-ci-data/mysql","target":"/var/lib/mysql","type":"bind"}],"service":"db"},{"mounts":[],"service":"nginx"},{"mounts":[{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/backups","target":"/var/www/html/storage/backups","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"ops"},{"mounts":[{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"create_host_path":false,"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"php"}]}'
+          # files under ./docker are checked elsewhere): service, type,
+          # source, target and read-only flag, and no named volume.
+          # create_host_path is NOT compared here: Compose may omit
+          # "create_host_path: false" from its normalised JSON (null is not
+          # proof of false). It is asserted on the YAML itself
+          # (PersistentStorageTest) and proven at runtime in the
+          # production-stack job ("Compose refuses a missing bind source").
+          storage=$(docker compose -f docker-compose.prod.yml --env-file .env.production --profile ops config --format json | jq -cS '{named_volumes: ((.volumes // {}) | keys), services: [.services | to_entries[] | {service: .key, mounts: ([(.value.volumes // [])[] | select(.type != "bind" or ((.source // "") | (startswith("/mnt/") or startswith("/srv/dla-ci-data/")))) | {type, source, target, read_only: (.read_only // false)}] | sort_by(.target))}] | sort_by(.service)}')
+          expect 'storage mounts' "$storage" '{"named_volumes":[],"services":[{"mounts":[{"read_only":true,"source":"/srv/dla-ci-data/mysql-init-guard","target":"/run/dla-db-init","type":"bind"},{"read_only":false,"source":"/srv/dla-ci-data/mysql","target":"/var/lib/mysql","type":"bind"}],"service":"db"},{"mounts":[],"service":"nginx"},{"mounts":[{"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"read_only":false,"source":"/mnt/bravina-shared/digital-library/backups","target":"/var/www/html/storage/backups","type":"bind"},{"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"ops"},{"mounts":[{"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"php"}]}'
           # Secrets come from the data root, outside the checkout.
           expect 'secret files' "$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -c '[.secrets[].file] | sort')" '["/srv/dla-ci-data/secrets/db_migration_password","/srv/dla-ci-data/secrets/db_password","/srv/dla-ci-data/secrets/db_root_password"]'
 
@@ -295,6 +301,59 @@ jobs:
           docker compose -f docker-compose.prod.yml --env-file .env.production logs db | grep -F 'first deployment is authorised: initialising a NEW database'
           # The first start is done: withdraw the authorisation (DEPLOYMENT.md 6).
           sudo rm /srv/dla-ci-data/mysql-init-guard/allow-empty-init
+
+      # Independent of the stack and of Compose's normalised output: does THIS
+      # runner's Compose honour "create_host_path: false"? A throwaway
+      # one-service project (its own name, a fresh directory under
+      # RUNNER_TEMP, the already-pulled pinned MySQL image, nothing else) has
+      # a bind source that does not exist. Compose must refuse it, and the
+      # source must not be created. A control run with the source present
+      # must succeed, so the refusal is due to the missing source alone.
+      # Any other result fails CI and prints the Docker and Compose versions.
+      - name: Compose refuses a missing bind source (create_host_path false)
+        run: |
+          set -eux
+          docker version --format 'Docker Engine {{.Server.Version}} (API {{.Server.APIVersion}})'
+          docker compose version
+          image=$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -r '.services.db.image')
+          test -n "$image"
+          probe=$(mktemp -d "$RUNNER_TEMP/dla-create-host-path.XXXXXX")
+          project=dla-create-host-path-probe
+          missing="$probe/missing-source"
+          cleanup() { docker compose -p "$project" -f "$probe/compose.yml" down --remove-orphans || true; rm -rf -- "$probe"; }
+          trap cleanup EXIT
+          cat > "$probe/compose.yml" <<EOF
+          services:
+            probe:
+              image: $image
+              pull_policy: never
+              entrypoint:
+                - "true"
+              restart: "no"
+              volumes:
+                - type: bind
+                  source: $missing
+                  target: /probe
+                  bind:
+                    create_host_path: false
+          EOF
+          cat "$probe/compose.yml"
+          test ! -e "$missing"
+          if out=$(docker compose -p "$project" -f "$probe/compose.yml" up -d 2>&1); then
+            printf '%s\n' "$out"
+            echo "::error::Compose created and started a container whose bind source does not exist: create_host_path false was ignored ($(docker compose version --short), Docker $(docker version --format '{{.Server.Version}}'))" >&2
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -F 'source path does not exist'
+          if [ -e "$missing" ]; then
+            echo "::error::the missing bind source was created ($(docker compose version --short), Docker $(docker version --format '{{.Server.Version}}'))" >&2
+            exit 1
+          fi
+          # Control: the same project with the source present is accepted.
+          mkdir "$missing"
+          docker compose -p "$project" -f "$probe/compose.yml" up -d
+          docker compose -p "$project" -f "$probe/compose.yml" down --remove-orphans
 
       - name: Check the hardening
         run: |

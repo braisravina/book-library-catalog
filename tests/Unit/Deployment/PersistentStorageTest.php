@@ -101,6 +101,41 @@ final class PersistentStorageTest extends TestCase
         self::assertSame(['./docker/nginx/production:/etc/nginx/dla:ro'], self::$compose['services']['nginx']['volumes'], 'nginx mounts no storage');
     }
 
+    /**
+     * The YAML itself, not Compose's normalised output (which may omit the
+     * field): every persistent bind mount says create_host_path: false, and
+     * there are exactly the expected ones.
+     */
+    public function testEveryPersistentBindExplicitlyRefusesHostPathCreation(): void
+    {
+        $binds = [];
+        foreach (self::$compose['services'] as $service => $config) {
+            foreach ($config['volumes'] ?? [] as $volume) {
+                if (is_array($volume)) {
+                    self::assertSame('bind', $volume['type'] ?? null, $service . ': persistent data only as binds');
+                    self::assertArrayHasKey('bind', $volume, $service . ': ' . ($volume['source'] ?? '') . ' declares its bind options');
+                    self::assertSame(['create_host_path' => 'false'], $volume['bind'], $service . ': ' . ($volume['source'] ?? '') . ' explicitly refuses host path creation');
+                    $binds[] = $service . ' ' . $volume['target'];
+                }
+            }
+        }
+        $expected = [];
+        foreach (self::MOUNTS as $service => $mounts) {
+            foreach ($mounts as [$target]) {
+                $expected[] = $service . ' ' . $target;
+            }
+        }
+        sort($binds);
+        sort($expected);
+        self::assertSame($expected, $binds, 'Exactly the expected persistent binds, no more');
+        self::assertCount(7, $binds);
+        // Raw text as well: one explicit "false" per bind, never "true".
+        $code = self::code('docker-compose.prod.yml');
+        preg_match_all('/^\s*create_host_path:\s*(\S+)\s*$/m', $code, $m);
+        self::assertSame(array_fill(0, 7, 'false'), $m[1]);
+        self::assertDoesNotMatchRegularExpression('/create_host_path:\s*(true|yes|on|1)\b/i', $code);
+    }
+
     public function testDatabaseStaysOnTheSsdAndOnlyInDb(): void
     {
         foreach (self::MOUNTS as $service => $mounts) {
@@ -426,7 +461,14 @@ final class PersistentStorageTest extends TestCase
         self::assertSame(3, substr_count($ci, 'data=/srv/dla-ci-data'));
         self::assertStringNotContainsString('$PWD/', $ci);
         self::assertStringContainsString("sed -i 's#^DLA_DATA_ROOT=.*#DLA_DATA_ROOT=/srv/dla-ci-data#' .env.production", $ci);
-        self::assertStringContainsString('"create_host_path":false,"read_only":false,"source":"/srv/dla-ci-data/mysql","target":"/var/lib/mysql"', $ci);
+        self::assertStringContainsString('{"read_only":false,"source":"/srv/dla-ci-data/mysql","target":"/var/lib/mysql","type":"bind"}', $ci);
+        // The normalised-JSON comparison never relies on create_host_path,
+        // which Compose may omit (null is not proof of false).
+        $static = BlockYaml::parseFile(self::path('.github/workflows/ci.yml'))['jobs']['static']['steps'];
+        $validate = implode("\n", array_column(array_filter($static, static fn (array $s): bool => ($s['name'] ?? '') === 'Validate the Compose files'), 'run'));
+        $code = implode("\n", array_filter(explode("\n", $validate), static fn (string $l): bool => !str_starts_with(ltrim($l), '#')));
+        self::assertStringContainsString("expect 'storage mounts'", $code);
+        self::assertStringNotContainsString('create_host_path', $code);
         self::assertStringContainsString('{"create_mountpoint":[false],"mounts":[{"rw":false,"source":"/srv/dla-ci-data/mysql-init-guard","target":"/run/dla-db-init","type":"bind"},{"rw":true,"source":"/srv/dla-ci-data/mysql","target":"/var/lib/mysql","type":"bind"}],"service":"db"}', $ci);
         self::assertStringContainsString('test -z "$(git ls-files -- mysql secrets mysql-init-guard)"', $ci);
         self::assertStringContainsString('for path in mysql secrets mysql-init-guard; do test ! -e "$path"; done', $ci);
