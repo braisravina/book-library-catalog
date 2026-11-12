@@ -1,0 +1,58 @@
+# Digital Library Archive - the ONLY boot path of the production stack (Phase 5C).
+#
+# A dedicated unit: docker.service is NOT modified, and Docker, Jellyfin and
+# every other workload start and run whether or not the storage HDD is
+# there. The stack's containers have restart policy "no", so the Docker
+# daemon never starts them by itself; this unit starts them after the
+# read-only storage preflight in --existing-installation mode (HDD: exact
+# mountpoint, UUID, ext4/rw, owners and modes; SSD: MySQL directory with
+# this installation's database, secrets, no initialisation authorisation;
+# the working tree holds no data and nothing writable by others).
+#
+# Paths are the owner-confirmed layout: /opt/digital-library is the deployed
+# working tree (checked out from the bare repository
+# /home/brais/git/digital-library.git) and the Compose project directory;
+# /opt/digital-library-data holds mysql/, secrets/ and mysql-init-guard/.
+#
+# The preflight runs as root, so systemd runs the root-owned INSTALLED copy
+# /usr/local/sbin/digital-library-preflight, never the copy in the working
+# tree (writable by the deploying user): a checkout cannot change what root
+# executes at boot. A new preflight takes effect only when the owner
+# reviews and installs it (docs/DEPLOYMENT.md, 3.2).
+# Install and enable after the first deployment: docs/DEPLOYMENT.md, 3.4.
+#
+# Behaviour:
+#   - boot, HDD mounted and preflight ok: "up" starts the existing containers
+#     (--no-recreate: exactly what you last deployed; --no-build --pull never:
+#     nothing is built or downloaded at boot) and waits for health checks;
+#   - HDD missing (fstab nofail), wrong or not a mountpoint, or an unexpected
+#     MySQL directory on the SSD: the unit fails (dependency, assertion or
+#     preflight) and no container starts, db included;
+#   - any start failure, or "systemctl stop": the stack is stopped;
+#   - the HDD is unmounted while running (systemd sees the mount unit stop):
+#     BindsTo= stops this unit, which stops the stack;
+#   - "systemctl restart docker" (explicit): this unit is restarted with it
+#     (Requires=), so the preflight runs again.
+[Unit]
+Description=Digital Library Archive (storage-guarded production stack)
+Documentation=file:///opt/digital-library/docs/DEPLOYMENT.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+BindsTo=mnt-bravina\x2dshared.mount
+After=mnt-bravina\x2dshared.mount
+RequiresMountsFor=/opt/digital-library /opt/digital-library-data
+AssertPathIsMountPoint=/mnt/bravina-shared
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/digital-library
+ExecStartPre=/usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --existing-installation
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml --env-file .env.production up -d --no-recreate --no-build --pull never --wait --wait-timeout 300
+ExecStopPost=/usr/bin/docker compose -f docker-compose.prod.yml --env-file .env.production stop
+TimeoutStartSec=600
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

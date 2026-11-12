@@ -138,7 +138,7 @@ only, rather than changing zone-wide settings that affect the other sites.
 1. Set `DLA_HTTP_PORT`, `DLA_EDGE_SUBNET` and `DLA_EDGE_GATEWAY` (0.1).
    Copy the trust-nothing policy:
    `cp docker/nginx/client-ip.conf docker/nginx/production/client-ip.conf`.
-   Set `DLA_TRUSTED_PROXY=none`, then sections 4–7.
+   Set `DLA_TRUSTED_PROXY=none`, then sections 3–7.
 2. Add the route (0.3), then load `https://library.bravina.co.uk/login`
    once.
 3. Confirm the peer:
@@ -166,68 +166,481 @@ optional: the checks in 0.1 are enough.
   (`docker compose version`); a current Docker Engine is recommended (since
   version 28, Docker blocks routed access to unpublished container ports from
   other hosts by default; check the release notes of your version). ⚠ production
-- The repository at the release to deploy, on that server
-  (`git status` clean; `git rev-parse HEAD` noted).
-- Disk: MySQL data, covers, the backups volume, plus room for one restore
-  (see [Resource planning](#resource-planning)).
+- The release to deploy pushed to the bare repository
+  `/home/brais/git/digital-library.git` and checked out from it into the
+  working tree `/opt/digital-library` (3.2; section 4 for updates). Pushing
+  to the bare repository deploys nothing by itself.
+- The directories of section 3 initialised: on the system SSD the MySQL data,
+  secrets and guard directories in `/opt/digital-library-data` (outside
+  the working tree), and the root-owned installed preflight;
+  on the storage HDD (mounted at `/mnt/bravina-shared`) covers, backups and
+  storage, plus room for one restore (see
+  [Resource planning](#resource-planning)).
 - Your password manager or vault for the secrets below.
 - The values of section 0.1 checked on the Docker host (free port, free
   `edge` subnet).
 
 ## 2. Production secrets
 
-One random value per file, never committed (`secrets/` is git- and
-docker-ignored), never reused:
+One random value per file, in `/opt/digital-library-data/secrets` on the
+system SSD. That is outside the working tree, so it is never committed,
+never part of a build context, and never touched by a deployment (a
+`git checkout` run as you, which also cannot write there: root-only,
+`0700`). Each value is used once. Create the directories first
+(3.2), then:
 
 ```bash
-cd /srv/library                       # your checkout
-install -d -m 0750 secrets
+data=/opt/digital-library-data
 for name in db_root_password db_password db_migration_password; do
-  openssl rand -hex 32 > "secrets/$name"
+  sudo sh -c "umask 077 && openssl rand -hex 32 > '$data/secrets/$name'"
 done
-sudo chown 999:999 secrets/db_root_password && sudo chmod 0400 secrets/db_root_password
-sudo chown 82:999 secrets/db_password secrets/db_migration_password
-sudo chmod 0440 secrets/db_password secrets/db_migration_password
+sudo chown 999:999 "$data/secrets/db_root_password"
+sudo chmod 0400 "$data/secrets/db_root_password"
+sudo chown 82:999 "$data/secrets/db_password" "$data/secrets/db_migration_password"
+sudo chmod 0440 "$data/secrets/db_password" "$data/secrets/db_migration_password"
 ```
 
-Store copies in your password manager: restoring a backup on a new host needs
-them. Optional `GOOGLE_BOOKS_API_KEY` goes the same way, as another secret
-file (and an entry in `docker-compose.prod.yml`, not yet present).
-Owners: `999` is the `mysql` user of the MySQL image, `82` the `www-data`
-user of the PHP image. 🧪 CI (same owners and modes) · ⚠ production
+Store copies in your password manager: restoring a backup on a new host
+needs them. An optional `GOOGLE_BOOKS_API_KEY` is added the same way, as
+another secret file plus an entry in `docker-compose.prod.yml` (not yet
+present). The owners are `999`, the `mysql` user of the MySQL image, and
+`82`, the `www-data` user of the PHP image. Docker reads the files as root
+and shows each container the file's own owner and mode. The preflight
+checks owners and modes, never the values. 🧪 CI (same commands) ·
+⚠ production
 
-## 3. Database and filesystem permissions
+## 3. Persistent storage, database and filesystem permissions
 
 - **Database accounts** (created by `docker/mysql/init/01-create-users.sh` on
-  the first start of an empty data volume): `library_app` (SELECT, INSERT,
-  UPDATE, DELETE) for the web container; `library_migrator` (plus CREATE,
-  ALTER, DROP, INDEX, REFERENCES) for the ops container; `root@localhost`
-  only inside the db container. ✅ local (script) · 🧪 CI
+  the first start of an empty MySQL data directory): `library_app` (SELECT,
+  INSERT, UPDATE, DELETE) for the web container; `library_migrator` (plus
+  CREATE, ALTER, DROP, INDEX, REFERENCES) for the ops container;
+  `root@localhost` only inside the db container. ✅ local (script) · 🧪 CI
 - **Roles in code:** the web container (`APP_ROLE=web`) refuses migration or
   root credentials and every operations command; production operations run
   only in the `ops` container. ✅ local
-- **Volumes:** `app-storage` (covers, tmp, cache, logs, maintenance flag;
-  web + ops), `app-backups` (ops only), `db-data`. Created from the images on
-  first use, owned by `www-data` (82), mode 0750. For backups on a host
-  directory instead, create it as `82:82`, mode 0750. 🧪 CI · ⚠ production
+
+### 3.1 Layout: system SSD and storage HDD
+
+**Confirmed by you.**
+
+- **Storage HDD:** ext4, UUID `ad62670f-861d-47a4-a68d-967272d27866`,
+  mounted at `/mnt/bravina-shared` (`rw,relatime`; fstab `defaults,nofail`).
+  The mountpoint is `root:root` 0755. About 907 GB free.
+- **Split:** the database lives on the system SSD, and covers, backups and
+  application storage on the HDD.
+- **Never used:** `/mnt/dockerdata`.
+- **Mounts:** all bind mounts with `create_host_path: false`. No named
+  volumes.
+- **Code:** the bare repository `/home/brais/git/digital-library.git` holds
+  the Git objects only. Its working tree is `/opt/digital-library` itself,
+  checked out with `--work-tree` (no `.git` inside, no nested `app/`), and
+  is the Compose project directory. Same convention as `/opt/bravina`. It
+  holds code and configuration only.
+- **Data on the SSD:** `/opt/digital-library-data` (`DLA_DATA_ROOT`), a
+  sibling of the working tree, never inside it.
+
+| Path | Owner | Mode | Mounted at | Containers |
+|---|---|---|---|---|
+| **Git** `/home/brais/git/digital-library.git` (bare) | you | as created | (never) | none |
+| **SSD** `/opt/digital-library`: the working tree, Compose project directory, build context | you (the deploying administrator; not root, not 82 or 999) | `0755` | (not mounted) | none |
+| tracked files (`docker-compose.prod.yml`, `docker/`, `src/`, …) | you | from Git, never group- or world-writable | read-only repository files (`docker/…:ro`), images | |
+| `.env.production`, `docker/nginx/production/client-ip.conf` (untracked) | you | `0640` / `0644` | | |
+| **SSD** `/opt/digital-library-data` (`DLA_DATA_ROOT`) | `root:root` | `0755` | (not mounted) | none |
+| `mysql/` | `999:999` | `0700` | `/var/lib/mysql` | db only |
+| `secrets/` (the three secret files, section 2) | `root:root` | `0700` | `/run/secrets/<name>` (files) | as in section 2 |
+| `mysql-init-guard/` | `root:root` | `0755` | `/run/dla-db-init` (read-only) | db only |
+| `/usr/local/sbin/digital-library-preflight` (installed copy of `docker/storage/preflight.sh`) | `root:root` | `0755` | | run by `digital-library.service` |
+| **HDD** `/mnt/bravina-shared/digital-library` (`DLA_STORAGE_ROOT`) | `root:root` | `0700` | (not mounted) | none |
+| `storage/` (tmp, cache, logs, maintenance flag, operation lock) | `82:82` | `0750` | `/var/www/html/storage` | php, ops |
+| `storage/covers/` (mountpoint stub, hidden by the covers mount) | `root:root` | `0755` | | |
+| `storage/backups/` (mountpoint stub; the web container sees this empty, unusable directory) | `root:root` | `0000` | | |
+| `covers/` | `82:82` | `0750` | `/var/www/html/storage/covers` | php, ops |
+| `backups/` | `82:82` | `0700` | `/var/www/html/storage/backups` | ops only |
+| `books/` | reserved for future PDF/EPUB support | | **not created, not mounted** | |
+
+**Code and data are physically separate.** The existing Compose file,
+Dockerfiles, unit and runbook all treat the repository root as the Compose
+project directory and build context (relative `./docker/…` mounts,
+`context: .`), so the repository root *is* `/opt/digital-library`, with no
+extra `app/` or `docker/` level. Production data is in
+`/opt/digital-library-data`, outside it:
+
+1. **Git:** a checkout writes only inside `/opt/digital-library`, and only
+   tracked paths; nothing under `mysql`, `secrets` or `mysql-init-guard`
+   is tracked (a unit test checks `git ls-files`), and `.gitignore` lists
+   them anyway in case a copy ever appears in the tree.
+2. **Docker builds:** the build context is `/opt/digital-library`, which
+   does not contain the data. The Dockerfiles `COPY` explicit paths only
+   (never `COPY .`), and `.dockerignore` excludes those names too, with no
+   exception (`!`) patterns.
+3. **Permissions:** you deploy as yourself, not root. The data root is
+   `root:root`; `mysql/` (999, `0700`) and `secrets/` (root, `0700`) are
+   neither writable nor readable by you.
+4. **Preflight:** refuses `mysql`, `secrets`, `mysql-init-guard`, `data`
+   or `.git` inside `/opt/digital-library`, and checks the data root's
+   owners and modes (3.3).
+
+Covers, uploads and backups are on the HDD, outside the working tree.
+
+Where the owners come from:
+
+- **`82:82`**: `docker/php/Dockerfile`, `prod` stage, runs as `USER www-data`.
+  The base image is `php:8.4.27-fpm-alpine3.24`, where `www-data` is uid 82,
+  gid 82. CI checks `id -u` = 82.
+- **`999:999`**: the `mysql:8.4.13` image (no Dockerfile of ours) creates the
+  `mysql` user and group with uid/gid 999. Its entrypoint starts as root,
+  fixes ownership inside `/var/lib/mysql` and runs `mysqld` as `mysql`.
+- **nginx** (`USER nginx`, uid 101) mounts no storage.
+- The roots' modes only affect users on the host. Containers see their
+  mounts directly and never walk the host path.
+
+**Database isolation.**
+
+- Only db mounts `/opt/digital-library-data/mysql`. That directory is `0700` for
+  uid 999, which no application container uses. php and nginx mount nothing
+  from the SSD (CI checks that neither can see `/var/lib/mysql`).
+- It is outside the working tree and every build context (above).
+  `.gitignore` and `.dockerignore` also exclude database file patterns
+  (`*.ibd`, `ibdata*`, binlogs, `data/`) anywhere, in case one is ever
+  copied into the tree.
+
+✅ local (static and behaviour tests; the bare-repository deployment
+rehearsed on a local copy) · 🧪 CI (same layout: the checkout as the
+working tree, the data root `/srv/dla-ci-data` outside it, the HDD under
+`/srv/dla-ci`) · ⚠ production
+
+### 3.2 One-time initialisation (you, on the Docker host)
+
+Each command creates one directory explicitly. Nothing is recursive, and
+nothing that exists inside the HDD or the database directory is modified.
+The HDD mountpoint `/mnt/bravina-shared` keeps `root:root` 0755, and
+`books/` is not created. Run it as yourself (the deploying administrator,
+the owner of the bare repository); `sudo` only where shown.
+
+**a. The bare repository** (Git objects only). If you have not created it
+yet, for example:
+
+```bash
+git init --bare --initial-branch=main /home/brais/git/digital-library.git
+```
+
+Then push the reviewed release to it from your workstation (your remote
+name and host). **A push deploys nothing:** there is no hook, and the working
+tree changes only when you run the checkout below (or section 4).
+
+**b. Directories and the working tree:**
+
+```bash
+# 1. The storage HDD is mounted with the exact UUID. If not, stop here.
+findmnt --mountpoint /mnt/bravina-shared --output SOURCE,UUID,FSTYPE,OPTIONS
+test "$(findmnt --mountpoint /mnt/bravina-shared --noheadings --output UUID)" = ad62670f-861d-47a4-a68d-967272d27866
+app=/opt/digital-library
+data=/opt/digital-library-data
+root=/mnt/bravina-shared/digital-library
+repo=/home/brais/git/digital-library.git
+# 2. First time only: never re-initialise an existing database or HDD directory.
+test ! -e "$data/mysql"
+test ! -e "$root"
+# 3. The working tree /opt/digital-library (code only), owned by you, 0755.
+sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 0755 "$app"
+# 4. The code, from the bare repository (no clone, no .git in the tree).
+#    The release must not contain the data directories:
+git --git-dir="$repo" log -1 --format='%H %s' main      # the commit you reviewed
+test -z "$(git --git-dir="$repo" ls-tree --name-only main -- mysql secrets mysql-init-guard)"
+git --git-dir="$repo" --work-tree="$app" checkout -f main
+test ! -e "$app/.git"
+# 5. System SSD data root, outside the working tree.
+sudo install -d -o root -g root -m 0755 "$data"
+sudo install -d -o 999 -g 999 -m 0700 "$data/mysql"
+sudo install -d -o root -g root -m 0700 "$data/secrets"
+sudo install -d -o root -g root -m 0755 "$data/mysql-init-guard"
+# 6. The privileged preflight: a root-owned copy outside the working tree,
+#    from the release you reviewed (repeat after any change to it: section 4).
+sudo install -o root -g root -m 0755 "$app/docker/storage/preflight.sh" /usr/local/sbin/digital-library-preflight
+# 7. Storage HDD (owners and modes: 3.1).
+sudo install -d -o root -g root -m 0700 "$root"
+sudo install -d -o 82 -g 82 -m 0750 "$root/storage"
+sudo install -d -o 82 -g 82 -m 0750 "$root/storage/tmp" "$root/storage/logs" "$root/storage/cache"
+sudo install -d -o root -g root -m 0755 "$root/storage/covers"
+sudo install -d -o root -g root -m 0000 "$root/storage/backups"
+sudo install -d -o 82 -g 82 -m 0750 "$root/covers"
+sudo install -d -o 82 -g 82 -m 0700 "$root/backups"
+# 8. No production data in the working tree:
+for d in mysql secrets mysql-init-guard; do test ! -e "$app/$d"; done
+# 9. Secrets: section 2. Then check (3.3); the HDD mountpoint must still be root:root 0755.
+stat -c '%U:%G %a' /mnt/bravina-shared
+```
+
+The index of the working tree lives in the bare repository
+(`/home/brais/git/digital-library.git/index`), so every Git command for the
+deployed tree names both: `git --git-dir="$repo" --work-tree="$app" …`.
+Never run `git clean -x`/`-X`, `rsync --delete` or a fresh `git clone`
+into `/opt/digital-library`.
+
+If a step fails, fix that one path with `chown`/`chmod` on that path alone.
+Never use `chmod 777`, `-R`, or any change to the whole disk. ⚠ production
+
+### 3.3 Preflight (read-only): first deployment or existing installation
+
+`docker/storage/preflight.sh` only reads (`findmnt`, `stat`, `find`, `df`,
+`grep`, `cmp`). It never writes, never reads secret values, and never talks
+to Docker or systemd. It runs as root, so the copy that runs is the
+root-owned **installed** one, `/usr/local/sbin/digital-library-preflight`
+(3.2, step 6), never the working tree's (3.4 explains why).
+`digital-library.service` runs it before every start (3.4). Run it
+yourself before every manual `up`, update or restore. **You must name the
+situation:**
+
+```bash
+sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --first-deployment       # only before the very first database start
+sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --existing-installation  # every time after that
+```
+
+It exits 1 on any failure (then do not start the stack). It checks:
+
+- **Configuration:** `DLA_STORAGE_ROOT` and `DLA_DATA_ROOT` each set exactly
+  once, to exactly the confirmed paths; `DB_DATABASE` a plain schema name.
+- **Storage HDD:**
+  - exactly one filesystem at `/mnt/bravina-shared`, with the exact UUID,
+    `ext4` and `rw`;
+  - the mountpoint still `root:root` 0755;
+  - `storage/`, `covers/`, `backups/` and the stubs on *that* filesystem
+    (no other mount on top), not symlinks, with their owners and modes.
+- **Installed copy:** `/usr/local/sbin/digital-library-preflight` exists,
+  root-owned, not group- or world-writable. A note (not a failure) when
+  the working tree's `docker/storage/preflight.sh` differs from the copy
+  that runs: review the change and install it again (section 4).
+- **Working tree (code and configuration only):**
+  - `/opt/digital-library` is a directory, `0755`, not owned by a container
+    user (82, 999); the env file is `/opt/digital-library/.env.production`
+    (it refuses another `--env-file`);
+  - no `.git`, `mysql`, `secrets`, `mysql-init-guard`, `mysql-data` or
+    `data` in it (Git objects stay in the bare repository, data in
+    `/opt/digital-library-data`);
+  - `.env.production`, `docker-compose.prod.yml`, `docker/`,
+    `docker/mysql/`, `docker/mysql/db-guard.sh`, `docker/mysql/init/` and
+    `docker/mysql/my.cnf` (used by `docker compose` as root, or inside db)
+    are owned by the tree's owner or root, not symlinks, and not group- or
+    world-writable.
+- **Data root (system SSD):**
+  - `/opt/digital-library-data` `root:root` 0755; `mysql/`, `secrets/` and
+    the three secret files (non-empty), and `mysql-init-guard/`, each with
+    its owner and mode;
+  - `mysql/` on the system filesystem, not on the HDD and not under
+    `/mnt/dockerdata`.
+- **Database state:**
+  - `--first-deployment`: `mysql/` must be **empty**, and the root-owned
+    authorisation file `mysql-init-guard/allow-empty-init` must
+    exist (section 6).
+  - `--existing-installation`: `mysql/mysql.ibd` **and** the application
+    schema directory (`mysql/<DB_DATABASE>`) must exist, and no
+    authorisation file may be left behind.
+- **Space:** at least 20 GB free on the HDD (`--min-free-gb`).
+
+✅ local (behaviour tests with simulated `findmnt`/`stat`/`find`) ·
+⚠ production
+
+### 3.4 Boot and restarts: `digital-library.service`
+
+`docker.service` is **not** modified, so Docker, Jellyfin and your other
+workloads start and run whether or not the storage HDD is there. The
+Digital Library has its own systemd unit, and that unit is its **only**
+boot path:
+
+- **Docker never starts these containers by itself.** Every service has
+  restart policy `"no"`. After a reboot, a Docker restart or an unclean
+  shutdown (power loss), the daemon restores none of them, so no existing
+  container can bypass the preflight. 🧪 CI (policies checked with
+  `docker inspect`) · ⚠ production
+- **The unit starts them after the checks.**
+  `docker/storage/systemd/digital-library.service`, with the confirmed
+  paths:
+  - `BindsTo=` and `After=` the HDD's fstab mount unit
+    `mnt-bravina\x2dshared.mount`;
+  - `RequiresMountsFor=/opt/digital-library /opt/digital-library-data`;
+  - `AssertPathIsMountPoint=/mnt/bravina-shared`;
+  - `ExecStartPre=` the root-owned installed preflight
+    (`/usr/local/sbin/digital-library-preflight`) with
+    `--existing-installation`;
+  - only then, `docker compose … up -d --no-recreate --no-build --pull never
+    --wait`. This starts exactly the containers you last deployed and
+    builds or downloads nothing.
+- **Fail closed.** If any step fails, the unit fails and
+  `ExecStopPost=` runs `docker compose … stop`.
+- **Still fail closed without the unit.**
+  - Every data mount is a bind with `create_host_path: false`. Compose
+    refuses to create a container with a missing source, and Docker
+    refuses to *start* one whose source is missing. The source is never
+    created.
+  - The database guard (`docker/mysql/db-guard.sh`, the db entrypoint) runs
+    however db is started. It refuses to let MySQL initialise a new, empty
+    database unless a first deployment is authorised (section 6).
+  - 🧪 CI (HDD root removed; SSD database directory replaced by an empty
+    one; SSD database directory removed: each refused, nothing created) ·
+    ⚠ production
+
+Install it once, **after the first deployment** (sections 4–7), from
+`/opt/digital-library`:
+
+```bash
+command -v docker                          # the unit calls /usr/bin/docker; adjust ExecStart*/ExecStopPost if different
+systemctl status 'mnt-bravina\x2dshared.mount'     # the fstab mount unit exists (systemd-escape --path --suffix=mount /mnt/bravina-shared)
+sudo systemd-analyze verify docker/storage/systemd/digital-library.service
+sudo install -o root -g root -m 0644 docker/storage/systemd/digital-library.service /etc/systemd/system/digital-library.service
+sudo systemctl daemon-reload
+dc up -d --wait                            # once, so the containers carry restart policy "no"
+sudo systemctl enable digital-library.service
+sudo systemctl restart digital-library.service && systemctl status digital-library.service
+docker inspect -f '{{.Name}} {{.HostConfig.RestartPolicy.Name}}' $(dc ps -q)    # every line: no
+```
+
+Its `WorkingDirectory` is `/opt/digital-library`, the actual Compose
+project directory, so the project name and the relative `./docker/…`
+mounts are the same as when you run `dc` there by hand.
+
+**What runs as root, and from where.**
+
+- **The preflight is the only script systemd executes directly as root on
+  the host.** Running it from the working tree would let anything that can
+  write there (you, or a bad commit you checked out) change what root runs
+  at the next boot, unreviewed, and could also make the checks pass
+  silently. So the unit runs the root-owned installed copy
+  `/usr/local/sbin/digital-library-preflight`: a checkout never changes it,
+  and a new version takes effect only when you review it and run the
+  `sudo install` of 3.2 again. The preflight itself fails if that copy is
+  missing, not root-owned or writable by others, and notes when the
+  working tree's copy differs. Nothing else on the host changes
+  permissions: one new file in `/usr/local/sbin`.
+- **`docker compose` still reads the working tree as root** (Compose file,
+  `.env.production`, the `docker/mysql` files mounted into db). Whoever
+  can edit those can run anything through Docker at the next start; that
+  is inherent to Docker (membership of the `docker` group is equally
+  root-equivalent). It is acceptable only because the working tree is
+  writable by you alone, an administrator who already has `sudo`. The
+  preflight refuses group- or world-writable files and symlinks there. Do
+  not give other accounts write access to `/opt/digital-library`.
+- **Alternative (stricter, your decision):** a root-owned working tree
+  updated by running the Git checkout as root. That removes the remaining
+  path, but runs Git as root against your user-owned bare repository (Git's
+  `safe.directory` check, root-owned index files in it); not chosen here.
+
+⚠ production
+
+| Event | What happens |
+|---|---|
+| Boot, HDD mounted and correct, database present | Docker starts (no Digital Library containers). The HDD mount, then the unit: preflight ok, `up --wait`, the stack runs. |
+| Boot, HDD missing (fstab `nofail`) | The mount unit fails, so the unit fails ("dependency failed"). **No container starts, db included**, although the database is on the SSD. Other workloads are unaffected. |
+| Boot, a different or misconfigured HDD at the mountpoint | The preflight fails (UUID, type, `ro`, owner/mode, missing directory), the unit fails, and the stack stays stopped. |
+| Boot, the SSD database directory is empty, replaced or missing | The preflight fails (`mysql.ibd` or schema missing, or the directory missing). Even if db is started some other way, the guard refuses to initialise, or Docker refuses the missing mount source. |
+| Power loss, then boot | Same as the rows above. No container has a restart policy, so none starts before the unit. |
+| `sudo systemctl restart docker` (e.g. a Docker package upgrade) | Docker restarts your other workloads per their own policies. This unit is restarted with it (`Requires=`), so the preflight runs again. |
+| The Docker daemon crashes | Containers stop and are not restarted by Docker. Run `sudo systemctl restart digital-library`. |
+| A container crashes or is OOM-killed while running | Docker does **not** restart it (policy `"no"`). The site answers 502/500 until you run `sudo systemctl restart digital-library` (preflight, then start). Watch `/health` externally (section 10). |
+| `dc stop php` (restore procedure) | php stays stopped until you start it. |
+| `sudo systemctl stop digital-library` | `docker compose stop`: the stack stops and the containers are kept. |
+
+Trade-off: automatic restart of a crashed container is given up so that no
+container can ever start without the preflight.
+
+**Recovery after a boot without the HDD:** `systemctl status
+digital-library` shows the failed dependency or preflight line. Mount the
+disk (`sudo mount /mnt/bravina-shared`), run 3.3 with
+`--existing-installation`, then `sudo systemctl start digital-library`.
+**Drill (recommended once, in a maintenance window):**
+1. `sudo systemctl stop digital-library`.
+2. `sudo umount /mnt/bravina-shared`.
+3. `sudo systemctl start digital-library` must fail.
+4. `ls -A /mnt/bravina-shared` must print nothing.
+5. `sudo mount /mnt/bravina-shared`, then `sudo systemctl start
+   digital-library`.
+
+⚠ production
+
+**Optional (owner decision, maintenance window):** with the stack stopped
+and the HDD unmounted, `sudo chattr +i /mnt/bravina-shared` on the SSD's
+empty directory. Nothing, root included, can then create files there
+while the disk is absent. Owner and mode do not change. Remount and rerun
+3.3. ⚠ production
+
+### 3.5 If the HDD disappears while the stack is running
+
+The database is on the SSD and keeps running. Covers, backups and
+application storage are on the HDD, and the containers hold their own bind
+mounts of it, so they **never write HDD data to the SSD**. ⚠ production
+(kernel behaviour, not testable in CI)
+
+- **Clean unmount via systemd** (`systemctl stop mnt-bravina\x2dshared.mount`):
+  `BindsTo=` stops `digital-library.service` first (`docker compose stop`,
+  db included), then the disk is unmounted.
+- **`umount /mnt/bravina-shared` by hand:** systemd sees the mount unit stop,
+  and `BindsTo=` stops the unit and the whole stack. Until then the
+  containers kept using the disk through their own mounts.
+- **The HDD physically fails or is disconnected:** I/O errors on covers,
+  uploads, backups and the maintenance flag. Pages with covers fail, and
+  uploads and backups fail. The database is unaffected. Nothing restarts
+  anything (policy `"no"`). The kernel may leave the mount in place (still
+  "mounted" but failing), so the unit may stay "active" until you act.
+  - Recovery:
+    1. `sudo systemctl stop digital-library`.
+    2. Unmount.
+    3. Reconnect the disk.
+    4. `sudo e2fsck -f /dev/disk/by-uuid/ad62670f-861d-47a4-a68d-967272d27866`
+       (unmounted).
+    5. `sudo mount /mnt/bravina-shared`.
+    6. 3.3 with `--existing-installation`.
+    7. `sudo systemctl start digital-library`.
+  - Covers written in the last moments may be missing. A restore of the
+    latest verified backup writes back the cover files it contains
+    (OPERATIONS.md).
+- **Backups and the database are on different disks now.** A failed SSD
+  loses the database but not the backups on the HDD, and the reverse. Off-host
+  copies (OPERATIONS.md) are still needed against losing the host.
+- **The database directory on the SSD is lost or emptied:** the
+  `--existing-installation` preflight fails, and the guard refuses to
+  initialise a new database. Restore the latest verified backup into a
+  deliberately re-initialised database: follow section 6's first-deployment
+  authorisation, then OPERATIONS.md, "Manual recovery checklist".
+- **Detection:** external monitoring of `https://library.bravina.co.uk/health`
+  (section 10), plus `journalctl -u digital-library` and `dmesg` for I/O
+  errors.
 
 ## 4. Deployment preparation
 
+Deploying a release is an explicit checkout from the bare repository into
+the working tree (first time: 3.2 did it). You stop if a tracked file was
+edited locally (`git diff` compares the tree with the last deployed
+release; `git status` would also list the newly pushed changes). The
+checkout never removes untracked or ignored files, and cannot write into
+`mysql/` or `secrets/` (you are not root):
+
 ```bash
-cd /srv/library
-git fetch && git checkout <release>        # e.g. the phase-5a commit
+cd /opt/digital-library
+repo=/home/brais/git/digital-library.git
+P=/usr/local/sbin/digital-library-preflight
+g() { git --git-dir="$repo" --work-tree=/opt/digital-library "$@"; }
+g diff --exit-code --stat     # prints nothing: no local edits to tracked files (else stop and look)
+rev=$(git --git-dir="$repo" rev-parse --verify 'main^{commit}'); echo "$rev"   # the commit you reviewed and pushed
+test -z "$(git --git-dir="$repo" ls-tree --name-only "$rev" -- mysql secrets mysql-init-guard)"
+g checkout -f main && test "$(g rev-parse HEAD)" = "$rev"
+test -z "$(g status --porcelain --untracked-files=no)" && test ! -e .git
+cmp docker/storage/preflight.sh "$P"   # differs: review the change (diff -u "$P" docker/storage/preflight.sh), then: sudo install -o root -g root -m 0755 docker/storage/preflight.sh "$P"
 cp .env.production.example .env.production  # first time only; then review every value
 # Section 0.4, step 1: in .env.production set DLA_HTTP_PORT, DLA_EDGE_SUBNET,
 # DLA_EDGE_GATEWAY and DLA_TRUSTED_PROXY=none (DLA_HTTP_BIND=127.0.0.1 is
 # preset), and copy the trust-nothing policy to docker/nginx/production/.
-export APP_IMAGE_TAG="$(git rev-parse --short HEAD)"   # one image tag per release (rollback)
+export APP_IMAGE_TAG="$(g rev-parse --short HEAD)"   # one image tag per release (rollback)
 dc() { docker compose -f docker-compose.prod.yml --env-file .env.production "$@"; }
 dc config --quiet && dc config | less        # review: no unexpected ports, networks or mounts
 dc config | grep -B2 -A3 'published'         # exactly one: nginx, host_ip 127.0.0.1, target 8080
+dc --profile ops config | grep -A5 'type: bind' | grep -E 'source|create_host_path'   # /opt/digital-library-data/{mysql,mysql-init-guard} and /mnt/bravina-shared/digital-library/..., all false
+sudo "$P" --env-file /opt/digital-library/.env.production --existing-installation    # section 3.3 (first deployment: section 6)
 ```
 
 `.env.production` holds no secrets (only `*_FILE` paths) but is still
-private: `chmod 0640`. ⚠ production
+private: `chmod 0640`. It is untracked and ignored, so a checkout never
+changes it; compare it with `.env.production.example` after each update.
+⚠ production
 
 ## 5. Image verification
 
@@ -242,21 +655,40 @@ To refresh a base image, change tag and digest together
 (`docker buildx imagetools inspect <image>:<tag>`), rebuild, and let CI pass.
 🧪 CI (build) · ⚠ production
 
-## 6. Database migration
+## 6. Database: first deployment or existing installation
 
-Before the new images take traffic:
+**First deployment only: a new, empty database, explicitly authorised.**
+Start db once with the authorisation, then withdraw it:
 
 ```bash
-dc up -d db
+sudo touch /opt/digital-library-data/mysql-init-guard/allow-empty-init     # authorise ONE new database
+sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --first-deployment   # mysql/ empty, authorised
+dc up -d --wait db                         # the guard logs: "initialising a NEW database"
+sudo rm /opt/digital-library-data/mysql-init-guard/allow-empty-init        # withdraw it immediately
 dc run --rm ops php bin/console config:check --strict
 dc run --rm ops php bin/console migrate
 dc run --rm ops php bin/console migrate:status        # nothing pending or MODIFIED
-# First deployment only: the first administrator (password read from STDIN)
-dc run --rm ops php bin/console user:create --email=<you> --name="<name>" --role=admin
+dc run --rm ops php bin/console user:create --email=<you> --name="<name>" --role=admin   # password from STDIN
+sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --existing-installation   # from now on, always this mode
 ```
 
-Migrations are forward-only. Take a backup (section 8) before migrating an
-existing database. 🧪 CI · ⚠ production
+**Existing installation (every later deployment):** take a backup
+(section 8) before migrating, then:
+
+```bash
+sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --existing-installation   # never start db if it fails
+dc up -d --wait db
+dc run --rm ops php bin/console config:check --strict
+dc run --rm ops php bin/console migrate
+dc run --rm ops php bin/console migrate:status        # nothing pending or MODIFIED
+```
+
+The guard in the db container (`docker/mysql/db-guard.sh`) is the safety
+net. If `/opt/digital-library-data/mysql` is empty and no authorisation file is
+present, db refuses to start ("refusing to initialise a new, empty
+database") instead of silently creating a new database. It also refuses a
+directory that has files but no database. Migrations are forward-only.
+✅ local (guard behaviour tests) · 🧪 CI · ⚠ production
 
 ## 7. Health checks
 
@@ -324,7 +756,9 @@ online; operations never overlap (a second one is refused). ✅ local · 🧪 CI
   mode. A restore is not atomic. ✅ local · 🧪 CI (drill)
 - **Roll back a release (code):** images are tagged per release
   (`APP_IMAGE_TAG`). If the new release did not migrate the schema:
-  `export APP_IMAGE_TAG=<previous>; git checkout <previous>; dc up -d --wait`.
+  `export APP_IMAGE_TAG=<previous>; g checkout -f <previous>; dc up -d --wait`
+  (`g` as in section 4; this detaches the bare repository's `HEAD` until
+  the next `g checkout -f main`).
   If it did migrate: migrations are forward-only, so restore the backup taken
   before the migration (section 6), then start the previous images. ⚠ production
 
@@ -334,7 +768,9 @@ online; operations never overlap (a second one is refused). ✅ local · 🧪 CI
 |---|---|
 | A container restarts or is unhealthy | `dc ps`, `dc logs --tail 200 <service>` |
 | php exits at start: "refusing to start PHP-FPM" | `dc run --rm ops php bin/console config:check` (names keys, never values) |
-| Compose: "required variable DLA_… is missing a value" | set `DLA_HTTP_PORT`, `DLA_EDGE_SUBNET`, `DLA_EDGE_GATEWAY` in `.env.production` (0.1) |
+| Compose: "required variable DLA_… is missing a value" | set `DLA_HTTP_PORT`, `DLA_EDGE_SUBNET`, `DLA_EDGE_GATEWAY` in `.env.production` (0.1); `DLA_STORAGE_ROOT` (3.1) |
+| Stack down after a reboot; `systemctl status digital-library` failed | dependency failed: the storage disk is not mounted; preflight FAIL lines: wrong disk, owner or mode. Section 3.4, "Recovery after a boot without the disk". Never create the directory by hand on the system disk |
+| A container exited and stays down | expected (restart policy `"no"`): `dc logs <service>`, then `sudo systemctl restart digital-library` (3.4) |
 | nginx exits: "dla-nginx: refusing to start" | the message: `DLA_HTTP_BIND` not loopback, the client IP policy, `DLA_TRUSTED_PROXY`, or a policy address other than `DLA_EDGE_GATEWAY` (section 0) |
 | "port is already allocated" / "address already in use" at `up` | the port is taken; choose another free port (0.1) and update the tunnel route |
 | "Pool overlaps with other one on this address space" at `up` | the `edge` subnet is in use; choose another free `/29` (0.1) |
@@ -343,7 +779,7 @@ online; operations never overlap (a second one is refused). ✅ local · 🧪 CI
 | Every page 503 | `dc run --rm ops php bin/console maintenance:status` (maintenance mode or an incomplete restore) |
 | 400 on every page | the `Host` header the tunnel forwards (route "HTTP Host Header" must be empty or `library.bravina.co.uk`) |
 | An operations command says "Another operation is running" | wait; the lock is released when that process exits |
-| Disk filling up | `docker system df`, the backups volume, `cleanup` (dry run first) |
+| Disk filling up | `df -h /mnt/bravina-shared`, `sudo du -sh /mnt/bravina-shared/digital-library/*`, `docker system df`, `cleanup` (dry run first) |
 
 Logs are `json-file`, 10 MB × 5 per container. Application errors go to the
 php container's stderr; the nginx access log records `peer=` (the TCP peer)
@@ -372,11 +808,14 @@ recommended once the ingress exists. ⚠ production
 |---|---|---|
 | Stop serving but keep the database | `dc stop nginx php` | kept |
 | Friendly 503 while investigating | `dc run --rm ops php bin/console maintenance:on --reason="incident"` | kept |
-| Stop everything | `dc stop` (or `dc down` without `-v`) | volumes kept |
+| Stop everything | `sudo systemctl stop digital-library` (or `dc stop`; `dc down` without `-v`) | kept (host directories) |
+| Keep it down across reboots | `sudo systemctl disable --now digital-library` | kept |
 | Cut public access at the edge | remove or disable only the `library.bravina.co.uk` route of the tunnel (your Cloudflare console); the other sites keep running | kept |
 
-**Never** run `dc down -v` on production: `-v` deletes the database, covers
-and backup volumes. After a suspected compromise: stop the stack, keep the
+**Never** run `dc down -v` on production. The data lives in host
+directories under `/mnt/bravina-shared/digital-library`, which Compose never
+deletes, but `-v` is the habit that destroys data on stacks with volumes.
+Never delete or move those directories while the stack runs. After a suspected compromise: stop the stack, keep the
 volumes and logs for investigation, rotate every secret (section 2; the
 database passwords must also be changed inside MySQL), and restore from a
 backup made before the incident onto a rebuilt host. ⚠ production

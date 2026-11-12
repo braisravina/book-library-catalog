@@ -598,7 +598,8 @@ rollback, emergency shutdown, resource planning) are in
 ### Production stack (`docker-compose.prod.yml`)
 
 A separate Compose file; the development `docker-compose.yml` is never used
-in production. Run from the repository checkout on the Docker host with
+in production. Run from the deployed working tree `/opt/digital-library` on
+the Docker host with
 `docker compose -f docker-compose.prod.yml --env-file .env.production …`
 (the header of the file lists the steps).
 
@@ -643,18 +644,23 @@ in production. Run from the repository checkout on the Docker host with
   `mysqladmin ping` over TCP without credentials (succeeds whenever the
   server answers, and fails while the image initialises with networking
   off). `nginx` waits for a healthy `php`, `php` and `ops` for a healthy `db`.
-- **Restart and logs:** `unless-stopped` (ops: `no`); `json-file` logs,
-  10 MB × 5 files per container.
+- **Restart and logs:** restart policy `"no"` for every service (Phase 5C).
+  The Docker daemon never starts them by itself; `digital-library.service`
+  is the only boot path, after the storage preflight (see "Persistent
+  storage"). `json-file` logs, 10 MB × 5 files per container.
 - **Migrations:** `run --rm ops php bin/console migrate` on each release,
   before the new image takes traffic. Backups, restores, maintenance mode and
   cleanup run the same way (docs/OPERATIONS.md).
 
 ### Production secrets
 
-Files in `./secrets/` on the Docker host (git- and docker-ignored), one
-random value each (`openssl rand -hex 32`). Compose file-based secrets are
-bind mounts, so the host file's numeric owner and mode are what the
-container sees:
+Files in `/opt/digital-library-data/secrets/` on the system SSD
+(`${DLA_DATA_ROOT}/secrets`, Phase 5C), outside the deployed working tree,
+so never committed, never in a build context, and never written by a
+deployment (a `git checkout` run as the deploying user; the directory is
+also root-only, `0700`). Each file holds one random value
+(`openssl rand -hex 32`). Compose file-based secrets are bind mounts, so the
+container sees the host file's numeric owner and mode:
 
 | File | Used by | Owner:group | Mode |
 |---|---|---|---|
@@ -662,27 +668,104 @@ container sees:
 | `secrets/db_password` | php/ops (82), db init (999) | `82:999` | `0440` |
 | `secrets/db_migration_password` | ops (82), db init (999) | `82:999` | `0440` |
 
-The directory itself: `root:root`, `0750` (or owned by the deploying admin).
+The directory itself is `root:root`, `0700`. The storage preflight checks
+the owners and modes, never the values.
 The MySQL init script (`docker/mysql/init/01-create-users.sh`) reads
 `DB_PASSWORD_FILE`/`DB_MIGRATION_PASSWORD_FILE` (refusing both a value and a
 file, or an unreadable/empty file) and runs only when the data volume is
-first initialised. Keep copies in the password manager (docs/OPERATIONS.md,
+first initialised (an empty MySQL data directory, after the database guard
+allowed it). Keep copies in the password manager (docs/OPERATIONS.md,
 "Secrets to preserve").
 
 ### Persistent storage and permissions
 
-| Volume | Mounted at | Containers | Contents |
-|---|---|---|---|
-| `db-data` | `/var/lib/mysql` | db | MySQL data (owned by `mysql`, 999) |
-| `app-storage` | `/var/www/html/storage` | php, ops | covers, tmp, cache, logs, maintenance flag |
-| `app-backups` | `/var/www/html/storage/backups` | ops only | backup archives |
+Phase 5C, split layout (owner-confirmed). Host directories only: no named
+volumes, never `/mnt/dockerdata`.
 
-The prod image creates `storage/{covers,logs,cache,backups,tmp}` owned by
-`www-data` (82) with mode `0750`; Docker copies that ownership into a new,
-empty named volume on first use. To use a host directory for backups
-instead (e.g. for off-site copies), create it as `82:82`, mode `0750`, and
-bind it at `storage/backups` in the `ops` service. The web container never
-mounts the backups.
+| Host path | Owner | Mode | Mounted at | Containers |
+|---|---|---|---|---|
+| SSD `/opt/digital-library-data/mysql/` | `999:999` (image `mysql` user) | `0700` | `/var/lib/mysql` | db |
+| SSD `/opt/digital-library-data/mysql-init-guard/` | `root:root` | `0755` | `/run/dla-db-init` (ro) | db |
+| SSD `/opt/digital-library-data/secrets/<file>` | see "Production secrets" | | `/run/secrets/<file>` | per secret |
+| HDD `…/digital-library/storage/` | `82:82` (`www-data`) | `0750` | `/var/www/html/storage` | php, ops |
+| HDD `…/digital-library/covers/` | `82:82` | `0750` | `/var/www/html/storage/covers` | php, ops |
+| HDD `…/digital-library/backups/` | `82:82` | `0700` | `/var/www/html/storage/backups` | ops only |
+
+The locations:
+
+- **Code (system SSD):** `/opt/digital-library`, the deployed working tree
+  (owned by the deploying administrator, 0755), Compose project directory
+  and build context, holding code and configuration only. The Git objects
+  stay in the bare repository `/home/brais/git/digital-library.git`; the
+  tree is updated with
+  `git --git-dir=… --work-tree=/opt/digital-library checkout -f main` and
+  has no `.git` and no nested `app/`.
+- **Data (system SSD):** `DLA_DATA_ROOT` = `/opt/digital-library-data`
+  (`root:root` 0755), a sibling of the working tree: `mysql/`, `secrets/`,
+  `mysql-init-guard/`.
+- **Storage HDD:** `DLA_STORAGE_ROOT` = `/mnt/bravina-shared/digital-library`
+  (`root:root` 0700). The disk is ext4, UUID
+  `ad62670f-861d-47a4-a68d-967272d27866`, mounted at `/mnt/bravina-shared`.
+  The mountpoint keeps `root:root` 0755. `books/` is reserved for
+  PDF/EPUB and is neither created nor mounted.
+
+Inside the HDD's `storage/` there are two mountpoint stubs: `covers/`
+(`root:root` 0755) and `backups/` (`root:root` 0000, so the web container
+cannot use it). Owners come from the images: `USER www-data` (uid/gid 82 in
+the Alpine PHP base) and the `mysql` user (999) of the MySQL image. nginx
+mounts nothing. php and nginx mount nothing from the SSD.
+
+The repository root is the Compose project directory and build context
+(relative mounts, `context: .`). Production data is physically outside it,
+so neither a checkout nor a build can reach it; the deploying user also
+cannot write to the data root. As defence in depth `.gitignore` and
+`.dockerignore` (no `!` exceptions) exclude the data directory names and
+database file patterns, and the Dockerfiles copy explicit paths only. The
+preflight refuses `.git` or any data directory inside the working tree.
+
+**Fail closed.**
+
+- Every data mount is a long-syntax bind with `create_host_path: false`, so
+  Compose never creates a missing source. Docker uses the Mounts API for
+  them and refuses to start a container whose source is missing. Neither
+  root has a default in Compose.
+- **Database guard.** db's entrypoint is `docker/mysql/db-guard.sh`. It
+  runs before the image's own entrypoint, however db is started. It starts
+  MySQL when `mysql.ibd` exists, and lets the image initialise a new
+  database only when the data directory is empty **and** the owner has
+  created `allow-empty-init` in the read-only guard directory (a first
+  deployment). Otherwise it refuses: an empty directory without
+  authorisation, or files without a database.
+
+**Boot path.** `docker.service` is not modified: Docker and the owner's other
+workloads, such as Jellyfin, never depend on these disks. Every service has
+restart policy `"no"`, so the daemon starts none of these containers by
+itself, whether after a reboot, a Docker restart or a power loss. The
+dedicated `digital-library.service` (`docker/storage/systemd/`) is the only
+boot path:
+
+- It is `BindsTo=`/`After=` the HDD's fstab mount unit,
+  `RequiresMountsFor=/opt/digital-library /opt/digital-library-data`, and
+  asserts the HDD mountpoint.
+- It runs the root-owned installed copy of `docker/storage/preflight.sh`,
+  `/usr/local/sbin/digital-library-preflight --existing-installation`
+  (read-only), never the copy in the user-writable working tree: a checkout
+  cannot change what root runs at boot. This checks the HDD's exact UUID, mountpoint, type and
+  options, both layouts' owners and modes, and the database state:
+  `mysql.ibd` and the application schema present, no initialisation
+  authorisation left.
+- Only then does it run `up -d --no-recreate --no-build --pull never
+  --wait`.
+- Any failure stops the stack (`ExecStopPost`). Unmounting the disk through
+  systemd stops the unit first.
+
+The cost is that Docker no longer restarts a crashed container
+automatically. Restarting goes through the unit, which reruns the
+preflight. An immutable empty mountpoint is optional.
+
+Runbook: docs/DEPLOYMENT.md, section 3. Writes never rename across these
+mounts: covers, restored covers and backup archives are written to a
+temporary file in their final directory and then renamed there.
 
 ### Production ingress (existing Cloudflare Tunnel)
 

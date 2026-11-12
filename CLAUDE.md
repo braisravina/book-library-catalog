@@ -63,6 +63,9 @@ These rules apply to every commit, in every phase, with no exceptions.
   - Phase 5B: from `main` at the merge of Phase 5A, commit
     `9a0ce899983d870016617d4f3593e29b1019d78d` (tree
     `17fcb932a37e4bcb8e4006c3488cdea63b793b5f`).
+  - Phase 5C: branch `phase-5c` from the committed Phase 5B CI fix
+    `ea65ce6518ae5106f4cad0c0b70129eff940c5b4` (tree
+    `0becea22c0f77687cb27880b227148fbb6170b9c`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -163,6 +166,33 @@ These rules apply to every commit, in every phase, with no exceptions.
   network gateway); never hardcode the port, subnet or gateway as production
   facts (they are owner-checked candidates). The Raspberry Pi is not part
   of the project.
+- Persistent storage (Phase 5C, owner-confirmed split layout): system SSD
+  working tree `/opt/digital-library`, code and configuration only
+  (checked out with `--work-tree` from the bare repository
+  `/home/brais/git/digital-library.git`; no `.git`, no nested `app/`;
+  repository root = Compose project directory = build context); system SSD
+  data root `DLA_DATA_ROOT=/opt/digital-library-data` (`mysql/`,
+  `secrets/`, `mysql-init-guard/`), never inside the working tree; storage HDD
+  `DLA_STORAGE_ROOT=/mnt/bravina-shared/digital-library` (UUID
+  `ad62670f-861d-47a4-a68d-967272d27866`; `covers/`, `backups/`,
+  `storage/`; `books/` reserved, not created or mounted). Never
+  `/mnt/dockerdata`, never named volumes. Keep the ignore patterns as
+  defence in depth (`.dockerignore` without `!` exceptions; Dockerfiles
+  copy explicit paths only, never `COPY .`). systemd runs only the
+  root-owned installed preflight `/usr/local/sbin/digital-library-preflight`,
+  never a script from the user-writable working tree. Every data mount is a long-syntax bind with
+  `create_host_path: false`; neither root has a Compose default. MySQL data
+  only in db, backups only in ops. `docker/mysql/db-guard.sh` (db
+  entrypoint) never lets MySQL initialise an empty database without the
+  owner's first-deployment authorisation; the preflight's mode
+  (`--first-deployment` / `--existing-installation`) is always explicit. Owners: 999 (mysql) and 82
+  (www-data); never `chmod 777` or recursive changes, never change the
+  mountpoint's `root:root` 0755. `docker/storage/preflight.sh` stays
+  read-only; `tests/Unit/Deployment/PersistentStorageTest.php` enforces it.
+  Production restart policies stay `"no"`: the dedicated
+  `digital-library.service` (preflight, then `up --no-recreate --no-build
+  --pull never`) is the only boot path. Never modify `docker.service` or
+  make other Docker workloads depend on this disk.
 - Backups/restore/maintenance/cleanup are CLI-only (`Console\Operations`).
   Operations commands are listed in `Console::OPS_COMMANDS` (ops role only
   in production, never `APP_ROLE=web`) and, when they must not overlap, in
