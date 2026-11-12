@@ -1,0 +1,79 @@
+# Digital Library Archive — development stack.
+# Usage: cp .env.example .env && (edit secrets) && docker compose up -d
+# See README.md. Production uses docker-compose.prod.yml (ARCHITECTURE.md,
+# "Production deployment"); never use this file in production.
+
+name: digital-library
+
+services:
+  nginx:
+    # Same pinned image as production (docker/nginx/Dockerfile).
+    image: nginx:1.30.6-alpine3.24@sha256:583b7f2fce1cdb8da5ad5c39ebd3c33b98b87d493190e548bdee1fa8c619c311
+    depends_on:
+      php:
+        condition: service_started
+    ports:
+      # Bound to localhost only; put the Bravina reverse proxy in front for TLS.
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    volumes:
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # Client IP trust policy (trusts no proxy in development).
+      - ./docker/nginx/client-ip.conf:/etc/nginx/dla/client-ip.conf:ro
+      - ./public:/var/www/html/public:ro
+    restart: unless-stopped
+
+  php:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+      target: dev
+    image: digital-library-php:dev
+    env_file: .env
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./:/var/www/html
+      # Uploaded covers live in a named volume (writable by PHP-FPM, outside
+      # the web root, and not mixed into the source tree).
+      - covers-data:/var/www/html/storage/covers
+      # Backup archives: a named volume outside the source tree and the web root.
+      # In production, mount a host directory here and copy archives off-site.
+      - backups-data:/var/www/html/storage/backups
+    restart: unless-stopped
+
+  db:
+    # Same pinned image as production (docker-compose.prod.yml).
+    image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${DB_DATABASE:?set DB_DATABASE in .env}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME}
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD}
+      DB_TEST_DATABASE: ${DB_TEST_DATABASE:-}
+      DB_TEST_USERNAME: ${DB_TEST_USERNAME:-}
+      DB_TEST_PASSWORD: ${DB_TEST_PASSWORD:-}
+      DB_TEST_MIGRATION_USERNAME: ${DB_TEST_MIGRATION_USERNAME:-}
+      DB_TEST_MIGRATION_PASSWORD: ${DB_TEST_MIGRATION_PASSWORD:-}
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+      - ./docker/mysql/my.cnf:/etc/mysql/conf.d/app.cnf:ro
+    # No published port: only the php service can reach the database.
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  covers-data:
+  backups-data:

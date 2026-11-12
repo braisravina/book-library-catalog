@@ -1,0 +1,246 @@
+# Digital Library Archive - PRODUCTION stack.
+#
+# STATUS (Phase 5A Batch 5): topology-independent hardening only.
+# INGRESS IS INTENTIONALLY NOT CONFIGURED. nginx is attached to an internal
+# network only and publishes no port, and it refuses to start until the
+# approved client IP policy and DLA_TRUSTED_PROXY are in place. How
+# Cloudflare, cloudflared and Traefik reach this stack is decided after the
+# production topology discovery (docker/discovery/); see ARCHITECTURE.md,
+# "Production deployment" and "Production ingress (pending)".
+#
+# On the Docker host, from the repository checkout:
+#   cp .env.production.example .env.production   # review; never commit it
+#   (create ./secrets/*; see ARCHITECTURE.md "Production secrets")
+#   docker compose -f docker-compose.prod.yml --env-file .env.production build
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d db
+#   docker compose -f docker-compose.prod.yml --env-file .env.production run --rm ops php bin/console migrate
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# Least privilege:
+#   nginx  static assets and FastCGI only; unprivileged, read-only, no secrets
+#   php    web requests (APP_ROLE=web): runtime database account only
+#   ops    one-off CLI work (APP_ROLE=ops; migrate, backups, restore, cleanup):
+#          runtime + migration accounts; started only with "run --rm ops ..."
+#   db     MySQL; the only container with the root password (root@localhost)
+# No service publishes a port. frontend and backend are internal networks
+# (no route outside Docker); only php joins egress, for ISBN metadata lookups.
+
+name: digital-library-prod
+
+services:
+  nginx:
+    build:
+      context: .
+      dockerfile: docker/nginx/Dockerfile
+    image: digital-library-nginx:${APP_IMAGE_TAG:-prod}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      # PENDING TOPOLOGY APPROVAL: "required" with the approved policy, or
+      # "none" as an explicit decision. Unset, nginx refuses to start.
+      DLA_TRUSTED_PROXY: ${DLA_TRUSTED_PROXY:-}
+    volumes:
+      # The approved client IP policy goes in this directory as
+      # client-ip.conf (PENDING; see docker/nginx/production/README.md).
+      - ./docker/nginx/production:/etc/nginx/dla:ro
+    networks:
+      - frontend
+    depends_on:
+      php:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:8080/health
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  php:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+      target: prod
+    image: digital-library-php:${APP_IMAGE_TAG:-prod}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    env_file:
+      - .env.production
+    environment:
+      APP_ROLE: web
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      # Never in the web container, whatever .env.production contains.
+      DB_MIGRATION_USERNAME: ""
+      DB_MIGRATION_PASSWORD: ""
+      DB_MIGRATION_PASSWORD_FILE: ""
+      DB_ROOT_PASSWORD: ""
+      DB_ROOT_PASSWORD_FILE: ""
+    secrets:
+      - db_password
+    volumes:
+      - app-storage:/var/www/html/storage
+    networks:
+      - frontend
+      - backend
+      - egress
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - -r
+        - "exit(@fsockopen('127.0.0.1', 9000) ? 0 : 1);"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  ops:
+    profiles:
+      - ops
+    image: digital-library-php:${APP_IMAGE_TAG:-prod}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    env_file:
+      - .env.production
+    environment:
+      APP_ROLE: ops
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      DB_MIGRATION_PASSWORD_FILE: /run/secrets/db_migration_password
+      DB_ROOT_PASSWORD: ""
+      DB_ROOT_PASSWORD_FILE: ""
+    secrets:
+      - db_password
+      - db_migration_password
+    volumes:
+      - app-storage:/var/www/html/storage
+      - app-backups:/var/www/html/storage/backups
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - php
+      - bin/console
+      - help
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  db:
+    image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_ROOT_HOST: localhost
+      MYSQL_DATABASE: ${DB_DATABASE:?set DB_DATABASE (run with --env-file .env.production)}
+      DB_USERNAME: ${DB_USERNAME:?set DB_USERNAME (run with --env-file .env.production)}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME:?set DB_MIGRATION_USERNAME (run with --env-file .env.production)}
+      DB_MIGRATION_PASSWORD_FILE: /run/secrets/db_migration_password
+    secrets:
+      - db_root_password
+      - db_password
+      - db_migration_password
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+      - ./docker/mysql/my.cnf:/etc/mysql/conf.d/app.cnf:ro
+    networks:
+      - backend
+    healthcheck:
+      # Liveness without credentials: mysqladmin ping succeeds whenever the
+      # server answers, even with "access denied". 127.0.0.1 (TCP) stays
+      # unreachable while the image initialises with networking disabled.
+      test:
+        - CMD
+        - mysqladmin
+        - ping
+        - -h
+        - 127.0.0.1
+        - --silent
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    stop_grace_period: 60s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+networks:
+  # nginx <-> php-fpm. Internal: no route to or from outside Docker.
+  frontend:
+    internal: true
+  # php/ops <-> MySQL. Internal.
+  backend:
+    internal: true
+  # Outbound HTTPS for ISBN metadata lookups (php only). Restrict egress on
+  # the Docker host firewall; with METADATA_PROVIDERS=none it can be removed.
+  egress:
+    driver: bridge
+
+volumes:
+  db-data:
+  # storage/ (covers, tmp, cache, logs, maintenance flag): shared by php and
+  # ops. Created from the image on first use: owned by www-data (uid 82), 0750.
+  app-storage:
+  # storage/backups: ops only. Copy archives off the host (OPERATIONS.md).
+  app-backups:
+
+# Docker secrets read from files on the host (never committed; .gitignore
+# and .dockerignore exclude secrets/). Ownership and modes: ARCHITECTURE.md
+# "Production secrets".
+secrets:
+  db_root_password:
+    file: ./secrets/db_root_password
+  db_password:
+    file: ./secrets/db_password
+  db_migration_password:
+    file: ./secrets/db_migration_password

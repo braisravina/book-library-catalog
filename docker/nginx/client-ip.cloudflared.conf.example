@@ -1,0 +1,29 @@
+# Digital Library Archive - client IP policy TEMPLATE: Cloudflare Tunnel.
+# Topology: Cloudflare edge -> cloudflared -> nginx (this container), with
+# cloudflared as the ONLY peer that may report client addresses.
+#
+# Before use (nginx -t refuses this file until the placeholder is replaced):
+#   1. Give cloudflared a FIXED address on a DEDICATED internal Docker network
+#      shared only with nginx (fixed subnet + ipv4_address in Compose). A
+#      shared or default network is not a trust boundary: any container on it
+#      could send forged headers from an address in the range.
+#   2. Replace <CLOUDFLARED_ADDRESS> with that single address (no ranges,
+#      never 0.0.0.0/0 or a whole Docker subnet).
+#   3. Install as /etc/nginx/dla/client-ip.conf and run: nginx -t
+#   4. Verify with tests/nginx/run.php and the checks in ARCHITECTURE.md.
+#
+# Cloudflare sets CF-Connecting-IP at the edge, replacing any value a visitor
+# sends, and cloudflared forwards it. It holds exactly one address, so the
+# header is not walked (real_ip_recursive off). A missing or malformed value
+# leaves $remote_addr at cloudflared's address (never a client's choice).
+
+set_real_ip_from <CLOUDFLARED_ADDRESS>;
+real_ip_header CF-Connecting-IP;
+real_ip_recursive off;
+
+# Direct-origin protection: 1 refuses (403) requests that did not arrive
+# through cloudflared with a valid CF-Connecting-IP, except /health (local
+# container probes). Set to 0 only if something else must reach nginx directly.
+map $uri $dla_require_trusted_proxy {
+    default 1;
+}

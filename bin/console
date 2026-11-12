@@ -1,0 +1,16 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use DigitalLibrary\Console\Console;
+use DigitalLibrary\Core\Bootstrap;
+
+if (PHP_SAPI !== 'cli') {
+    exit(1);
+}
+
+$basePath = dirname(__DIR__);
+require $basePath . '/vendor/autoload.php';
+
+exit((new Console(Bootstrap::services($basePath)))->run($argv));

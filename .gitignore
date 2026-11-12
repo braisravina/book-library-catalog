@@ -1,0 +1,22 @@
+/vendor/
+/.env
+/.env.*
+!/.env.example
+!/.env.production.example
+/storage/covers/*
+/storage/logs/*
+/storage/cache/*
+/storage/backups/*
+/storage/tmp/*
+/storage/maintenance.flag
+/storage/maintenance.flag.restore-incomplete
+!/storage/**/.gitkeep
+/.phpunit.cache/
+/.phpunit.result.cache
+/coverage/
+.DS_Store
+*.swp
+.idea/
+.vscode/
+# Production Docker secrets (docker-compose.prod.yml); never commit.
+/secrets/

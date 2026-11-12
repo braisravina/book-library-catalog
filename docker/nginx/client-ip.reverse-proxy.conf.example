@@ -1,0 +1,31 @@
+# Digital Library Archive - client IP policy TEMPLATE: generic reverse proxy.
+# Topology: clients -> reverse proxy (TLS) -> nginx (this container), where
+# the proxy APPENDS the address it received the connection from to
+# X-Forwarded-For (nginx: proxy_add_x_forwarded_for; Traefik and Caddy do this
+# by default).
+#
+# Before use (nginx -t refuses this file until the placeholder is replaced):
+#   1. Find the address the proxy connects FROM, as seen by this container,
+#      and make it fixed (dedicated network with a fixed subnet and a static
+#      address). A shared Docker network is not a trust boundary.
+#   2. Replace <PROXY_ADDRESS> with that single address.
+#   3. If Cloudflare sits in front of the proxy, X-Forwarded-For then ends with
+#      a Cloudflare edge address: either have the proxy pass CF-Connecting-IP
+#      and use the cloudflared template's header settings (only if the proxy
+#      accepts connections from Cloudflare alone), or list Cloudflare's
+#      published ranges here as well. Decide and document this first.
+#   4. Install as /etc/nginx/dla/client-ip.conf; run nginx -t and
+#      tests/nginx/run.php.
+#
+# X-Forwarded-For is walked from the right; the first address that is not a
+# trusted proxy is the client. Addresses a client prepends are ignored.
+
+set_real_ip_from <PROXY_ADDRESS>;
+real_ip_header X-Forwarded-For;
+real_ip_recursive on;
+
+# Direct-origin protection: 1 refuses (403) requests that did not arrive
+# through the proxy with a valid client address, except /health.
+map $uri $dla_require_trusted_proxy {
+    default 1;
+}

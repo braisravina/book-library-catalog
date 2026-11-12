@@ -1,0 +1,288 @@
+# Digital Library Archive - continuous integration (Phase 5A Batch 7).
+#
+# Jobs:
+#   test              PHP 8.4: Composer checks, lint, full PHPUnit suite against
+#                     MySQL 8.4 (dedicated test accounts), nginx behaviour checks
+#   unit-php83        PHP 8.3 compatibility: lint and unit suite
+#   static            shellcheck, Dockerfile lint, Compose validation
+#   production-stack  builds the production images, starts docker-compose.prod.yml
+#                     (no published ports), checks the hardening, and runs a
+#                     backup / restore drill with the ops container
+#
+# Security: read-only token, no secrets, no pull_request_target, checkout
+# without persisted credentials, actions pinned to full commit SHAs, pinned
+# images. Every password below is a throwaway value for this runner only.
+# The production ingress (trusted proxy) is NOT configured here: the
+# production-stack job uses DLA_TRUSTED_PROXY=none with the trust-nothing
+# policy and is reached only from inside its own containers.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    # Weekly (Monday 05:17 UTC): dependency audit and restore drill against
+    # unchanged code, so new advisories or image regressions surface.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PHP 8.4 - suite, lint, nginx
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+        env:
+          MYSQL_ROOT_PASSWORD: ci_root_password
+          MYSQL_DATABASE: library_test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping -h 127.0.0.1 --silent" --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      APP_ENV: testing
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      # The application database is never created in CI; the integration
+      # suite refuses to run unless DB_TEST_DATABASE ends in "_test", differs
+      # from DB_DATABASE and is reached through dedicated test accounts.
+      DB_DATABASE: library
+      DB_TEST_DATABASE: library_test
+      DB_USERNAME: library_app
+      DB_PASSWORD: ci_app_password
+      DB_MIGRATION_USERNAME: library_migrator
+      DB_MIGRATION_PASSWORD: ci_migration_password
+      DB_TEST_USERNAME: library_test_app
+      DB_TEST_PASSWORD: ci_test_app_password
+      DB_TEST_MIGRATION_USERNAME: library_test_migrator
+      DB_TEST_MIGRATION_PASSWORD: ci_test_migration_password
+      DB_TEST_REQUIRE_DEDICATED_ACCOUNTS: "true"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP 8.4 (with PHP-FPM for the nginx checks)
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.4"
+          extensions: pdo_mysql, gd, mbstring, fileinfo, sodium
+          coverage: none
+          tools: composer:v2
+
+      - name: Validate composer.json and composer.lock
+        run: composer validate --strict
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Audit dependencies for known vulnerabilities
+        run: composer audit --no-interaction
+
+      - name: Lint PHP
+        run: composer lint
+
+      - name: Create least-privilege test database accounts
+        run: |
+          mysql -h 127.0.0.1 -uroot -pci_root_password <<'SQL'
+          CREATE USER 'library_test_app'@'%' IDENTIFIED BY 'ci_test_app_password';
+          CREATE USER 'library_test_migrator'@'%' IDENTIFIED BY 'ci_test_migration_password';
+          GRANT SELECT, INSERT, UPDATE, DELETE ON `library_test`.* TO 'library_test_app'@'%';
+          GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES ON `library_test`.* TO 'library_test_migrator'@'%';
+          SQL
+
+      - name: Run the full test suite
+        # --fail-on-skipped: GD cover tests and the MySQL integration suite
+        # must actually run on PHP 8.4 here, never silently skip.
+        run: vendor/bin/phpunit --fail-on-skipped --fail-on-warning
+
+      - name: Install nginx for the behaviour checks
+        run: |
+          if ! command -v nginx >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends nginx
+          fi
+          # The runner's own nginx service is not needed (the checks start
+          # their own unprivileged instance on loopback high ports).
+          sudo systemctl stop nginx 2>/dev/null || true
+          nginx -v
+
+      - name: Run the nginx behaviour checks
+        # Exit status 2 (nginx or PHP-FPM missing) fails the job too.
+        run: php tests/nginx/run.php
+
+  unit-php83:
+    name: PHP 8.3 - lint and unit suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP 8.3
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.3"
+          extensions: pdo_mysql, pdo_sqlite, gd, mbstring, fileinfo, sodium
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Lint PHP
+        run: composer lint
+
+      - name: Run the unit suite
+        run: vendor/bin/phpunit --testsuite unit --fail-on-skipped --fail-on-warning
+
+  static:
+    name: Shell, Dockerfile and Compose checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck --severity=warning --shell=bash docker/discovery/docker-host.sh docker/discovery/ingress-host.sh docker/mysql/init/01-create-users.sh
+          shellcheck --severity=warning --shell=sh docker/nginx/entrypoint-prod.sh docker/php/entrypoint-prod.sh docker/php/entrypoint-dev.sh
+
+      - name: Lint Dockerfiles
+        run: |
+          docker build --check -f docker/php/Dockerfile .
+          docker build --check -f docker/nginx/Dockerfile .
+
+      - name: Validate the Compose files
+        run: |
+          # Throwaway inputs for this runner only (never committed).
+          cp .env.example .env
+          docker compose config --quiet
+          cp .env.production.example .env.production
+          mkdir -p secrets
+          for name in db_root_password db_password db_migration_password; do
+            openssl rand -hex 32 > "secrets/$name"
+          done
+          docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
+          # No production service publishes a port.
+          published=$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq '[.services[] | select(.ports != null and (.ports | length) > 0)] | length')
+          test "$published" = 0
+
+  production-stack:
+    name: Production images, hardening and restore drill
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: static
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare throwaway configuration and secrets
+        run: |
+          cp .env.production.example .env.production
+          # CI only: explicitly no trusted proxy, with the trust-nothing policy.
+          # The real ingress policy is decided after the topology review.
+          echo 'DLA_TRUSTED_PROXY=none' >> .env.production
+          cp docker/nginx/client-ip.conf docker/nginx/production/client-ip.conf
+          mkdir -p secrets
+          for name in db_root_password db_password db_migration_password; do
+            openssl rand -hex 32 > "secrets/$name"
+          done
+          # Owners and modes as documented (ARCHITECTURE.md "Production secrets").
+          sudo chown 999:999 secrets/db_root_password
+          sudo chmod 0400 secrets/db_root_password
+          sudo chown 82:999 secrets/db_password secrets/db_migration_password
+          sudo chmod 0440 secrets/db_password secrets/db_migration_password
+
+      - name: Build the production images
+        run: docker compose -f docker-compose.prod.yml --env-file .env.production build
+
+      - name: Start the stack and wait for every health check
+        run: docker compose -f docker-compose.prod.yml --env-file .env.production up -d --wait --wait-timeout 300
+
+      - name: Check the hardening
+        run: |
+          set -eux
+          dc() { docker compose -f docker-compose.prod.yml --env-file .env.production "$@"; }
+          # "! cmd" never fails a "set -e" script; this does.
+          refuse() { if "$@"; then echo "UNEXPECTED SUCCESS: $*" >&2; exit 1; fi; }
+          dc ps
+          # End to end: nginx -> PHP-FPM -> MySQL.
+          test "$(dc exec -T nginx wget -q -O - http://127.0.0.1:8080/health)" = '{"status":"ok"}'
+          dc exec -T nginx wget -q -O /dev/null http://127.0.0.1:8080/assets/css/app.css
+          # No published ports.
+          if docker ps --filter label=com.docker.compose.project=digital-library-prod --format '{{.Ports}}' | grep -q -- '->'; then
+            echo "A production container publishes a port" >&2
+            exit 1
+          fi
+          # Unprivileged users and read-only root filesystems.
+          test "$(dc exec -T php id -u)" = 82
+          test "$(dc exec -T nginx id -u)" = 101
+          refuse dc exec -T php touch /var/www/html/ci-write-test
+          refuse dc exec -T nginx touch /etc/nginx/ci-write-test
+          # The web container holds only the runtime credentials.
+          dc exec -T php test -r /run/secrets/db_password
+          refuse dc exec -T php test -e /run/secrets/db_migration_password
+          refuse dc exec -T php test -e /run/secrets/db_root_password
+          # Operations commands are refused in the web container.
+          refuse dc exec -T php php bin/console backup:create
+          # The configuration validates cleanly in both roles.
+          dc exec -T php php bin/console config:check --strict
+          dc run --rm -T ops php bin/console config:check --strict
+          # A foreign Host header is refused by the application.
+          refuse dc exec -T nginx wget -q -O /dev/null --header 'Host: evil.example' http://127.0.0.1:8080/login
+
+      - name: Migrate, back up and verify
+        run: |
+          set -eux
+          dc() { docker compose -f docker-compose.prod.yml --env-file .env.production "$@"; }
+          dc run --rm -T ops php bin/console migrate
+          dc run --rm -T ops php bin/console migrate:status
+          openssl rand -hex 16 | dc run --rm -T ops php bin/console user:create --email=ci-admin@example.org --name="CI Admin" --role=admin
+          dc run --rm -T ops php bin/console backup:create
+          dc run --rm -T ops sh -c 'for f in storage/backups/dla-backup-*.tar.gz; do php bin/console backup:verify --file="$f"; done'
+
+      - name: Restore drill (maintenance mode, web PHP stopped)
+        run: |
+          set -eux
+          dc() { docker compose -f docker-compose.prod.yml --env-file .env.production "$@"; }
+          archive=$(dc run --rm -T ops sh -c 'ls -1 storage/backups/dla-backup-*.tar.gz | tail -n 1' | tr -d '\r')
+          dc run --rm -T ops php bin/console maintenance:on --reason="CI restore drill"
+          dc stop php
+          dc run --rm -T ops php bin/console backup:restore --file="$archive" --confirm=library --replace --allow-production
+          dc run --rm -T ops php bin/console maintenance:status
+          if dc run --rm -T ops php bin/console maintenance:status | grep -q 'INCOMPLETE RESTORE'; then
+            echo "The restore left an incomplete-restore marker" >&2
+            exit 1
+          fi
+          dc up -d --wait --wait-timeout 300 php nginx
+          dc run --rm -T ops php bin/console maintenance:off
+          test "$(dc exec -T nginx wget -q -O - http://127.0.0.1:8080/health)" = '{"status":"ok"}'
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.prod.yml --env-file .env.production logs --no-color --tail 200
+
+      - name: Remove the stack
+        if: always()
+        run: docker compose -f docker-compose.prod.yml --env-file .env.production down -v --remove-orphans
