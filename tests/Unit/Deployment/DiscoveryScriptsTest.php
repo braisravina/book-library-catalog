@@ -7,13 +7,13 @@ namespace DigitalLibrary\Tests\Unit\Deployment;
 use PHPUnit\Framework\TestCase;
 
 /**
- * docker/discovery/*.sh: production topology discovery must stay read-only
+ * docker/discovery/docker-host.sh: production topology discovery must stay read-only
  * and must not copy secrets into its report. The scripts run against stub
  * docker/systemctl/ss/ip/pgrep/sudo binaries that serve planted secrets.
  */
 final class DiscoveryScriptsTest extends TestCase
 {
-    private const SCRIPTS = ['docker/discovery/docker-host.sh', 'docker/discovery/ingress-host.sh'];
+    private const SCRIPTS = ['docker/discovery/docker-host.sh'];
     private const TOKEN = 'eyJhIjoiMTIzNDU2Nzg5MGFiY2RlZiIsInQiOiJhYmNkZWYxMjM0NTYifQ';
     /** Planted values that must never appear in a report. */
     private const SECRETS = [self::TOKEN, 'owner@example.org', 'apr1', 'SUPERSECRET', 'hunter2', '203.0.113.7', 'Bearer'];
@@ -62,40 +62,11 @@ final class DiscoveryScriptsTest extends TestCase
         }
     }
 
-    public function testIngressReportWithholdsSecrets(): void
-    {
-        $this->stubCommonTools();
-        file_put_contents($this->tmp . '/traefik/dynamic.yml', implode("\n", [
-            'http:', '  routers:', '    library:', '      rule: "Host(`library.example.org`)"', '      service: library',
-            '  services:', '    library:', '      loadBalancer:', '        servers:', '          - url: "http://192.168.1.50:8080"',
-            '    legacy:', '      loadBalancer:', '        servers:', '          - url: "http://admin:hunter2@192.168.1.60:80"',
-            '  middlewares:', '    auth:', '      basicAuth:', '        users:', '          - "admin:$apr1$H6uskkkW$IgXLP6ewTrSuBkTrqE8wj/"',
-            '    api:', '      headers:', '        customRequestHeaders:', '          X-Api-Key: "SUPERSECRETAPIKEYVALUE"', '',
-        ]));
-        $report = $this->runScript('ingress-host.sh', ['192.168.1.50']);
-
-        foreach (self::SECRETS as $secret) {
-            self::assertStringNotContainsString($secret, $report, $secret);
-        }
-        self::assertStringContainsString('--token=<withheld>', $report);
-        self::assertStringContainsString('TUNNEL_TOKEN PATH ORIGIN_PASS', $report, 'Variable names (only) are reported');
-        self::assertStringContainsString('--entrypoints.web.address=:80', $report);
-        self::assertStringContainsString('--entrypoints.websecure.forwardedheaders.trustedips=173.245.48.0/20', $report);
-        self::assertStringContainsString('--certificatesresolvers.le.acme.email=<withheld>', $report);
-        self::assertStringContainsString('url: "http://192.168.1.50:8080"', $report);
-        self::assertStringContainsString('rule: "Host(`library.example.org`)"', $report);
-        self::assertStringContainsString('withheld', $report);
-        self::assertStringContainsString('non-public address 192.168.1.52 seen 1 time(s)', $report);
-        self::assertStringContainsString('public=1', $report, 'Public clients are counted, not listed');
-        self::assertStringContainsString('traefik.http.routers.app.rule=Host(`library.example.org`)', $report);
-        self::assertStringContainsString('manual review checklist', $report);
-    }
-
     public function testDockerHostReportWithholdsSecrets(): void
     {
         $this->stubCommonTools();
         file_put_contents($this->tmp . '/nginx/site.conf', implode("\n", [
-            'server {', '    listen 80;', '    server_name app.example.org;', '    set_real_ip_from 192.168.1.52;', '    real_ip_header X-Forwarded-For;',
+            'server {', '    listen 80;', '    server_name app.example.org;', '    set_real_ip_from 172.18.0.1;', '    real_ip_header X-Forwarded-For;',
             '    # set_real_ip_from 10.0.0.1;', '    proxy_set_header Authorization "Bearer SUPERSECRETBEARER";', '    auth_basic_user_file /etc/nginx/htpasswd;',
             '    proxy_pass http://app:9000;', '    proxy_pass http://user:hunter2@legacy:80;', '}', '',
         ]));
@@ -105,7 +76,7 @@ final class DiscoveryScriptsTest extends TestCase
         foreach (self::SECRETS as $secret) {
             self::assertStringNotContainsString($secret, $report, $secret);
         }
-        self::assertStringContainsString('set_real_ip_from 192.168.1.52;', $report);
+        self::assertStringContainsString('set_real_ip_from 172.18.0.1;', $report);
         self::assertStringContainsString('real_ip_header X-Forwarded-For;', $report);
         self::assertStringContainsString('proxy_pass http://app:9000;', $report);
         self::assertStringNotContainsString('10.0.0.1', $report, 'Comment lines are skipped');
@@ -145,7 +116,7 @@ final class DiscoveryScriptsTest extends TestCase
                     esac ;;
                 network)
                     if [ "\$2" = ls ]; then echo proxy; else echo "-- proxy driver=bridge internal=false attachable=false"; fi ;;
-                logs) printf '203.0.113.7 - - [x] "GET / HTTP/2.0" 200\\n192.168.1.52 - - [x] "GET /x HTTP/1.1" 200\\n' ;;
+                logs) printf '203.0.113.7 - - [x] "GET / HTTP/2.0" 200\\n192.168.1.60 - - [x] "GET /x HTTP/1.1" 200\\n' ;;
                 inspect)
                     name="\$2"; fmt="\$4"
                     case "\$fmt" in
@@ -167,7 +138,7 @@ final class DiscoveryScriptsTest extends TestCase
         $this->stub('pgrep', 'exit 1');
         $this->stub('sudo', 'exit 1');
         $this->stub('ss', 'echo "LISTEN 0 4096 0.0.0.0:443 0.0.0.0:*"');
-        $this->stub('ip', 'echo "eth0 UP 192.168.1.52/24"');
+        $this->stub('ip', 'echo "eth0 UP 192.168.1.50/24"');
     }
 
     private function stub(string $name, string $body): void

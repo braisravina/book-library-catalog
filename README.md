@@ -295,7 +295,8 @@ the full, commented list. Any variable can instead be supplied as a file via
 
 Production deployment to the Bravina Docker infrastructure is **not** done yet.
 The production stack is prepared in `docker-compose.prod.yml` (unprivileged,
-read-only containers, private networks, no published ports, file-based
+read-only containers, private networks, only nginx published, on
+`127.0.0.1` for the existing Cloudflare Tunnel's host cloudflared, file-based
 secrets, separate web/ops roles, pinned images, health checks). Follow the
 operator runbook **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**; the design is
 in [ARCHITECTURE.md › Deployment](ARCHITECTURE.md#deployment) and the
@@ -305,12 +306,13 @@ go-live checklist in [SECURITY.md](SECURITY.md#production-deployment-checklist).
 
 These must be resolved and verified before any deployment:
 
-1. **Ingress and client IP forwarding are not configured.** The path from
-   Cloudflare through cloudflared and Traefik (Raspberry Pi) to the Docker
-   server is unverified. Run the read-only discovery scripts
-   (docs/DEPLOYMENT.md, section 0), share sanitized reports, and approve a
-   trusted-proxy design. Until then the production nginx container refuses
-   to start (by design).
+1. **The tunnel route and client IP policy are not active yet.** The site
+   uses a new route on the existing Cloudflare Tunnel (cloudflared systemd
+   service on the Docker host) to nginx on `127.0.0.1:<port>`. To do: check
+   that the candidate port (8089) and `edge` subnet are free, add the route,
+   and confirm the trusted peer from the access log (docs/DEPLOYMENT.md,
+   section 0). Until the values are set, Compose refuses to run and nginx
+   refuses to start (by design).
 2. **The images have never been built and the stack has never run.** No
    container runtime is used on the development machine. The CI job
    `production-stack` builds the images, starts the stack and runs a restore
@@ -322,7 +324,7 @@ These must be resolved and verified before any deployment:
    schedules in [docs/OPERATIONS.md](docs/OPERATIONS.md#recommended-schedule-not-activated)
    and run one restore drill on the production host.
 5. **Proxy logging of invitation URLs** must be checked on the real
-   Cloudflare/cloudflared/Traefik setup if query-format invitation links are
+   Cloudflare/cloudflared setup if query-format invitation links are
    used (the default production template uses fragment links).
 
 ## Project layout

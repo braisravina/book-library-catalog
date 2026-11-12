@@ -1,12 +1,14 @@
 # Digital Library Archive - PRODUCTION stack.
 #
-# STATUS (Phase 5A Batch 5): topology-independent hardening only.
-# INGRESS IS INTENTIONALLY NOT CONFIGURED. nginx is attached to an internal
-# network only and publishes no port, and it refuses to start until the
-# approved client IP policy and DLA_TRUSTED_PROXY are in place. How
-# Cloudflare, cloudflared and Traefik reach this stack is decided after the
-# production topology discovery (docker/discovery/); see ARCHITECTURE.md,
-# "Production deployment" and "Production ingress (pending)".
+# Ingress (Phase 5B): the owner's EXISTING Cloudflare Tunnel, served by the
+# cloudflared systemd service on this Docker host, reaches nginx through
+# ONE published loopback port; no cloudflared container, service or tunnel
+# is part of this stack. Cloudflare -> cloudflared (host) ->
+# http://127.0.0.1:<DLA_HTTP_PORT> -> nginx:8080 -> php-fpm -> MySQL.
+# Fail closed: Compose refuses to run until DLA_HTTP_BIND, DLA_HTTP_PORT,
+# DLA_EDGE_SUBNET and DLA_EDGE_GATEWAY are set (no defaults), and nginx
+# refuses to start without the client IP policy. See docs/DEPLOYMENT.md,
+# section 0, and ARCHITECTURE.md, "Production ingress".
 #
 # On the Docker host, from the repository checkout:
 #   cp .env.production.example .env.production   # review; never commit it
@@ -22,8 +24,11 @@
 #   ops    one-off CLI work (APP_ROLE=ops; migrate, backups, restore, cleanup):
 #          runtime + migration accounts; started only with "run --rm ops ..."
 #   db     MySQL; the only container with the root password (root@localhost)
-# No service publishes a port. frontend and backend are internal networks
-# (no route outside Docker); only php joins egress, for ISBN metadata lookups.
+# Only nginx publishes a port, on loopback only (the entrypoint refuses any
+# other address). PHP-FPM and MySQL are
+# never published: frontend and backend are internal networks (no route
+# outside Docker); only nginx joins edge (the published port) and only php
+# joins egress (ISBN metadata lookups).
 
 name: digital-library-prod
 
@@ -44,12 +49,31 @@ services:
       # PENDING TOPOLOGY APPROVAL: "required" with the approved policy, or
       # "none" as an explicit decision. Unset, nginx refuses to start.
       DLA_TRUSTED_PROXY: ${DLA_TRUSTED_PROXY:-}
+      # The host address of the published port (below), so the entrypoint
+      # can refuse anything but loopback. Same variable, so it cannot disagree.
+      DLA_HTTP_BIND: ${DLA_HTTP_BIND:-}
+      # Gateway of the edge network: the TCP peer of every connection that
+      # arrives through the published port (Docker's port proxy / loopback
+      # NAT). With DLA_TRUSTED_PROXY=required the policy must trust exactly
+      # this address.
+      DLA_EDGE_GATEWAY: ${DLA_EDGE_GATEWAY:-}
+    ports:
+      # The origin of the tunnel route (http://127.0.0.1:<DLA_HTTP_PORT>).
+      # No defaults (Compose stops with an error until both are set):
+      #   DLA_HTTP_BIND  127.0.0.1: cloudflared runs on this host (systemd);
+      #                  the port is never reachable from the network.
+      #   DLA_HTTP_PORT  a free host port (8089 is only a candidate; check).
+      - target: 8080
+        host_ip: ${DLA_HTTP_BIND:?set DLA_HTTP_BIND in .env.production (see docs/DEPLOYMENT.md, Cloudflare Tunnel route)}
+        published: "${DLA_HTTP_PORT:?set DLA_HTTP_PORT in .env.production (see docs/DEPLOYMENT.md, Cloudflare Tunnel route)}"
+        protocol: tcp
     volumes:
       # The approved client IP policy goes in this directory as
       # client-ip.conf (PENDING; see docker/nginx/production/README.md).
       - ./docker/nginx/production:/etc/nginx/dla:ro
     networks:
       - frontend
+      - edge
     depends_on:
       php:
         condition: service_healthy
@@ -221,6 +245,17 @@ networks:
   # php/ops <-> MySQL. Internal.
   backend:
     internal: true
+  # The published port only (nginx alone; Docker cannot publish a port of a
+  # container that is only on internal networks). Not shared with any other
+  # project; cloudflared reaches it through the loopback port. Fixed subnet,
+  # so its gateway (the address nginx trusts) never changes: pick a free
+  # range on this host (docs/DEPLOYMENT.md 0.1); no default.
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${DLA_EDGE_SUBNET:?set DLA_EDGE_SUBNET in .env.production (see docs/DEPLOYMENT.md, section 0)}
+          gateway: ${DLA_EDGE_GATEWAY:?set DLA_EDGE_GATEWAY in .env.production (see docs/DEPLOYMENT.md, section 0)}
   # Outbound HTTPS for ISBN metadata lookups (php only). Restrict egress on
   # the Docker host firewall; with METADATA_PROVIDERS=none it can be removed.
   egress:

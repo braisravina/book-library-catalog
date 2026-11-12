@@ -18,17 +18,15 @@
 ## Runtime topology
 
 ```
-Browser ──HTTPS──▶ (ingress: Cloudflare / cloudflared / Traefik — PENDING verification)
-                   ──HTTP──▶ nginx 1.30 (unprivileged, :8080) ──FastCGI──▶ php 8.4-fpm ──▶ mysql 8.4.13
-                             serves /assets only                   runs public/index.php    no published port
+Browser ──HTTPS──▶ Cloudflare edge ──tunnel──▶ existing cloudflared (systemd, Docker host)
+                   ──HTTP──▶ 127.0.0.1:DLA_HTTP_PORT ───▶ nginx 1.30 (unprivileged, :8080) ──FastCGI──▶ php 8.4-fpm ──▶ mysql 8.4.13
+                                                            serves /assets only                   runs public/index.php    no published port
 ```
 
-The ingress path in front of nginx is **not yet verified**. The Bravina
-infrastructure has a Debian Docker server and a Raspberry Pi running
-cloudflared and Traefik; how requests travel between them, and therefore
-which peer nginx may trust, is established by the read-only scripts in
-`docker/discovery/` before any trusted-proxy setting is chosen (see
-[Production ingress (pending)](#production-ingress-pending)).
+The site reuses the owner's **existing** Cloudflare Tunnel: cloudflared runs
+as a systemd service on the Docker host and gets one route to nginx's single
+published port, bound to `127.0.0.1` (see
+[Production ingress](#production-ingress-existing-cloudflare-tunnel)).
 
 - **nginx** serves `public/assets` directly. Every other path is routed
   internally to `public/index.php`. Direct requests to any `.php` file,
@@ -606,14 +604,15 @@ in production. Run from the repository checkout on the Docker host with
 
 | Service | Image | Runs as | Networks | Credentials |
 |---|---|---|---|---|
-| `nginx` | `docker/nginx/Dockerfile`: pinned nginx, `nginx.prod.conf`, `default.conf`, `public/assets` baked in | `nginx` (101), port 8080 | `frontend` | none |
+| `nginx` | `docker/nginx/Dockerfile`: pinned nginx, `nginx.prod.conf`, `default.conf`, `public/assets` baked in | `nginx` (101), port 8080, published on `127.0.0.1:DLA_HTTP_PORT` only | `frontend`, `edge` | none |
 | `php` | `docker/php/Dockerfile` target `prod` | `www-data` (82) | `frontend`, `backend`, `egress` | runtime DB account (`APP_ROLE=web`) |
 | `ops` | same image, profile `ops`, `run --rm` only | `www-data` (82) | `backend` | runtime + migration accounts (`APP_ROLE=ops`) |
 | `db` | pinned `mysql:8.4.13` | image entrypoint, then `mysql` (999) | `backend` | root (`root@localhost` only) |
 
-- **No published ports.** `frontend` (nginx ↔ php) and `backend`
-  (php/ops ↔ MySQL) are `internal` networks with no route outside Docker.
-  Only `php` joins `egress`, for ISBN metadata lookups (restrict it on the
+- **Only nginx is published**, on `127.0.0.1` only (see
+  "Production ingress"). `frontend` (nginx ↔ php) and `backend`
+  (php/ops ↔ MySQL) are `internal` networks with no route outside Docker;
+  `edge` carries only nginx's published port. Only `php` joins `egress`, for ISBN metadata lookups (restrict it on the
   host firewall; drop it with `METADATA_PROVIDERS=none`). All networks
   belong to the Compose project (`digital-library-prod`); none is external
   or attachable.
@@ -685,27 +684,50 @@ instead (e.g. for off-site copies), create it as `82:82`, mode `0750`, and
 bind it at `storage/backups` in the `ops` service. The web container never
 mounts the backups.
 
-### Production ingress (pending)
+### Production ingress (existing Cloudflare Tunnel)
 
-**Blocked on the topology discovery** (`docker/discovery/docker-host.sh` on
-the Docker server, `docker/discovery/ingress-host.sh` on the Raspberry Pi;
-both read-only, report-only, secret-withholding). Until the results are
-reviewed and a design approved, the stack deliberately has no ingress:
+The site is reached through the owner's **existing** Cloudflare Tunnel,
+served by the `cloudflared` systemd service on the Docker host. The stack
+adds no cloudflared container, service or tunnel. The owner adds one route,
+`library.bravina.co.uk` → `http://127.0.0.1:<DLA_HTTP_PORT>`, to that
+tunnel (docs/DEPLOYMENT.md, section 0).
 
-- `nginx` joins only the internal `frontend` network and publishes nothing.
-- `docker/nginx/production/` (mounted at `/etc/nginx/dla/`) holds no
-  `client-ip.conf`, and `DLA_TRUSTED_PROXY` is unset: the nginx entrypoint
-  refuses to start (fail closed). It also refuses a template placeholder,
-  a trust-everything range (`0.0.0.0/0`, `::/0`), `required` without a
+- **One published port, loopback only.** `nginx` publishes container port
+  8080 on `DLA_HTTP_BIND`:`DLA_HTTP_PORT`. `DLA_HTTP_BIND` is `127.0.0.1`
+  (preset in the template), and the nginx entrypoint refuses any address
+  that is not loopback. The port has no default (8089 is a candidate), so
+  Compose refuses to run until it is set.
+- **Network `edge`.** Docker publishes no ports for containers that are
+  only on internal networks, so nginx also joins `edge`. This plain bridge
+  network belongs to the project and nginx is its only member. Its subnet
+  and gateway (`DLA_EDGE_SUBNET`, `DLA_EDGE_GATEWAY`) are fixed and have
+  no default. PHP-FPM and MySQL stay on the internal
+  `frontend`/`backend` networks with no host port.
+- **Trusted peer = the `edge` gateway.** cloudflared connects to loopback,
+  and Docker's port proxy or loopback NAT forwards the connection to nginx
+  from the `edge` gateway. That gateway is the only peer nginx ever sees
+  through the port. The production policy trusts `CF-Connecting-IP` from
+  exactly that address. With `DLA_TRUSTED_PROXY=required`, the entrypoint
+  refuses a policy that trusts any other or additional address. The
+  gateway is confirmed from `peer=` in the access log before the policy is
+  installed. The CI job checks the same prediction on a GitHub runner.
+- **Fail-closed policy.** `docker/nginx/production/` (mounted at
+  `/etc/nginx/dla/`) ships without `client-ip.conf`, and
+  `DLA_TRUSTED_PROXY` is unset, so nginx refuses to start. It also refuses
+  a template placeholder, a trust-everything range, `required` without a
   trusted proxy, `none` with one, and anything `nginx -t` rejects.
+- **HTTPS.** TLS ends at the Cloudflare edge, and the cloudflared-to-nginx
+  leg is HTTP over loopback. The application does not depend on the origin
+  scheme:
+  - `Secure` `__Host-` session cookies and HSTS come from configuration
+    (`SESSION_SECURE_COOKIE`, `SECURITY_HSTS`);
+  - absolute URLs (invitation links) come from `APP_URL`, and redirects
+    are relative;
+  - forwarding headers (`X-Forwarded-Proto`, …) are removed and never
+    read.
 
-Decided only after discovery, with your approval: the path (Cloudflare →
-cloudflared → Traefik → nginx, or otherwise), which peer nginx trusts and
-the header it reads (`CF-Connecting-IP` or `X-Forwarded-For`), how traffic
-reaches nginx (a published port on a specific host address, or a dedicated
-network with a fixed proxy address), whether direct requests are refused
-(403) after routing and health checks are verified, and the Host header the
-proxy forwards.
+  cloudflared forwards the visitor's `Host: library.bravina.co.uk` unless
+  the route overrides it.
 
 ### Verification that needs Docker
 
@@ -752,42 +774,39 @@ attacker can lock everyone out for 15 minutes) and meaningless audit IPs.
 Trusting the wrong peer is worse: anyone who can reach nginx from that
 address can choose their IP and bypass the per-IP limit.
 
-**The production topology is not verified.** The owner reports a Debian
-Docker server and a Raspberry Pi running cloudflared and Traefik; the actual
-path between them is established by `docker/discovery/` (DEPLOYMENT.md,
-section 0). Two reviewed templates exist; `nginx -t` rejects both until
+**Why `CF-Connecting-IP` is not trusted by default.** Anyone who can open a
+TCP connection to nginx can send the header; it is meaningful only on
+connections from cloudflared (the Cloudflare edge sets it, replacing any
+visitor value, and cloudflared forwards it). So it is believed only from
+one peer address: the `edge` gateway, through which every connection to the
+loopback port arrives (DEPLOYMENT.md 0.2). Every local process on the Docker
+host can use that port, and so can set the header.
+
+Two reviewed templates exist; `nginx -t` rejects both until
 their placeholder is replaced with a real address:
 
 | Template | Topology | Header | Trusted peer |
 |---|---|---|---|
-| `client-ip.cloudflared.conf.example` | Cloudflare → cloudflared → nginx | `CF-Connecting-IP` (single value, not walked) | cloudflared's fixed address |
+| `client-ip.cloudflared.conf.example` (production) | Cloudflare → cloudflared (host) → `127.0.0.1` port → nginx | `CF-Connecting-IP` (single value, not walked) | `DLA_EDGE_GATEWAY` |
 | `client-ip.reverse-proxy.conf.example` | proxy → nginx | `X-Forwarded-For`, walked from the right | the proxy's fixed address |
 
 To configure:
 
-1. Establish the topology (discovery reports) and which component connects
-   to nginx; get the design approved.
-2. Make that component's address, as nginx sees it, **single and fixed**:
-   - same Docker host: a **dedicated** internal network shared only with
-     nginx, with a fixed subnet and static address (a shared or default
-     network is not a trust boundary);
-   - another host (e.g. the Raspberry Pi): publish nginx only on the
-     Docker server's specific LAN address and port, trust only that host's
-     address, and restrict the port to it on the host firewall.
+1. Check the free port and `edge` subnet on the Docker host (DEPLOYMENT.md 0.1).
+2. Start with the trust-nothing policy and confirm that `peer=` in the
+   access log is `DLA_EDGE_GATEWAY` for tunnel requests (DEPLOYMENT.md 0.4).
 
    Never trust a whole Docker subnet, a LAN range or `0.0.0.0/0`.
-3. Copy the matching template to `docker/nginx/production/client-ip.conf`
-   (the production mount; `docker/nginx/client-ip.conf` stays the
-   development trust-nothing policy), replace the placeholder with that
-   single address, set `DLA_TRUSTED_PROXY=required`, and run `nginx -t`.
-4. Never publish PHP-FPM; publish nginx only as step 2 describes.
+3. Copy `client-ip.cloudflared.conf.example` to
+   `docker/nginx/production/client-ip.conf` (the production mount;
+   `docker/nginx/client-ip.conf` stays the trust-nothing policy), replace the
+   placeholder with `DLA_EDGE_GATEWAY`, and set `DLA_TRUSTED_PROXY=required`.
+4. Never publish PHP-FPM or MySQL; publish nginx only on `127.0.0.1`.
 5. Run `php tests/nginx/run.php` (local nginx + PHP-FPM, unprivileged).
 6. Verify on the deployment: sign in from a known IP, then check
    `SELECT ip_address FROM audit_log ORDER BY id DESC LIMIT 1` and the
-   access log's `peer=` field. Send a request with a forged
-   `CF-Connecting-IP`/`X-Forwarded-For` directly to nginx (bypassing the
-   proxy); it must be refused (403) or, without the requirement, logged
-   with its real peer address.
+   access log's `peer=` field. The port must not be reachable from another
+   machine (loopback only).
 
 ### Host header
 
@@ -818,15 +837,22 @@ where the application cannot see the port.
     `tests/nginx/run.php`;
   - `unit-php83`: lint and the unit suite on PHP 8.3 (tooling compatibility);
   - `static`: shellcheck on every shell script, `docker build --check` on
-    both Dockerfiles, `docker compose config` on both Compose files (and no
-    published production port);
+    both Dockerfiles, `docker compose config` on both Compose files (the
+    production file refused without `DLA_HTTP_BIND`/`DLA_HTTP_PORT`, then
+    exactly one published port: nginx on the given address);
   - `production-stack`: builds the production images, starts
     `docker-compose.prod.yml` with health checks, checks users, read-only
     filesystems, secrets per role, the web role refusing ops commands, the
     Host check and `config:check --strict` in both roles, then migrates,
     backs up, verifies and runs a restore drill (maintenance mode, web PHP
-    stopped). It uses the trust-nothing client IP policy with
-    `DLA_TRUSTED_PROXY=none`, so it tests no ingress design.
+    stopped). It publishes nginx on the runner's `127.0.0.1:8089` and checks
+    health, the `Secure` `__Host-` cookie, HSTS and the Host refusal through
+    that port, and that PHP-FPM and MySQL have no host port. Finally it
+    installs the production policy with the `edge` gateway
+    (`DLA_TRUSTED_PROXY=required`) and checks, as a local client sending
+    `CF-Connecting-IP`, that the logged client is the header's address with
+    `peer=` the gateway, and that a request without the header gets 403. No
+    tunnel or Cloudflare service is involved.
 
   Least privilege: `contents: read`, no secrets, no `pull_request_target`,
   checkout without persisted credentials, actions pinned to commit SHAs,
@@ -843,6 +869,6 @@ where the application cannot see the port.
   the Compose structure (parsed by the strict `Tests\Support\BlockYaml`
   reader), image pins, networks, credential separation per `APP_ROLE`
   against `.env.production.example`, the nginx and PHP entrypoints and the
-  MySQL init script (run with stub binaries), and the discovery scripts
+  MySQL init script (run with stub binaries), and the discovery script
   (read-only commands only; planted tokens, e-mail addresses, password
   hashes and public client addresses never reach the report).

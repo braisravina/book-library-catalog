@@ -37,11 +37,15 @@ final class ProductionComposeTest extends TestCase
         }
     }
 
-    public function testServicesAndNoPublishedPorts(): void
+    public function testServicesAndOnlyNginxIsPublished(): void
     {
         self::assertSame(['nginx', 'php', 'ops', 'db'], array_keys(self::services()));
         foreach (self::services() as $name => $service) {
-            foreach (['ports', 'network_mode', 'privileged', 'pid', 'ipc', 'cap_add', 'devices', 'extra_hosts'] as $forbidden) {
+            if ($name !== 'nginx') {
+                self::assertArrayNotHasKey('ports', $service, "{$name}: never published");
+            }
+            self::assertArrayNotHasKey('expose', $service, $name);
+            foreach (['network_mode', 'privileged', 'pid', 'ipc', 'cap_add', 'devices', 'extra_hosts'] as $forbidden) {
                 self::assertArrayNotHasKey($forbidden, $service, "{$name}: {$forbidden}");
             }
             self::assertContains('no-new-privileges:true', $service['security_opt'] ?? [], $name);
@@ -98,10 +102,36 @@ final class ProductionComposeTest extends TestCase
         self::assertStringContainsString('image: ' . self::services()['db']['image'], $dev);
     }
 
+    public function testNginxPublishesOnePortOnAnExplicitAddressWithoutDefaults(): void
+    {
+        $nginx = self::services()['nginx'];
+        self::assertCount(1, $nginx['ports']);
+        $port = $nginx['ports'][0];
+        self::assertSame(['target', 'host_ip', 'published', 'protocol'], array_keys($port), 'Long syntax: the host address is always explicit');
+        self::assertSame('8080', $port['target']);
+        self::assertSame('tcp', $port['protocol']);
+        // ${VAR:?message}: Compose refuses to run while the value is unset or
+        // empty. No default address or port is assumed.
+        self::assertMatchesRegularExpression('/^\$\{DLA_HTTP_BIND:\?[^}]+\}$/', $port['host_ip']);
+        self::assertMatchesRegularExpression('/^\$\{DLA_HTTP_PORT:\?[^}]+\}$/', $port['published']);
+        self::assertSame('${DLA_HTTP_BIND:-}', $nginx['environment']['DLA_HTTP_BIND'], 'The entrypoint sees the same address and refuses anything but loopback');
+        self::assertSame('${DLA_EDGE_GATEWAY:-}', $nginx['environment']['DLA_EDGE_GATEWAY'], 'The entrypoint checks the trusted address against the gateway');
+
+        $template = self::file('.env.production.example');
+        self::assertMatchesRegularExpression('/^DLA_HTTP_BIND=127\.0\.0\.1$/m', $template, 'cloudflared runs on the Docker host: loopback only');
+        foreach (['DLA_HTTP_PORT', 'DLA_EDGE_SUBNET', 'DLA_EDGE_GATEWAY'] as $key) {
+            self::assertDoesNotMatchRegularExpression("/^{$key}=/m", $template, "{$key}: a candidate the owner checks on the host, never assumed");
+            self::assertMatchesRegularExpression("/^# {$key}=/m", $template);
+        }
+        self::assertStringContainsString('# DLA_HTTP_PORT=8089', $template, 'The candidate port');
+        self::assertStringNotContainsString('cloudflared', implode(' ', array_keys(self::services())), 'The existing tunnel is reused; no cloudflared service');
+        self::assertDoesNotMatchRegularExpression('#cloudflare/cloudflared#', self::file('docker-compose.prod.yml'));
+    }
+
     public function testNetworksArePrivateAndMinimal(): void
     {
         $networks = self::$compose['networks'];
-        self::assertSame(['frontend', 'backend', 'egress'], array_keys($networks));
+        self::assertSame(['frontend', 'backend', 'edge', 'egress'], array_keys($networks));
         self::assertSame('true', $networks['frontend']['internal']);
         self::assertSame('true', $networks['backend']['internal']);
         foreach ($networks as $name => $network) {
@@ -109,7 +139,15 @@ final class ProductionComposeTest extends TestCase
             self::assertArrayNotHasKey('attachable', $network ?? [], $name);
         }
         $membership = array_map(static fn (array $s): array => $s['networks'] ?? [], self::services());
-        self::assertSame(['frontend'], $membership['nginx'], 'nginx: no ingress network until the topology is approved');
+        self::assertSame(['frontend', 'edge'], $membership['nginx'], 'nginx: the published port is on a network of its own');
+        self::assertArrayNotHasKey('internal', $networks['edge'], 'Docker publishes no port on internal networks');
+        self::assertSame('bridge', $networks['edge']['driver']);
+        $ipam = $networks['edge']['ipam']['config'][0];
+        self::assertMatchesRegularExpression('/^\$\{DLA_EDGE_SUBNET:\?[^}]+\}$/', $ipam['subnet'], 'Fixed subnet, no default');
+        self::assertMatchesRegularExpression('/^\$\{DLA_EDGE_GATEWAY:\?[^}]+\}$/', $ipam['gateway'], 'Fixed gateway: the trusted peer never changes');
+        foreach ($membership as $name => $joined) {
+            self::assertSame($name === 'nginx', in_array('edge', $joined, true), $name . ': only nginx is on edge');
+        }
         self::assertSame(['frontend', 'backend', 'egress'], $membership['php']);
         self::assertSame(['backend'], $membership['ops']);
         self::assertSame(['backend'], $membership['db']);

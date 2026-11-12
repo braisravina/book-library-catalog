@@ -119,9 +119,63 @@ final class CiWorkflowTest extends TestCase
         self::assertStringContainsString("echo 'DLA_TRUSTED_PROXY=none' >> .env.production", $runs, 'CI-only, explicit: no trusted proxy');
         self::assertStringContainsString('cp docker/nginx/client-ip.conf docker/nginx/production/client-ip.conf', $runs, 'The trust-nothing policy, never a guessed address');
         self::assertStringNotContainsString('set_real_ip_from', self::$source);
+        self::assertStringContainsString("echo 'DLA_EDGE_GATEWAY=172.30.89.1' >> .env.production", $runs, 'CI-only edge subnet');
+        self::assertStringNotContainsString("DLA_HTTP_BIND=", implode("\n", array_filter(explode("\n", $runs), static fn (string $l): bool => !str_starts_with(ltrim($l), '#'))), 'Loopback comes from the template, never overridden');
+        self::assertStringContainsString("sed 's/<CLOUDFLARED_ADDRESS>/172.30.89.1/' docker/nginx/client-ip.cloudflared.conf.example > docker/nginx/production/client-ip.conf", $runs, 'The trusted peer is the edge gateway');
+        self::assertStringContainsString("peer=172\\.30\\.89\\.1$", $runs, 'The predicted peer is checked in the access log');
+        self::assertStringNotContainsString('DLA_HTTP_BIND=0.0.0.0', self::$source);
+        self::assertStringContainsString('refuse docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet', self::$source, 'Compose refuses to run without a bind address and port');
+        self::assertStringContainsString('-H \'Host: library.bravina.co.uk\' "$origin/health"', $runs, 'End to end through the published port');
+        self::assertMatchesRegularExpression('/grep -Eqi \'\^set-cookie: __Host-.*secure/', $runs, 'Secure cookie over the plain-HTTP origin leg');
+        self::assertDoesNotMatchRegularExpression('/^\s*(sudo\s+)?cloudflared\s|cloudflare\/cloudflared|api\.cloudflare\.com/m', self::$source, 'CI never runs or contacts a tunnel');
         self::assertStringContainsString('down -v --remove-orphans', $runs);
         self::assertSame('always()', array_values(array_filter(self::steps(), static fn (array $s): bool => $s[0] === 'production-stack' && ($s[1]['name'] ?? '') === 'Remove the stack'))[0][1]['if'] ?? null);
         self::assertSame('static', self::jobs()['production-stack']['needs']);
+    }
+
+    /**
+     * Regression: {{.Ports}} also lists exposed-only ports (the nginx base
+     * image's EXPOSE 80 printed "80/tcp, 127.0.0.1:8089->8080/tcp"), so the
+     * published ports are checked from docker inspect, both as requested and
+     * as actually bound, against one exact expected structure.
+     */
+    public function testPublishedPortsAreCheckedFromStructuredInspectData(): void
+    {
+        $hardening = array_values(array_filter(self::steps(), static fn (array $s): bool => $s[0] === 'production-stack' && ($s[1]['name'] ?? '') === 'Check the hardening'));
+        self::assertCount(1, $hardening);
+        $run = $hardening[0][1]['run'];
+
+        $code = implode("\n", array_filter(explode("\n", self::$source), static fn (string $l): bool => !str_starts_with(ltrim($l), '#')));
+        self::assertStringNotContainsString('.Ports}}', $code, 'Never parse the human-readable ports column');
+        self::assertStringNotContainsString('->8080/tcp', $code, 'No string comparison of docker ps output');
+        self::assertStringNotContainsString('$published', $run);
+
+        self::assertStringContainsString('ids=$(docker ps -q --filter label=com.docker.compose.project=digital-library-prod)', $run);
+        self::assertStringContainsString('test -n "$ids"', $run, 'An empty container list must not pass');
+        self::assertStringContainsString('inspected=$(docker inspect $ids)', $run);
+
+        // Exactly: db and php publish nothing; nginx publishes 8080/tcp on
+        // 127.0.0.1:8089 only; no service publishes all exposed ports.
+        self::assertStringContainsString(
+            "expected='" . json_encode([
+                ['bindings' => [], 'publish_all' => false, 'service' => 'db'],
+                ['bindings' => [['container_port' => '8080/tcp', 'host_ip' => '127.0.0.1', 'host_port' => '8089']], 'publish_all' => false, 'service' => 'nginx'],
+                ['bindings' => [], 'publish_all' => false, 'service' => 'php'],
+            ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "'",
+            $run,
+        );
+
+        // The same normalisation over the requested and the actual bindings.
+        $filter = static fn (string $source): string => "jq -cS '[.[] | {service: .Config.Labels[\"com.docker.compose.service\"], publish_all: .HostConfig.PublishAllPorts, bindings: ([(" . $source . " // {}) | to_entries[] | .key as \$port | (.value // [])[] | {container_port: \$port, host_ip: .HostIp, host_port: .HostPort}] | sort_by(.container_port, .host_ip, .host_port))}] | sort_by(.service)'";
+        self::assertStringContainsString('requested=$(printf \'%s\' "$inspected" | ' . $filter('.HostConfig.PortBindings') . ')', $run);
+        self::assertStringContainsString('actual=$(printf \'%s\' "$inspected" | ' . $filter('.NetworkSettings.Ports') . ')', $run);
+        self::assertStringContainsString('test "$requested" = "$expected"', $run);
+        self::assertStringContainsString('test "$actual" = "$expected"', $run);
+        self::assertStringContainsString('set -eux', $run, 'A failed comparison fails the step');
+
+        // The host-side reachability checks stay in place.
+        self::assertStringContainsString('refuse curl -s --max-time 5 -o /dev/null http://127.0.0.1:9000/', $run);
+        self::assertStringContainsString('refuse curl -s --max-time 5 -o /dev/null http://127.0.0.1:3306/', $run);
     }
 
     /**

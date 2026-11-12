@@ -6,15 +6,18 @@
 #   unit-php83        PHP 8.3 compatibility: lint and unit suite
 #   static            shellcheck, Dockerfile lint, Compose validation
 #   production-stack  builds the production images, starts docker-compose.prod.yml
-#                     (no published ports), checks the hardening, and runs a
-#                     backup / restore drill with the ops container
+#                     (nginx published on the runner's loopback only), checks
+#                     the hardening, and runs a backup / restore drill with
+#                     the ops container
 #
 # Security: read-only token, no secrets, no pull_request_target, checkout
 # without persisted credentials, actions pinned to full commit SHAs, pinned
 # images. Every password below is a throwaway value for this runner only.
 # The production ingress (trusted proxy) is NOT configured here: the
 # production-stack job uses DLA_TRUSTED_PROXY=none with the trust-nothing
-# policy and is reached only from inside its own containers.
+# policy, publishes nginx on 127.0.0.1 of the runner only (as the Docker
+# host's cloudflared reaches it), then checks the production trusted-peer
+# policy with the edge gateway, and talks to no tunnel or Cloudflare service.
 
 name: CI
 
@@ -163,7 +166,7 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck --version
-          shellcheck --severity=warning --shell=bash docker/discovery/docker-host.sh docker/discovery/ingress-host.sh docker/mysql/init/01-create-users.sh
+          shellcheck --severity=warning --shell=bash docker/discovery/docker-host.sh docker/mysql/init/01-create-users.sh
           shellcheck --severity=warning --shell=sh docker/nginx/entrypoint-prod.sh docker/php/entrypoint-prod.sh docker/php/entrypoint-dev.sh
 
       - name: Lint Dockerfiles
@@ -181,10 +184,17 @@ jobs:
           for name in db_root_password db_password db_migration_password; do
             openssl rand -hex 32 > "secrets/$name"
           done
+          refuse() { if "$@"; then echo "UNEXPECTED SUCCESS: $*" >&2; exit 1; fi; }
+          # Fail closed: no default bind address or port for the published port.
+          refuse docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
+          # CI only: throwaway port and edge subnet (production: checked by the owner).
+          echo 'DLA_HTTP_PORT=8089' >> .env.production
+          echo 'DLA_EDGE_SUBNET=172.30.89.0/29' >> .env.production
+          echo 'DLA_EDGE_GATEWAY=172.30.89.1' >> .env.production
           docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
-          # No production service publishes a port.
-          published=$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq '[.services[] | select(.ports != null and (.ports | length) > 0)] | length')
-          test "$published" = 0
+          # Only nginx publishes, one port, on the configured address.
+          published=$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -c '[.services | to_entries[] | select((.value.ports // []) | length > 0) | {service: .key, ports: [.value.ports[] | {host_ip, published: (.published | tostring), target}]}]')
+          test "$published" = '[{"service":"nginx","ports":[{"host_ip":"127.0.0.1","published":"8089","target":8080}]}]'
 
   production-stack:
     name: Production images, hardening and restore drill
@@ -203,6 +213,11 @@ jobs:
           # CI only: explicitly no trusted proxy, with the trust-nothing policy.
           # The real ingress policy is decided after the topology review.
           echo 'DLA_TRUSTED_PROXY=none' >> .env.production
+          # CI only: throwaway port and edge subnet. DLA_HTTP_BIND=127.0.0.1
+          # comes from the template.
+          echo 'DLA_HTTP_PORT=8089' >> .env.production
+          echo 'DLA_EDGE_SUBNET=172.30.89.0/29' >> .env.production
+          echo 'DLA_EDGE_GATEWAY=172.30.89.1' >> .env.production
           cp docker/nginx/client-ip.conf docker/nginx/production/client-ip.conf
           mkdir -p secrets
           for name in db_root_password db_password db_migration_password; do
@@ -230,11 +245,32 @@ jobs:
           # End to end: nginx -> PHP-FPM -> MySQL.
           test "$(dc exec -T nginx wget -q -O - http://127.0.0.1:8080/health)" = '{"status":"ok"}'
           dc exec -T nginx wget -q -O /dev/null http://127.0.0.1:8080/assets/css/app.css
-          # No published ports.
-          if docker ps --filter label=com.docker.compose.project=digital-library-prod --format '{{.Ports}}' | grep -q -- '->'; then
-            echo "A production container publishes a port" >&2
-            exit 1
-          fi
+          # Exactly one published port: nginx, on the configured address only.
+          # Structured (docker inspect), never the human-readable {{.Ports}}
+          # column, which also lists exposed-only ports (the nginx base
+          # image's EXPOSE 80). Both the requested bindings and the bindings
+          # Docker actually made must match exactly: no wildcard address, no
+          # extra mapping or port, no publish-all, for every running service.
+          ids=$(docker ps -q --filter label=com.docker.compose.project=digital-library-prod)
+          test -n "$ids"
+          inspected=$(docker inspect $ids)
+          expected='[{"bindings":[],"publish_all":false,"service":"db"},{"bindings":[{"container_port":"8080/tcp","host_ip":"127.0.0.1","host_port":"8089"}],"publish_all":false,"service":"nginx"},{"bindings":[],"publish_all":false,"service":"php"}]'
+          requested=$(printf '%s' "$inspected" | jq -cS '[.[] | {service: .Config.Labels["com.docker.compose.service"], publish_all: .HostConfig.PublishAllPorts, bindings: ([(.HostConfig.PortBindings // {}) | to_entries[] | .key as $port | (.value // [])[] | {container_port: $port, host_ip: .HostIp, host_port: .HostPort}] | sort_by(.container_port, .host_ip, .host_port))}] | sort_by(.service)')
+          actual=$(printf '%s' "$inspected" | jq -cS '[.[] | {service: .Config.Labels["com.docker.compose.service"], publish_all: .HostConfig.PublishAllPorts, bindings: ([(.NetworkSettings.Ports // {}) | to_entries[] | .key as $port | (.value // [])[] | {container_port: $port, host_ip: .HostIp, host_port: .HostPort}] | sort_by(.container_port, .host_ip, .host_port))}] | sort_by(.service)')
+          test "$requested" = "$expected"
+          test "$actual" = "$expected"
+          # Through the published port, as cloudflared connects (plain HTTP,
+          # public Host header): health, a secure host-only session cookie
+          # and HSTS although the origin leg is not TLS, and no foreign Host.
+          origin=http://127.0.0.1:8089
+          test "$(curl -fsS -H 'Host: library.bravina.co.uk' "$origin/health")" = '{"status":"ok"}'
+          headers=$(curl -fsS -o /dev/null -D - -H 'Host: library.bravina.co.uk' "$origin/login" | tr -d '\r')
+          printf '%s\n' "$headers" | grep -Eqi '^set-cookie: __Host-[^=]+=[^;]+; path=/; secure; HttpOnly; SameSite=Lax$'
+          printf '%s\n' "$headers" | grep -Eqi '^strict-transport-security: max-age=31536000; includeSubDomains$'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' "$origin/login")" = 400
+          # PHP-FPM and MySQL are not reachable from the host.
+          refuse curl -s --max-time 5 -o /dev/null http://127.0.0.1:9000/
+          refuse curl -s --max-time 5 -o /dev/null http://127.0.0.1:3306/
           # Unprivileged users and read-only root filesystems.
           test "$(dc exec -T php id -u)" = 82
           test "$(dc exec -T nginx id -u)" = 101
@@ -278,6 +314,24 @@ jobs:
           dc up -d --wait --wait-timeout 300 php nginx
           dc run --rm -T ops php bin/console maintenance:off
           test "$(dc exec -T nginx wget -q -O - http://127.0.0.1:8080/health)" = '{"status":"ok"}'
+
+      - name: Trusted peer on the published port (as the host's cloudflared)
+        run: |
+          set -eux
+          dc() { docker compose -f docker-compose.prod.yml --env-file .env.production "$@"; }
+          # The production policy, with the edge gateway as the only trusted peer.
+          sed 's/<CLOUDFLARED_ADDRESS>/172.30.89.1/' docker/nginx/client-ip.cloudflared.conf.example > docker/nginx/production/client-ip.conf
+          sed -i 's/^DLA_TRUSTED_PROXY=none$/DLA_TRUSTED_PROXY=required/' .env.production
+          dc up -d --wait --wait-timeout 300 nginx
+          origin=http://127.0.0.1:8089
+          # A local process on 127.0.0.1, like cloudflared, with the edge header.
+          curl -fsS -o /dev/null -H 'Host: library.bravina.co.uk' -H 'CF-Connecting-IP: 198.51.100.23' "$origin/login"
+          # Without a client address: refused; /health stays open for probes.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: library.bravina.co.uk' "$origin/login")" = 403
+          test "$(curl -fsS -H 'Host: library.bravina.co.uk' "$origin/health")" = '{"status":"ok"}'
+          # The access log: the client address from the header, the TCP peer
+          # is the edge gateway (the address the policy trusts).
+          dc logs --no-color nginx | grep -Eq '198\.51\.100\.23 - .*peer=172\.30\.89\.1$'
 
       - name: Show container logs on failure
         if: failure()

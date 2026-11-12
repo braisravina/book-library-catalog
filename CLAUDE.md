@@ -60,6 +60,9 @@ These rules apply to every commit, in every phase, with no exceptions.
   - Phase 5A: branch `phase-5a` from the committed Phase 4B commit
     `5c1bbb5b86cb75c2ef77484519f3a99d0488cf45` (tree
     `27fe5a79fefc4eee5402184f426704ab10ec6024`).
+  - Phase 5B: from `main` at the merge of Phase 5A, commit
+    `9a0ce899983d870016617d4f3593e29b1019d78d` (tree
+    `17fcb932a37e4bcb8e4006c3488cdea63b793b5f`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -149,11 +152,17 @@ These rules apply to every commit, in every phase, with no exceptions.
   `set -e` script). New shell scripts and Dockerfiles must be added to the
   shellcheck and `docker build --check` steps (`CiWorkflowTest` enforces it).
 - Production stack: `docker-compose.prod.yml` (never the development file).
-  Keep its guarantees, which `tests/Unit/Deployment/` enforces: no published
-  ports, internal app/database networks, non-root read-only containers, image
-  pins with digests, `APP_ROLE=web` containers without migration or root
-  credentials. Never add trusted-proxy addresses, ingress networks or 403
-  enforcement without an owner-approved, verified production topology.
+  Keep its guarantees, which `tests/Unit/Deployment/` enforces: only nginx
+  is published (one port, explicit `DLA_HTTP_BIND`/`DLA_HTTP_PORT` with no
+  defaults; never PHP-FPM or MySQL), internal app/database networks,
+  non-root read-only containers, image pins with digests, `APP_ROLE=web`
+  containers without migration or root credentials. Ingress reuses the
+  owner's existing Cloudflare Tunnel (cloudflared systemd service on the
+  Docker host): never add a cloudflared service or tunnel, and keep nginx
+  bound to loopback. The only trusted peer is `DLA_EDGE_GATEWAY` (the `edge`
+  network gateway); never hardcode the port, subnet or gateway as production
+  facts (they are owner-checked candidates). The Raspberry Pi is not part
+  of the project.
 - Backups/restore/maintenance/cleanup are CLI-only (`Console\Operations`).
   Operations commands are listed in `Console::OPS_COMMANDS` (ops role only
   in production, never `APP_ROLE=web`) and, when they must not overlap, in

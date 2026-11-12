@@ -14,42 +14,151 @@ host. Backups, restores and scheduling are covered in depth in
 | 🧪 CI | Exercised by the `production-stack` CI job, which **has not run yet** |
 | ⚠ production | Never tested on the production host; verify when you do it |
 
-## 0. Blocked until the network topology is verified
+## 0. Ingress through the existing Cloudflare Tunnel
 
-The production stack is deliberately **fail-closed** and has **no ingress**:
-nginx joins only an internal network, publishes no port, and refuses to start
-until a client IP policy and `DLA_TRUSTED_PROXY` are set. These decisions are
-open and must not be guessed:
+**Topology (confirmed by you).** The tunnel already exists, and cloudflared
+runs on the Docker host as the `cloudflared` systemd service. The Digital
+Library needs **one new route** on that tunnel. No cloudflared container,
+service or tunnel is added, and no other route, website or DNS record
+changes.
 
-| Decision | Where it will be set |
-|---|---|
-| Which peer nginx trusts (proxy address) | `docker/nginx/production/client-ip.conf` (`set_real_ip_from`) |
-| Which header carries the client address (`CF-Connecting-IP` or `X-Forwarded-For`) | same file (`real_ip_header`, `real_ip_recursive`) |
-| How traffic crosses from the Raspberry Pi (cloudflared/Traefik) to the Docker server | a Compose override: published port on a specific address, or a dedicated network |
-| How nginx is exposed on the Docker server | same override |
-| Which `Host` header the proxy forwards (must be `library.bravina.co.uk`) | Traefik / cloudflared configuration |
-| Whether direct requests are refused with 403 | `$dla_require_trusted_proxy` in the policy; only after routing and health checks are verified |
-
-**What you run (read-only; review the scripts first):**
-
-```bash
-# From your workstation (repository checkout):
-scp docker/discovery/docker-host.sh  <you>@192.168.1.50:
-scp docker/discovery/ingress-host.sh <you>@192.168.1.52:
-# On the Docker server (192.168.1.50):
-sudo -v            # optional: lets the script read firewall rules and socket owners
-bash docker-host.sh
-# On the Raspberry Pi (192.168.1.52):
-sudo -v
-bash ingress-host.sh 192.168.1.50
+```
+visitor --HTTPS--> Cloudflare edge --existing tunnel--> cloudflared (systemd, Docker host)
+        --HTTP, loopback--> http://127.0.0.1:<DLA_HTTP_PORT>   (the one published port)
+        --> nginx:8080 --FastCGI (internal network)--> php-fpm --(internal)--> MySQL
 ```
 
-Each writes `~/dla-discovery-<host>-<time>.txt` (mode 0600) and changes
-nothing else. Read each report, follow the checklist at its end, redact what
-you do not want to share, and share the sanitized reports. If the tunnel is
-managed from the Cloudflare dashboard, also note each public hostname's
-Service URL and "HTTP Host Header" setting (never the token). A trusted-proxy
-design will then be proposed for your approval.
+- **Only nginx is published, on `127.0.0.1` only.** The nginx entrypoint
+  refuses any other bind address, so the origin is never reachable from the
+  LAN or the internet. PHP-FPM and MySQL have no host port.
+- **Fail closed.** Compose refuses to run until `DLA_HTTP_PORT`,
+  `DLA_EDGE_SUBNET` and `DLA_EDGE_GATEWAY` are set, because they have no
+  defaults. nginx refuses to start without a client IP policy and
+  `DLA_TRUSTED_PROXY`. With `required`, the policy must trust exactly
+  `DLA_EDGE_GATEWAY` and no other address. ✅ local (entrypoint tests) · 🧪 CI
+
+### 0.1 Values to check on the Docker host (read-only commands)
+
+| Setting | Value | Status |
+|---|---|---|
+| `DLA_HTTP_BIND` | `127.0.0.1` | decided (set in the template) |
+| `DLA_HTTP_PORT` | `8089` | **candidate**: confirm it is free |
+| `DLA_EDGE_SUBNET` / `DLA_EDGE_GATEWAY` | `172.30.89.0/29` / `172.30.89.1` | **candidates**: confirm no overlap |
+| Tunnel route | `library.bravina.co.uk` → `http://127.0.0.1:<DLA_HTTP_PORT>` | you add it (0.3) |
+
+```bash
+ss -Hltn 'sport = :8089'                                   # must print nothing
+docker ps --format '{{.Names}} {{.Ports}}' | grep -F ':8089->' || echo "8089 not used by a container"
+docker network inspect $(docker network ls -q) --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}'
+ip -4 route                                                # no route may overlap 172.30.89.0/29
+```
+
+If either candidate is taken, pick another free port or `/29` and set it in
+`.env.production`. If you change the port, use the same one in the tunnel
+route.
+
+### 0.2 Client IP: why the edge gateway, and what it means
+
+`CF-Connecting-IP` proves nothing by itself: anyone who can open a TCP
+connection to nginx can send one. It is meaningful only on connections from
+cloudflared, because the Cloudflare edge sets it (replacing any value a
+visitor sends) and cloudflared forwards it.
+
+cloudflared connects to `127.0.0.1:<port>`. Docker's port proxy (or its
+loopback NAT) then opens the connection to nginx from the gateway of the
+`edge` network. That gateway is therefore the only peer nginx ever sees
+through the published port. Its subnet is fixed so the address never
+changes. Hence:
+
+- nginx believes `CF-Connecting-IP` only from `DLA_EDGE_GATEWAY` (one
+  address), reads only that header, and does not walk it
+  (`real_ip_recursive off`).
+- Every forwarding header is removed before PHP; the application uses only
+  `REMOTE_ADDR`.
+- With the policy active, requests through the port that carry no valid
+  `CF-Connecting-IP` get 403, except `/health`. This includes a plain `curl`
+  on the host.
+- The access log shows the client address and `peer=` (the TCP peer).
+- **Residual risk:** every process on the Docker host can connect to
+  `127.0.0.1:<port>` and set the header. Keep the host's local users and
+  services trusted.
+
+Until the policy is installed, use the trust-nothing policy with
+`DLA_TRUSTED_PROXY=none` (first start only, 0.4). Every visitor then shares
+the gateway address: one per-IP login bucket for everyone, and the gateway
+address in the audit log.
+
+### 0.3 Adding the route to the existing tunnel (you, in your console)
+
+Do this once the origin answers (section 7, "On the published port"). Back
+up the tunnel configuration first and change nothing else.
+
+**Tunnel managed in the Cloudflare dashboard** (Zero Trust → Networks →
+Tunnels; the labels vary between dashboard versions):
+
+1. Open the **existing** tunnel → **Configure** → **Public hostname**
+   (newer dashboards: **Published application routes**) → **Add**.
+2. Subdomain `library`, domain `bravina.co.uk`, path empty.
+3. Service type **HTTP**, URL `127.0.0.1:8089` (your confirmed port).
+4. Additional application settings → HTTP settings: leave **HTTP Host
+   Header** empty (cloudflared then forwards `library.bravina.co.uk`), or set
+   it to exactly `library.bravina.co.uk`; any other value gets 400. Use
+   `127.0.0.1`, not `localhost`: `localhost` may resolve to `::1`, where
+   nothing listens.
+5. Save. The dashboard creates the proxied DNS record for
+   `library.bravina.co.uk` only. If a record with that name already exists,
+   stop and review it; leave other records alone.
+
+**Tunnel managed by a local `config.yml`** (on the Docker host, usually
+`/etc/cloudflared/config.yml`): add one rule **above** the final catch-all
+`- service: http_status:404`. Rules match in order, so the existing
+hostnames are unaffected:
+
+```yaml
+  - hostname: library.bravina.co.uk
+    service: http://127.0.0.1:8089
+```
+
+```bash
+sudo cp -a /etc/cloudflared/config.yml /etc/cloudflared/config.yml.bak-$(date +%F)
+sudo cloudflared tunnel --config /etc/cloudflared/config.yml ingress validate
+sudo cloudflared tunnel --config /etc/cloudflared/config.yml ingress rule https://library.bravina.co.uk   # must show the new rule
+sudo cloudflared tunnel route dns <existing-tunnel-name-or-id> library.bravina.co.uk
+sudo systemctl restart cloudflared    # briefly interrupts the other sites on this tunnel
+```
+
+**HTTPS at the edge.** `Secure` `__Host-` cookies and HSTS come from the
+application's configuration, whatever the origin scheme. A first
+plain-HTTP visit must still be redirected by Cloudflare. If "Always Use
+HTTPS" is not already on, add a redirect rule for `library.bravina.co.uk`
+only, rather than changing zone-wide settings that affect the other sites.
+
+### 0.4 Activation order
+
+1. Set `DLA_HTTP_PORT`, `DLA_EDGE_SUBNET` and `DLA_EDGE_GATEWAY` (0.1).
+   Copy the trust-nothing policy:
+   `cp docker/nginx/client-ip.conf docker/nginx/production/client-ip.conf`.
+   Set `DLA_TRUSTED_PROXY=none`, then sections 4–7.
+2. Add the route (0.3), then load `https://library.bravina.co.uk/login`
+   once.
+3. Confirm the peer:
+   `dc logs nginx | grep -o 'peer=[^ ]*' | sort | uniq -c`. It must show
+   only `peer=<DLA_EDGE_GATEWAY>`. If it shows anything else, stop and share
+   that line.
+4. Install the trusted-peer policy and restart nginx:
+
+   ```bash
+   gw=$(sed -n 's/^DLA_EDGE_GATEWAY=//p' .env.production)    # e.g. 172.30.89.1
+   sed "s/<CLOUDFLARED_ADDRESS>/${gw}/" docker/nginx/client-ip.cloudflared.conf.example \
+     > docker/nginx/production/client-ip.conf
+   sed -i 's/^DLA_TRUSTED_PROXY=none$/DLA_TRUSTED_PROXY=required/' .env.production
+   dc up -d --wait nginx
+   ```
+
+5. Verify (section 7, "Through the tunnel").
+
+The read-only `docker/discovery/docker-host.sh` remains available. It is
+optional: the checks in 0.1 are enough.
 
 ## 1. Prerequisites
 
@@ -62,7 +171,8 @@ design will then be proposed for your approval.
 - Disk: MySQL data, covers, the backups volume, plus room for one restore
   (see [Resource planning](#resource-planning)).
 - Your password manager or vault for the secrets below.
-- The ingress decisions of section 0 approved and implemented.
+- The values of section 0.1 checked on the Docker host (free port, free
+  `edge` subnet).
 
 ## 2. Production secrets
 
@@ -107,13 +217,13 @@ user of the PHP image. 🧪 CI (same owners and modes) · ⚠ production
 cd /srv/library
 git fetch && git checkout <release>        # e.g. the phase-5a commit
 cp .env.production.example .env.production  # first time only; then review every value
-# After the ingress design is approved (section 0):
-#   - put the approved policy at docker/nginx/production/client-ip.conf
-#   - set DLA_TRUSTED_PROXY=required (or none) in .env.production
-#   - add the approved ingress override
+# Section 0.4, step 1: in .env.production set DLA_HTTP_PORT, DLA_EDGE_SUBNET,
+# DLA_EDGE_GATEWAY and DLA_TRUSTED_PROXY=none (DLA_HTTP_BIND=127.0.0.1 is
+# preset), and copy the trust-nothing policy to docker/nginx/production/.
 export APP_IMAGE_TAG="$(git rev-parse --short HEAD)"   # one image tag per release (rollback)
 dc() { docker compose -f docker-compose.prod.yml --env-file .env.production "$@"; }
 dc config --quiet && dc config | less        # review: no unexpected ports, networks or mounts
+dc config | grep -B2 -A3 'published'         # exactly one: nginx, host_ip 127.0.0.1, target 8080
 ```
 
 `.env.production` holds no secrets (only `*_FILE` paths) but is still
@@ -160,11 +270,38 @@ dc exec -T php php bin/console config:check --strict
 The containers' health checks: nginx `GET /health` every 30 s; php a TCP
 connect to PHP-FPM every 30 s; MySQL `mysqladmin ping` every 10 s. `/health`
 reports only up/down and is exempt from the Host and trusted-proxy checks so
-probes work from inside the container. Through the real ingress (after
-section 0), also check `https://library.bravina.co.uk/login` and that a
-forged `X-Forwarded-For`/`CF-Connecting-IP` sent directly to the origin does
-not change the client address in the audit log. ✅ local (application and
-nginx behaviour) · 🧪 CI (containers) · ⚠ production (ingress)
+probes work from inside the container. ✅ local (application and nginx
+behaviour) · 🧪 CI (containers)
+
+**On the published port** (on the Docker host; this is what cloudflared
+connects to). 🧪 CI · ⚠ production:
+
+```bash
+origin="http://127.0.0.1:${DLA_HTTP_PORT}"     # the port from .env.production
+ss -Hltn "sport = :${DLA_HTTP_PORT}"          # only 127.0.0.1, never 0.0.0.0 / [::]
+# With DLA_TRUSTED_PROXY=none (first start):
+curl -fsS -H 'Host: library.bravina.co.uk' "$origin/health"        # {"status":"ok"}
+curl -fsS -o /dev/null -D - -H 'Host: library.bravina.co.uk' "$origin/login" | grep -i '^set-cookie'
+#   expect: __Host-dla_session=...; path=/; secure; HttpOnly; SameSite=Lax
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: other.example' "$origin/login"   # 400
+```
+
+Once the trusted-peer policy is active (0.4, step 4), `/login` without a
+`CF-Connecting-IP` header returns 403 and `/health` still returns 200. Both
+are expected.
+
+**Through the tunnel** (after 0.3 and 0.4). 🧪 CI (simulated: a local
+client sending the header) · ⚠ production:
+
+- `https://library.bravina.co.uk/login` loads over HTTPS, and `http://`
+  redirects to `https://`. The browser shows the `__Host-` session cookie
+  as Secure.
+- Sign in, then run `SELECT ip_address FROM audit_log ORDER BY id DESC LIMIT 1`
+  (ops container). It must show **your** public address. The nginx access
+  log line must show your address with `peer=<DLA_EDGE_GATEWAY>`.
+- From another machine, `http://<Docker host LAN address>:<port>/` must not
+  connect, because the port is on loopback only.
+- Invitation links open at `https://library.bravina.co.uk/invite/redeem#…`.
 
 ## 8. Backup creation and verification
 
@@ -197,9 +334,14 @@ online; operations never overlap (a second one is refused). ✅ local · 🧪 CI
 |---|---|
 | A container restarts or is unhealthy | `dc ps`, `dc logs --tail 200 <service>` |
 | php exits at start: "refusing to start PHP-FPM" | `dc run --rm ops php bin/console config:check` (names keys, never values) |
-| nginx exits: "dla-nginx: refusing to start" | the client IP policy and `DLA_TRUSTED_PROXY` (section 0) |
+| Compose: "required variable DLA_… is missing a value" | set `DLA_HTTP_PORT`, `DLA_EDGE_SUBNET`, `DLA_EDGE_GATEWAY` in `.env.production` (0.1) |
+| nginx exits: "dla-nginx: refusing to start" | the message: `DLA_HTTP_BIND` not loopback, the client IP policy, `DLA_TRUSTED_PROXY`, or a policy address other than `DLA_EDGE_GATEWAY` (section 0) |
+| "port is already allocated" / "address already in use" at `up` | the port is taken; choose another free port (0.1) and update the tunnel route |
+| "Pool overlaps with other one on this address space" at `up` | the `edge` subnet is in use; choose another free `/29` (0.1) |
+| Cloudflare 502/530, cloudflared log "connection refused" | the route's URL must be `http://127.0.0.1:<DLA_HTTP_PORT>`; `dc ps nginx`; `journalctl -u cloudflared` |
+| 403 on every page through the tunnel | `peer=` in the access log is not `DLA_EDGE_GATEWAY` (0.4, step 3) |
 | Every page 503 | `dc run --rm ops php bin/console maintenance:status` (maintenance mode or an incomplete restore) |
-| 400 on every page | the `Host` header the proxy forwards (must match `APP_URL`) |
+| 400 on every page | the `Host` header the tunnel forwards (route "HTTP Host Header" must be empty or `library.bravina.co.uk`) |
 | An operations command says "Another operation is running" | wait; the lock is released when that process exits |
 | Disk filling up | `docker system df`, the backups volume, `cleanup` (dry run first) |
 
@@ -231,7 +373,7 @@ recommended once the ingress exists. ⚠ production
 | Stop serving but keep the database | `dc stop nginx php` | kept |
 | Friendly 503 while investigating | `dc run --rm ops php bin/console maintenance:on --reason="incident"` | kept |
 | Stop everything | `dc stop` (or `dc down` without `-v`) | volumes kept |
-| Cut public access at the edge | disable the public hostname in Cloudflare / Traefik (your consoles) | kept |
+| Cut public access at the edge | remove or disable only the `library.bravina.co.uk` route of the tunnel (your Cloudflare console); the other sites keep running | kept |
 
 **Never** run `dc down -v` on production: `-v` deletes the database, covers
 and backup volumes. After a suspected compromise: stop the stack, keep the
