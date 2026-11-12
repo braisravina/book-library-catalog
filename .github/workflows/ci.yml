@@ -246,8 +246,19 @@ jobs:
           test "$(dc exec -T nginx wget -q -O - http://127.0.0.1:8080/health)" = '{"status":"ok"}'
           dc exec -T nginx wget -q -O /dev/null http://127.0.0.1:8080/assets/css/app.css
           # Exactly one published port: nginx, on the configured address only.
-          published=$(docker ps --filter label=com.docker.compose.project=digital-library-prod --format '{{.Label "com.docker.compose.service"}} {{.Ports}}' | grep -- '->' || true)
-          test "$published" = "nginx 127.0.0.1:8089->8080/tcp"
+          # Structured (docker inspect), never the human-readable {{.Ports}}
+          # column, which also lists exposed-only ports (the nginx base
+          # image's EXPOSE 80). Both the requested bindings and the bindings
+          # Docker actually made must match exactly: no wildcard address, no
+          # extra mapping or port, no publish-all, for every running service.
+          ids=$(docker ps -q --filter label=com.docker.compose.project=digital-library-prod)
+          test -n "$ids"
+          inspected=$(docker inspect $ids)
+          expected='[{"bindings":[],"publish_all":false,"service":"db"},{"bindings":[{"container_port":"8080/tcp","host_ip":"127.0.0.1","host_port":"8089"}],"publish_all":false,"service":"nginx"},{"bindings":[],"publish_all":false,"service":"php"}]'
+          requested=$(printf '%s' "$inspected" | jq -cS '[.[] | {service: .Config.Labels["com.docker.compose.service"], publish_all: .HostConfig.PublishAllPorts, bindings: ([(.HostConfig.PortBindings // {}) | to_entries[] | .key as $port | (.value // [])[] | {container_port: $port, host_ip: .HostIp, host_port: .HostPort}] | sort_by(.container_port, .host_ip, .host_port))}] | sort_by(.service)')
+          actual=$(printf '%s' "$inspected" | jq -cS '[.[] | {service: .Config.Labels["com.docker.compose.service"], publish_all: .HostConfig.PublishAllPorts, bindings: ([(.NetworkSettings.Ports // {}) | to_entries[] | .key as $port | (.value // [])[] | {container_port: $port, host_ip: .HostIp, host_port: .HostPort}] | sort_by(.container_port, .host_ip, .host_port))}] | sort_by(.service)')
+          test "$requested" = "$expected"
+          test "$actual" = "$expected"
           # Through the published port, as cloudflared connects (plain HTTP,
           # public Host header): health, a secure host-only session cookie
           # and HSTS although the origin leg is not TLS, and no foreign Host.
