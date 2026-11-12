@@ -256,7 +256,7 @@ for dir in /etc/nginx /etc/apache2 /etc/caddy /etc/traefik /etc/haproxy; do
     if p test -d "$dir" 2>/dev/null; then echo "-- $dir"; grep_config "$dir"; fi
 done
 if p test -d /etc/cloudflared 2>/dev/null; then
-    echo "-- /etc/cloudflared exists on this host (see the ingress-host script for what to read)"
+    echo "-- /etc/cloudflared exists on this host (not read: it may hold tunnel credentials; report its layout by hand if asked)"
 fi
 
 section "8. Host firewall (rule listings)"

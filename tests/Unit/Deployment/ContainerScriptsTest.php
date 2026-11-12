@@ -50,11 +50,15 @@ final class ContainerScriptsTest extends TestCase
             'trust-nothing but required' => [$shipped, 'required', [], 'trusts no proxy'],
             'trust-nothing, explicitly none' => [$shipped, 'none', [], null],
             'cloudflared policy, required' => [$template('client-ip.cloudflared.conf.example', '192.0.2.10'), 'required', [], null],
-            'reverse-proxy policy, required' => [$template('client-ip.reverse-proxy.conf.example', '192.0.2.0/29'), 'required', [], null],
+            'reverse-proxy policy, required' => [$template('client-ip.reverse-proxy.conf.example', '192.0.2.10'), 'required', [], null],
+            'a range, required' => [$template('client-ip.reverse-proxy.conf.example', '192.0.2.0/29'), 'required', [], 'exactly DLA_EDGE_GATEWAY'],
             'proxy policy but none' => [$template('client-ip.cloudflared.conf.example', '192.0.2.10'), 'none', [], 'trusts a proxy'],
             'trust everything (IPv4)' => [$template('client-ip.reverse-proxy.conf.example', '0.0.0.0/0'), 'required', [], 'trusts every address'],
             'trust everything (IPv6)' => [$template('client-ip.reverse-proxy.conf.example', '::/0'), 'required', [], 'trusts every address'],
             'placeholder only in a comment' => ["# was <PROXY_ADDRESS>\n" . $template('client-ip.cloudflared.conf.example', '192.0.2.10'), 'required', [], null],
+            'trusted address is not the gateway' => [$template('client-ip.cloudflared.conf.example', '192.0.2.11'), 'required', [], 'exactly DLA_EDGE_GATEWAY'],
+            'gateway plus another address' => [$template('client-ip.cloudflared.conf.example', '192.0.2.10') . "set_real_ip_from 192.0.2.99;\n", 'required', [], 'exactly DLA_EDGE_GATEWAY'],
+            'required without a gateway' => [$template('client-ip.cloudflared.conf.example', '192.0.2.10'), 'required', ['DLA_EDGE_GATEWAY' => ''], 'needs DLA_EDGE_GATEWAY'],
             'nginx -t fails' => [$template('client-ip.cloudflared.conf.example', '192.0.2.10'), 'required', ['FAKE_NGINX_RC' => '1'], 'nginx -t'],
         ];
         foreach ($cases as $name => [$content, $role, $env, $refusal]) {
@@ -62,7 +66,7 @@ final class ContainerScriptsTest extends TestCase
             if ($content !== null) {
                 file_put_contents($policy, $content);
             }
-            [$status, $out, $err] = $this->exec(['sh', $script, 'nginx', '-g', 'daemon off;'], $env + ($role === null ? [] : ['DLA_TRUSTED_PROXY' => $role]));
+            [$status, $out, $err] = $this->exec(['sh', $script, 'nginx', '-g', 'daemon off;'], $env + ['DLA_HTTP_BIND' => '127.0.0.1', 'DLA_EDGE_GATEWAY' => '192.0.2.10'] + ($role === null ? [] : ['DLA_TRUSTED_PROXY' => $role]));
             if ($refusal === null) {
                 self::assertSame(0, $status, "{$name}: {$err}");
                 self::assertSame("started nginx -g daemon off;\n", $out, $name);
@@ -70,6 +74,46 @@ final class ContainerScriptsTest extends TestCase
                 self::assertNotSame(0, $status, $name);
                 self::assertStringNotContainsString('started', $out, $name);
                 self::assertStringContainsString('refusing to start', $err, $name);
+                self::assertStringContainsString($refusal, $err, $name);
+            }
+        }
+    }
+
+    public function testNginxRefusesAnyBindAddressButLoopback(): void
+    {
+        $policy = $this->tmp . '/client-ip.conf';
+        file_put_contents($policy, (string) file_get_contents(dirname(__DIR__, 3) . '/docker/nginx/client-ip.conf'));
+        $script = $this->patched('docker/nginx/entrypoint-prod.sh', [
+            'policy=/etc/nginx/dla/client-ip.conf' => 'policy=' . $policy,
+            'exec /docker-entrypoint.sh "$@"' => 'exec ' . $this->tmp . '/bin/next "$@"',
+        ]);
+        $this->stub('nginx', 'exit 0');
+        $this->stub('next', 'echo "started $*"');
+
+        $cases = [
+            'unset' => [null, 'DLA_HTTP_BIND is not set'],
+            'empty' => ['', 'DLA_HTTP_BIND is not set'],
+            'IPv4 wildcard' => ['0.0.0.0', 'not a loopback address'],
+            'IPv6 wildcard' => ['::', 'not a loopback address'],
+            'IPv6 wildcard, bracketed' => ['[::]', 'not a loopback address'],
+            'asterisk' => ['*', 'not a loopback address'],
+            'LAN address' => ['192.168.1.50', 'not a loopback address'],
+            'host name' => ['localhost', 'not a loopback address'],
+            'two lines' => ["127.0.0.1\n0.0.0.0", 'not a loopback address'],
+            'trailing space' => ['127.0.0.1 ', 'not a loopback address'],
+            'lookalike' => ['127.0.0.1.5', 'not a loopback address'],
+            'loopback' => ['127.0.0.1', null],
+            'IPv6 loopback' => ['::1', null],
+        ];
+        foreach ($cases as $name => [$bind, $refusal]) {
+            $env = ['DLA_TRUSTED_PROXY' => 'none'] + ($bind === null ? [] : ['DLA_HTTP_BIND' => $bind]);
+            [$status, $out, $err] = $this->exec(['sh', $script, 'nginx'], $env);
+            if ($refusal === null) {
+                self::assertSame(0, $status, "{$name}: {$err}");
+                self::assertSame("started nginx\n", $out, $name);
+            } else {
+                self::assertNotSame(0, $status, $name);
+                self::assertStringNotContainsString('started', $out, $name);
                 self::assertStringContainsString($refusal, $err, $name);
             }
         }

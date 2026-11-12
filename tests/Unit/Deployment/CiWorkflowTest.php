@@ -119,6 +119,16 @@ final class CiWorkflowTest extends TestCase
         self::assertStringContainsString("echo 'DLA_TRUSTED_PROXY=none' >> .env.production", $runs, 'CI-only, explicit: no trusted proxy');
         self::assertStringContainsString('cp docker/nginx/client-ip.conf docker/nginx/production/client-ip.conf', $runs, 'The trust-nothing policy, never a guessed address');
         self::assertStringNotContainsString('set_real_ip_from', self::$source);
+        self::assertStringContainsString("echo 'DLA_EDGE_GATEWAY=172.30.89.1' >> .env.production", $runs, 'CI-only edge subnet');
+        self::assertStringNotContainsString("DLA_HTTP_BIND=", implode("\n", array_filter(explode("\n", $runs), static fn (string $l): bool => !str_starts_with(ltrim($l), '#'))), 'Loopback comes from the template, never overridden');
+        self::assertStringContainsString("sed 's/<CLOUDFLARED_ADDRESS>/172.30.89.1/' docker/nginx/client-ip.cloudflared.conf.example > docker/nginx/production/client-ip.conf", $runs, 'The trusted peer is the edge gateway');
+        self::assertStringContainsString("peer=172\\.30\\.89\\.1$", $runs, 'The predicted peer is checked in the access log');
+        self::assertStringNotContainsString('DLA_HTTP_BIND=0.0.0.0', self::$source);
+        self::assertStringContainsString('refuse docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet', self::$source, 'Compose refuses to run without a bind address and port');
+        self::assertStringContainsString('test "$published" = "nginx 127.0.0.1:8089->8080/tcp"', $runs, 'Exactly one published port');
+        self::assertStringContainsString('-H \'Host: library.bravina.co.uk\' "$origin/health"', $runs, 'End to end through the published port');
+        self::assertMatchesRegularExpression('/grep -Eqi \'\^set-cookie: __Host-.*secure/', $runs, 'Secure cookie over the plain-HTTP origin leg');
+        self::assertDoesNotMatchRegularExpression('/^\s*(sudo\s+)?cloudflared\s|cloudflare\/cloudflared|api\.cloudflare\.com/m', self::$source, 'CI never runs or contacts a tunnel');
         self::assertStringContainsString('down -v --remove-orphans', $runs);
         self::assertSame('always()', array_values(array_filter(self::steps(), static fn (array $s): bool => $s[0] === 'production-stack' && ($s[1]['name'] ?? '') === 'Remove the stack'))[0][1]['if'] ?? null);
         self::assertSame('static', self::jobs()['production-stack']['needs']);

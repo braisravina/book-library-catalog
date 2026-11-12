@@ -445,6 +445,14 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   versions block routed access to unpublished container ports from other
   hosts) and never attach other containers to the project's networks.
   Unverified on the production host.
+- Ingress uses the existing Cloudflare Tunnel (cloudflared systemd service
+  on the Docker host) and nginx's one published port on `127.0.0.1`. The
+  cloudflared-to-nginx leg is plain HTTP over loopback. nginx believes
+  `CF-Connecting-IP` from the `edge` network gateway, the peer of every
+  connection to that port. So every local process on the Docker host can
+  choose its logged client address and its rate-limit bucket. Keep the
+  host's local users and services trusted. Unverified on the production
+  host until the `peer=` check (DEPLOYMENT.md 0.4).
 - Login throttling uses fixed thresholds with no progressive back-off or
   CAPTCHA. Account lockout can be triggered deliberately by someone who knows
   a user's e-mail (the trade-off accepted by NIST guidance).
@@ -527,18 +535,22 @@ done on the production host yet.
 - [ ] `METADATA_PROVIDERS` decided (privacy); if enabled, host egress limited
       to the provider domains and any API key supplied as a secret file
 
-**Ingress and client IP (blocked on the topology review)**
-- [ ] Discovery reports from `docker/discovery/` produced and reviewed by you;
-      trusted-proxy design approved
-- [ ] `docker/nginx/production/client-ip.conf` (one verified proxy address,
-      the approved header) and `DLA_TRUSTED_PROXY` set; `nginx -t` and
-      `php tests/nginx/run.php` pass with that policy
-- [ ] The proxy forwards `Host: library.bravina.co.uk` (cloudflared
-      `originRequest.httpHostHeader` unset or equal); other hosts get 400
-- [ ] A forged `CF-Connecting-IP` / `X-Forwarded-For` sent directly to the
-      origin does not change the logged client address (audit log, access
-      log `peer=`); 403 for direct requests enabled only after routing and
-      health checks are verified
+**Ingress and client IP (existing tunnel, cloudflared on the Docker host)**
+- [ ] A free `DLA_HTTP_PORT` and a free `edge` subnet checked and set
+      (DEPLOYMENT.md 0.1); `DLA_HTTP_BIND=127.0.0.1`
+- [ ] Only nginx publishes a port, on `127.0.0.1` only (`ss -Hltn`); not
+      reachable from another machine
+- [ ] Route `library.bravina.co.uk` added to the existing tunnel only; no
+      other route, tunnel or DNS record changed; HTTP redirected to HTTPS
+      for this hostname
+- [ ] `peer=` in the access log confirmed to be `DLA_EDGE_GATEWAY` for
+      tunnel requests; then `docker/nginx/production/client-ip.conf` (the
+      cloudflared template with that address) and `DLA_TRUSTED_PROXY=required`
+- [ ] The tunnel forwards `Host: library.bravina.co.uk` (route "HTTP Host
+      Header" / `originRequest.httpHostHeader` unset or equal); other hosts
+      get 400; the session cookie is `__Host-…; secure`
+- [ ] Signed in through the tunnel: the audit log shows your public address;
+      a request to the port without `CF-Connecting-IP` gets 403
 - [ ] The application is not reachable except through the approved ingress
 - [ ] If query-format invitation links are used: Cloudflare and cloudflared
       (log level info or lower) verified not to retain `/invite?token=` URLs;
@@ -550,7 +562,7 @@ done on the production host yet.
 - [ ] Images built on the Docker host from the release commit
       (`APP_IMAGE_TAG`); base-image digests refreshed deliberately
 - [ ] `docker compose -f docker-compose.prod.yml config` reviewed: no
-      published ports except the approved ingress, no extra mounts
+      published port except nginx on `DLA_HTTP_BIND`, no extra mounts
 - [ ] Every health check healthy; `/health` ok through the ingress
 - [ ] `migrate` run from the `ops` container; `migrate:status` shows nothing
       `pending` or `MODIFIED`
