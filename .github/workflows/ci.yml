@@ -166,8 +166,8 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck --version
-          shellcheck --severity=warning --shell=bash docker/discovery/docker-host.sh docker/mysql/init/01-create-users.sh
-          shellcheck --severity=warning --shell=sh docker/nginx/entrypoint-prod.sh docker/php/entrypoint-prod.sh docker/php/entrypoint-dev.sh
+          shellcheck --severity=warning --shell=bash docker/discovery/docker-host.sh docker/mysql/init/01-create-users.sh docker/storage/preflight.sh
+          shellcheck --severity=warning --shell=sh docker/nginx/entrypoint-prod.sh docker/php/entrypoint-prod.sh docker/php/entrypoint-dev.sh docker/mysql/db-guard.sh
 
       - name: Lint Dockerfiles
         run: |
@@ -180,11 +180,19 @@ jobs:
           cp .env.example .env
           docker compose config --quiet
           cp .env.production.example .env.production
-          mkdir -p secrets
+          # CI only: the data root on the runner, outside this checkout as
+          # in production (/opt/digital-library-data, outside the working tree).
+          sed -i 's#^DLA_DATA_ROOT=.*#DLA_DATA_ROOT=/srv/dla-ci-data#' .env.production
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0700 /srv/dla-ci-data /srv/dla-ci-data/secrets
           for name in db_root_password db_password db_migration_password; do
-            openssl rand -hex 32 > "secrets/$name"
+            openssl rand -hex 32 > "/srv/dla-ci-data/secrets/$name"
           done
-          refuse() { if "$@"; then echo "UNEXPECTED SUCCESS: $*" >&2; exit 1; fi; }
+          # Negative tests: each "required variable ... is missing a value"
+          # message in this log is EXPECTED (Compose refusing on purpose);
+          # "ok: refused as expected" follows it. Every positive check names
+          # itself and prints the expected and actual values when it fails.
+          refuse() { if "$@"; then echo "UNEXPECTED SUCCESS: $*" >&2; exit 1; fi; echo "ok: refused as expected: $*"; }
+          expect() { if [ "$2" != "$3" ]; then printf '::error::%s\nexpected: %s\nactual:   %s\n' "$1" "$3" "$2" >&2; exit 1; fi; echo "ok: $1"; }
           # Fail closed: no default bind address or port for the published port.
           refuse docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
           # CI only: throwaway port and edge subnet (production: checked by the owner).
@@ -194,7 +202,26 @@ jobs:
           docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
           # Only nginx publishes, one port, on the configured address.
           published=$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -c '[.services | to_entries[] | select((.value.ports // []) | length > 0) | {service: .key, ports: [.value.ports[] | {host_ip, published: (.published | tostring), target}]}]')
-          test "$published" = '[{"service":"nginx","ports":[{"host_ip":"127.0.0.1","published":"8089","target":8080}]}]'
+          expect 'published ports' "$published" '[{"service":"nginx","ports":[{"host_ip":"127.0.0.1","published":"8089","target":8080}]}]'
+          # Persistent storage: no default root (Compose refuses to run
+          # without it), and exactly these bind mounts, none created on demand.
+          refuse env DLA_STORAGE_ROOT= docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
+          refuse env DLA_DATA_ROOT= docker compose -f docker-compose.prod.yml --env-file .env.production config --quiet
+          # The Docker daemon never starts these containers by itself (only
+          # digital-library.service does, after the storage preflight).
+          expect 'restart policies' "$(docker compose -f docker-compose.prod.yml --env-file .env.production --profile ops config --format json | jq -c '[.services[] | .restart] | unique')" '["no"]'
+          # Every mount from the two data roots (the read-only repository
+          # files under ./docker are checked elsewhere): service, type,
+          # source, target and read-only flag, and no named volume.
+          # create_host_path is NOT compared here: Compose may omit
+          # "create_host_path: false" from its normalised JSON (null is not
+          # proof of false). It is asserted on the YAML itself
+          # (PersistentStorageTest) and proven at runtime in the
+          # production-stack job ("Compose refuses a missing bind source").
+          storage=$(docker compose -f docker-compose.prod.yml --env-file .env.production --profile ops config --format json | jq -cS '{named_volumes: ((.volumes // {}) | keys), services: [.services | to_entries[] | {service: .key, mounts: ([(.value.volumes // [])[] | select(.type != "bind" or ((.source // "") | (startswith("/mnt/") or startswith("/srv/dla-ci-data/")))) | {type, source, target, read_only: (.read_only // false)}] | sort_by(.target))}] | sort_by(.service)}')
+          expect 'storage mounts' "$storage" '{"named_volumes":[],"services":[{"mounts":[{"read_only":true,"source":"/srv/dla-ci-data/mysql-init-guard","target":"/run/dla-db-init","type":"bind"},{"read_only":false,"source":"/srv/dla-ci-data/mysql","target":"/var/lib/mysql","type":"bind"}],"service":"db"},{"mounts":[],"service":"nginx"},{"mounts":[{"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"read_only":false,"source":"/mnt/bravina-shared/digital-library/backups","target":"/var/www/html/storage/backups","type":"bind"},{"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"ops"},{"mounts":[{"read_only":false,"source":"/mnt/bravina-shared/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"read_only":false,"source":"/mnt/bravina-shared/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"php"}]}'
+          # Secrets come from the data root, outside the checkout.
+          expect 'secret files' "$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -c '[.secrets[].file] | sort')" '["/srv/dla-ci-data/secrets/db_migration_password","/srv/dla-ci-data/secrets/db_password","/srv/dla-ci-data/secrets/db_root_password"]'
 
   production-stack:
     name: Production images, hardening and restore drill
@@ -219,21 +246,114 @@ jobs:
           echo 'DLA_EDGE_SUBNET=172.30.89.0/29' >> .env.production
           echo 'DLA_EDGE_GATEWAY=172.30.89.1' >> .env.production
           cp docker/nginx/client-ip.conf docker/nginx/production/client-ip.conf
-          mkdir -p secrets
+          # CI only: the checkout stands in for the working tree
+          # /opt/digital-library, /srv/dla-ci-data for the data root
+          # /opt/digital-library-data (outside the checkout, as in
+          # production), and the HDD root is under a stand-in for its
+          # mountpoint.
+          app=$PWD
+          data=/srv/dla-ci-data
+          root=/srv/dla-ci/digital-library
+          sed -i "s#^DLA_DATA_ROOT=.*#DLA_DATA_ROOT=$data#" .env.production
+          sed -i "s#^DLA_STORAGE_ROOT=.*#DLA_STORAGE_ROOT=$root#" .env.production
+          test "$(grep -c '^DLA_DATA_ROOT=' .env.production)" = 1
+          test "$(grep -c '^DLA_STORAGE_ROOT=' .env.production)" = 1
+          sudo install -d -o root -g root -m 0755 /srv/dla-ci
+          # The owner's initialisation (docs/DEPLOYMENT.md 3.2), verbatim:
+          sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 0755 "$app"
+          sudo install -d -o root -g root -m 0755 "$data"
+          sudo install -d -o 999 -g 999 -m 0700 "$data/mysql"
+          sudo install -d -o root -g root -m 0700 "$data/secrets"
+          sudo install -d -o root -g root -m 0755 "$data/mysql-init-guard"
+          sudo install -d -o root -g root -m 0700 "$root"
+          sudo install -d -o 82 -g 82 -m 0750 "$root/storage"
+          sudo install -d -o 82 -g 82 -m 0750 "$root/storage/tmp" "$root/storage/logs" "$root/storage/cache"
+          sudo install -d -o root -g root -m 0755 "$root/storage/covers"
+          sudo install -d -o root -g root -m 0000 "$root/storage/backups"
+          sudo install -d -o 82 -g 82 -m 0750 "$root/covers"
+          sudo install -d -o 82 -g 82 -m 0700 "$root/backups"
+          # The owner's secrets (docs/DEPLOYMENT.md 2), verbatim:
           for name in db_root_password db_password db_migration_password; do
-            openssl rand -hex 32 > "secrets/$name"
+            sudo sh -c "umask 077 && openssl rand -hex 32 > '$data/secrets/$name'"
           done
-          # Owners and modes as documented (ARCHITECTURE.md "Production secrets").
-          sudo chown 999:999 secrets/db_root_password
-          sudo chmod 0400 secrets/db_root_password
-          sudo chown 82:999 secrets/db_password secrets/db_migration_password
-          sudo chmod 0440 secrets/db_password secrets/db_migration_password
+          sudo chown 999:999 "$data/secrets/db_root_password"
+          sudo chmod 0400 "$data/secrets/db_root_password"
+          sudo chown 82:999 "$data/secrets/db_password" "$data/secrets/db_migration_password"
+          sudo chmod 0440 "$data/secrets/db_password" "$data/secrets/db_migration_password"
+          # The privileged preflight: a root-owned installed copy (3.2), verbatim.
+          sudo install -o root -g root -m 0755 "$app/docker/storage/preflight.sh" /usr/local/sbin/digital-library-preflight
+          test "$(stat -c '%u %a' /usr/local/sbin/digital-library-preflight)" = '0 755'
+          cmp docker/storage/preflight.sh /usr/local/sbin/digital-library-preflight
+          # First deployment: authorise exactly one new, empty database
+          # (docs/DEPLOYMENT.md 6); withdrawn after the first start.
+          sudo touch "$data/mysql-init-guard/allow-empty-init"
+          # No production data in the checkout or the build context.
+          test -z "$(git ls-files -- mysql secrets mysql-init-guard)"
+          for path in mysql secrets mysql-init-guard; do test ! -e "$path"; done
 
       - name: Build the production images
         run: docker compose -f docker-compose.prod.yml --env-file .env.production build
 
       - name: Start the stack and wait for every health check
-        run: docker compose -f docker-compose.prod.yml --env-file .env.production up -d --wait --wait-timeout 300
+        run: |
+          set -eux
+          docker compose -f docker-compose.prod.yml --env-file .env.production up -d --wait --wait-timeout 300
+          docker compose -f docker-compose.prod.yml --env-file .env.production logs db | grep -F 'first deployment is authorised: initialising a NEW database'
+          # The first start is done: withdraw the authorisation (DEPLOYMENT.md 6).
+          sudo rm /srv/dla-ci-data/mysql-init-guard/allow-empty-init
+
+      # Independent of the stack and of Compose's normalised output: does THIS
+      # runner's Compose honour "create_host_path: false"? A throwaway
+      # one-service project (its own name, a fresh directory under
+      # RUNNER_TEMP, the already-pulled pinned MySQL image, nothing else) has
+      # a bind source that does not exist. Compose must refuse it, and the
+      # source must not be created. A control run with the source present
+      # must succeed, so the refusal is due to the missing source alone.
+      # Any other result fails CI and prints the Docker and Compose versions.
+      - name: Compose refuses a missing bind source (create_host_path false)
+        run: |
+          set -eux
+          docker version --format 'Docker Engine {{.Server.Version}} (API {{.Server.APIVersion}})'
+          docker compose version
+          image=$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -r '.services.db.image')
+          test -n "$image"
+          probe=$(mktemp -d "$RUNNER_TEMP/dla-create-host-path.XXXXXX")
+          project=dla-create-host-path-probe
+          missing="$probe/missing-source"
+          cleanup() { docker compose -p "$project" -f "$probe/compose.yml" down --remove-orphans || true; rm -rf -- "$probe"; }
+          trap cleanup EXIT
+          cat > "$probe/compose.yml" <<EOF
+          services:
+            probe:
+              image: $image
+              pull_policy: never
+              entrypoint:
+                - "true"
+              restart: "no"
+              volumes:
+                - type: bind
+                  source: $missing
+                  target: /probe
+                  bind:
+                    create_host_path: false
+          EOF
+          cat "$probe/compose.yml"
+          test ! -e "$missing"
+          if out=$(docker compose -p "$project" -f "$probe/compose.yml" up -d 2>&1); then
+            printf '%s\n' "$out"
+            echo "::error::Compose created and started a container whose bind source does not exist: create_host_path false was ignored ($(docker compose version --short), Docker $(docker version --format '{{.Server.Version}}'))" >&2
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -F 'source path does not exist'
+          if [ -e "$missing" ]; then
+            echo "::error::the missing bind source was created ($(docker compose version --short), Docker $(docker version --format '{{.Server.Version}}'))" >&2
+            exit 1
+          fi
+          # Control: the same project with the source present is accepted.
+          mkdir "$missing"
+          docker compose -p "$project" -f "$probe/compose.yml" up -d
+          docker compose -p "$project" -f "$probe/compose.yml" down --remove-orphans
 
       - name: Check the hardening
         run: |
@@ -259,6 +379,25 @@ jobs:
           actual=$(printf '%s' "$inspected" | jq -cS '[.[] | {service: .Config.Labels["com.docker.compose.service"], publish_all: .HostConfig.PublishAllPorts, bindings: ([(.NetworkSettings.Ports // {}) | to_entries[] | .key as $port | (.value // [])[] | {container_port: $port, host_ip: .HostIp, host_port: .HostPort}] | sort_by(.container_port, .host_ip, .host_port))}] | sort_by(.service)')
           test "$requested" = "$expected"
           test "$actual" = "$expected"
+          # Persistent storage, from the same inspect data: exactly the
+          # expected bind mounts from the storage root (no named or anonymous
+          # volume, e.g. from the MySQL image's VOLUME), requested through the
+          # Mounts API without CreateMountpoint (a missing source fails).
+          root=/srv/dla-ci/digital-library
+          data=/srv/dla-ci-data
+          mounts=$(printf '%s' "$inspected" | jq -cS --arg hdd "$root/" --arg data "$data/" 'def ours: (.Source // "") | (startswith($hdd) or startswith($data)); def secret: ((.Destination // .Target // "") | startswith("/run/secrets/")); [.[] | {service: .Config.Labels["com.docker.compose.service"], mounts: ([.Mounts[] | select((.Type == "volume" or ours) and (secret | not)) | {type: .Type, source: .Source, target: .Destination, rw: .RW}] | sort_by(.target)), create_mountpoint: ([(.HostConfig.Mounts // [])[] | select(ours and (secret | not)) | (.BindOptions.CreateMountpoint // false)] | unique)}] | sort_by(.service)')
+          test "$mounts" = '[{"create_mountpoint":[false],"mounts":[{"rw":false,"source":"/srv/dla-ci-data/mysql-init-guard","target":"/run/dla-db-init","type":"bind"},{"rw":true,"source":"/srv/dla-ci-data/mysql","target":"/var/lib/mysql","type":"bind"}],"service":"db"},{"create_mountpoint":[],"mounts":[],"service":"nginx"},{"create_mountpoint":[false],"mounts":[{"rw":true,"source":"/srv/dla-ci/digital-library/storage","target":"/var/www/html/storage","type":"bind"},{"rw":true,"source":"/srv/dla-ci/digital-library/covers","target":"/var/www/html/storage/covers","type":"bind"}],"service":"php"}]'
+          # Database files are not reachable from the web or nginx containers.
+          refuse dc exec -T php test -e /var/lib/mysql/mysql.ibd
+          refuse dc exec -T nginx test -e /var/lib/mysql/mysql.ibd
+          # Restart policy "no" on every container, as Docker holds it: the
+          # daemon restores none of them at boot or after an unclean shutdown.
+          policies=$(printf '%s' "$inspected" | jq -cS '[.[] | {service: .Config.Labels["com.docker.compose.service"], restart: (.HostConfig.RestartPolicy.Name | if . == "" then "no" else . end)}] | sort_by(.service)')
+          test "$policies" = '[{"restart":"no","service":"db"},{"restart":"no","service":"nginx"},{"restart":"no","service":"php"}]'
+          # The web container cannot use the backups mountpoint stub.
+          refuse dc exec -T php touch /var/www/html/storage/backups/ci-write-test
+          dc exec -T php touch /var/www/html/storage/covers/ci-write-test
+          dc exec -T php rm /var/www/html/storage/covers/ci-write-test
           # Through the published port, as cloudflared connects (plain HTTP,
           # public Host header): health, a secure host-only session cookie
           # and HSTS although the origin leg is not TLS, and no foreign Host.
@@ -332,6 +471,57 @@ jobs:
           # The access log: the client address from the header, the TCP peer
           # is the edge gateway (the address the policy trusts).
           dc logs --no-color nginx | grep -Eq '198\.51\.100\.23 - .*peer=172\.30\.89\.1$'
+
+      - name: Missing or unexpected storage fails closed (no Docker daemon restart)
+        run: |
+          set -eux
+          dc() { docker compose -f docker-compose.prod.yml --env-file .env.production "$@"; }
+          refuse() { if "$@"; then echo "UNEXPECTED SUCCESS: $*" >&2; exit 1; fi; }
+          root=/srv/dla-ci/digital-library
+          data=/srv/dla-ci-data
+          db=$(dc ps -q db)
+          php=$(dc ps -q php)
+          # The global Docker daemon is never restarted: with restart policy
+          # "no" (checked above) it starts none of these containers itself.
+          # Each case: the boot unit's stop command, the change, then Docker
+          # and the unit's start command must refuse it.
+          #
+          # 1. The storage HDD is not mounted (the stand-in mountpoint stays,
+          #    empty): php cannot start; nothing is created in its place.
+          dc stop
+          sudo mv "$root" /srv/dla-ci-hdd-detached
+          if out=$(docker start "$php" 2>&1); then echo "UNEXPECTED SUCCESS: docker start php" >&2; exit 1; fi
+          printf '%s\n' "$out" | grep -F 'source path does not exist'
+          refuse dc up -d --no-recreate --no-build --pull never --wait --wait-timeout 60
+          dc stop
+          test ! -e "$root"
+          test -z "$(sudo find /srv/dla-ci -mindepth 1 -print -quit)"
+          sudo mv /srv/dla-ci-hdd-detached "$root"
+          #
+          # 2. The SSD database directory is replaced by an empty one (wrong
+          #    path, lost data): the guard refuses to initialise a new database.
+          sudo mv "$data/mysql" "$data/mysql-detached"
+          sudo install -d -o 999 -g 999 -m 0700 "$data/mysql"
+          refuse dc up -d --no-recreate --no-build --pull never --wait --wait-timeout 60 db
+          dc logs db | grep -F 'refusing to initialise a new, empty database'
+          dc stop
+          test -z "$(sudo find "$data/mysql" -mindepth 1 -print -quit)"
+          #
+          # 3. The SSD database directory is missing: db cannot start, and
+          #    nothing is created in its place.
+          sudo rmdir "$data/mysql"
+          if out=$(docker start "$db" 2>&1); then echo "UNEXPECTED SUCCESS: docker start db" >&2; exit 1; fi
+          printf '%s\n' "$out" | grep -F 'source path does not exist'
+          test ! -e "$data/mysql"
+          sudo mv "$data/mysql-detached" "$data/mysql"
+          #
+          # Both back: the unit's start command, the same data.
+          dc up -d --no-recreate --no-build --pull never --wait --wait-timeout 300
+          test "$(dc exec -T nginx wget -q -O - http://127.0.0.1:8080/health)" = '{"status":"ok"}'
+          status=$(dc run --rm -T ops php bin/console migrate:status)
+          printf '%s\n' "$status"
+          printf '%s\n' "$status" | grep -q applied
+          if printf '%s\n' "$status" | grep -Eqi 'pending|modified'; then exit 1; fi
 
       - name: Show container logs on failure
         if: failure()

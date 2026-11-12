@@ -6,7 +6,7 @@ Deployment, updates, monitoring and emergency shutdown are in
 the PHP container. None of it is reachable from the web
 application. Commands assume the development stack (`docker compose exec php …`).
 In production, run them in the one-off `ops` container, which alone holds the
-migration account and the backups volume:
+migration account and the backups directory:
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env.production run --rm ops php bin/console backup:create
@@ -14,8 +14,8 @@ docker compose -f docker-compose.prod.yml --env-file .env.production run --rm op
 
 The `php` (web) container has the runtime account only (`APP_ROLE=web`), so
 `migrate` and `backup:restore` fail there by design. Run `backup:create` in
-`ops` as well: only `ops` mounts the backups volume, so archives created in
-the web container would land in the shared storage volume instead.
+`ops` as well: only `ops` mounts the backups directory. The web container
+sees only an unusable stub there.
 
 > **Status.** The commands are implemented and tested against MySQL 8.4 and
 > PHP 8.4 in a development environment. Nothing has been scheduled or run
@@ -84,7 +84,7 @@ before. `backup:verify`, `maintenance:status`, `migrate:status` and
 
 **One at a time.** `migrate`, `backup:create`, `backup:restore`, `cleanup`
 and `maintenance:off` take an exclusive lock (`TEMP_PATH/operations.lock`,
-shared by every container that mounts the storage volume). A second one
+shared by every container that mounts the storage directory). A second one
 refuses to start and names the running operation. The lock is held by the
 running process and released by the kernel when it exits for any reason
 (including `kill -9` or a container stop), so there is never a stale lock to
@@ -135,7 +135,7 @@ A restore replaces data, so it is guarded. In order:
 4. **Space pre-flight:** the temporary directory must hold the whole
    extracted backup and the covers directory the cover files to be written,
    each with 16 MiB to spare. MySQL's own free space cannot be measured from
-   the application; check it on the host (`df` on the MySQL volume) before a
+   the application; check it on the host (`df` on the MySQL data directory) before a
    large restore.
 5. **Extraction** into a private temporary directory (`TEMP_PATH`, mode
    0700), re-hashing every member against the manifest, so the archive cannot
@@ -288,14 +288,14 @@ database does not survive a lost disk, host or volume. After each backup:
 
 | Path | Owner (production) | Mode |
 |---|---|---|
-| `BACKUP_PATH` (`storage/backups`, ops-only volume) | `www-data` (82) | directory `0700`; archives and `.sha256` `0600` |
+| `BACKUP_PATH` (`storage/backups`, ops-only directory) | `www-data` (82) | directory `0700`; archives and `.sha256` `0600` |
 | `TEMP_PATH` (`storage/tmp`) | `www-data` | work directories `0700`; `operations.lock` `0600` |
 | maintenance flag and restore marker | `www-data` | `0640` |
 | restored cover files | `www-data` | `0640`; bucket directories `0750` |
 
 Backups never live under `public/` (refused by the code and by
 `config:check`) and are never served: nginx serves `public/assets` only, and
-the web container does not mount the backups volume. There is no download
+the web container does not mount the backups directory. There is no download
 route. Archives do not contain `.env`, Docker secrets, database credentials
 or sessions.
 
@@ -306,7 +306,7 @@ The application cannot do these for you:
 - copy archives off-host, verify the copies, and protect them (encryption,
   access control) as personal data;
 - keep the secrets (below) separately from the backups;
-- check free space on the backup, temporary and MySQL volumes;
+- check free space on the backup, temporary and MySQL directories;
 - run and record a restore drill (suggested: monthly, and after upgrades);
 - decide and document your RPO and RTO.
 
@@ -322,7 +322,7 @@ container:
       problem).
 - [ ] **Secrets and code:** the secret files and `.env.production` from your
       secure store; the repository at the backup's release or newer.
-- [ ] **Copy** the archive and its `.sha256` into the backups volume.
+- [ ] **Copy** the archive and its `.sha256` into the backups directory.
 - [ ] **Verify:** `ops backup:verify --file=…` prints `VALID`.
 - [ ] **Space:** enough free space for the extraction (`TEMP_PATH`), the
       covers and MySQL (see "Resources").
@@ -363,10 +363,13 @@ above (same steps, run in the `ops` container).
 
 1. **Prepare.** Check out the code. Recreate `.env`, or the Docker secrets,
    from your secure store. Start the stack: `docker compose up -d --wait`.
-   On a fresh MySQL volume, the init script creates the databases and accounts.
+   On an empty MySQL data directory, the init script creates the databases and accounts.
+   In production, an empty data directory is initialised only with the
+   first-deployment authorisation (DEPLOYMENT.md section 6); otherwise the
+   database guard refuses to start db.
 2. **Verify the copy you will use:**
    `docker compose exec php php bin/console backup:verify --file=storage/backups/dla-backup-….tar.gz`
-   (copy the archive into the backups volume first). Continue only if it
+   (copy the archive into the backups directory first). Continue only if it
    prints `VALID`.
 3. **Enter maintenance mode:** `docker compose exec php php bin/console maintenance:on --reason="restore"`.
 4. **Restore:**
@@ -433,8 +436,8 @@ take the operations lock, so an overlapping run refuses instead of
 interfering; keep them a few hours apart.
 
 ```cron
-15 2 * * *  cd /srv/library && docker compose -f docker-compose.prod.yml --env-file .env.production run --rm -T ops php bin/console backup:create >> /var/log/dla-backup.log 2>&1
-30 3 * * *  cd /srv/library && docker compose -f docker-compose.prod.yml --env-file .env.production run --rm -T ops php bin/console cleanup --apply >> /var/log/dla-cleanup.log 2>&1
+15 2 * * *  cd /opt/digital-library && docker compose -f docker-compose.prod.yml --env-file .env.production run --rm -T ops php bin/console backup:create >> /var/log/dla-backup.log 2>&1
+30 3 * * *  cd /opt/digital-library && docker compose -f docker-compose.prod.yml --env-file .env.production run --rm -T ops php bin/console cleanup --apply >> /var/log/dla-cleanup.log 2>&1
 ```
 
 Equivalent systemd units (`/etc/systemd/system/dla-backup.service` and `.timer`):
@@ -445,7 +448,7 @@ Description=Digital Library Archive backup
 
 [Service]
 Type=oneshot
-WorkingDirectory=/srv/library
+WorkingDirectory=/opt/digital-library
 ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml --env-file .env.production run --rm -T ops php bin/console backup:create
 ```
 
@@ -466,10 +469,11 @@ A failed backup exits non-zero, so cron mail or `systemctl status` shows it.
 ## Before production
 
 These steps are not done yet (see also DEPLOYMENT.md):
-1. Decide where backups live. By default they are in the `app-backups`
-   volume of the production stack (ops container only); a host directory
-   (`82:82`, mode 0750) bound at `storage/backups` in the `ops` service makes
-   off-host copying easier. Arrange the off-host copies either way.
+1. Backups live in `/mnt/bravina-shared/digital-library/backups` on the
+   storage HDD (Phase 5C; ops container only; `82:82`, 0700; DEPLOYMENT.md
+   section 3). The database is on the system SSD, so a single disk failure
+   no longer takes both. Still arrange off-host copies of the archives and
+   `.sha256` files against losing the host.
 2. Install and enable the schedules above on the host.
 3. Run one full restore drill on the production host and record how long it
    took (your measured recovery time).

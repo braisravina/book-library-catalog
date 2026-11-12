@@ -1,7 +1,6 @@
 .git
 .env
 .env.*
-!.env.example
 vendor
 storage/covers
 storage/logs
@@ -16,3 +15,19 @@ tests
 *.md
 secrets
 docker/discovery
+# Production data is never part of the build context (Phase 5C): it lives
+# in /opt/digital-library-data, outside the working tree. Defence in depth
+# if a copy is ever placed in the tree. No exception (!) patterns, so the
+# build never has to look inside an excluded directory.
+mysql
+mysql-init-guard
+mysql-data
+data
+**/*.ibd
+**/ibdata*
+**/ib_logfile*
+**/ibtmp*
+**/undo_[0-9]*
+**/binlog.*
+**/*.sql.gz
+**/allow-empty-init

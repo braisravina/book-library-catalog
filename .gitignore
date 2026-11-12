@@ -20,3 +20,19 @@
 .vscode/
 # Production Docker secrets (docker-compose.prod.yml); never commit.
 /secrets/
+# Production data (Phase 5C) lives in /opt/digital-library-data, outside
+# the deployed working tree /opt/digital-library. Defence in depth if a
+# copy is ever placed in the tree (the preflight refuses one):
+/mysql/
+/mysql-init-guard/
+/mysql-data/
+/data/
+*.ibd
+ibdata*
+ib_logfile*
+ibtmp*
+undo_[0-9]*
+binlog.[0-9]*
+binlog.index
+*.sql.gz
+allow-empty-init

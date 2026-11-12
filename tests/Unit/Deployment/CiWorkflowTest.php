@@ -27,6 +27,157 @@ final class CiWorkflowTest extends TestCase
         self::$workflow = BlockYaml::parseFile(self::path(self::FILE));
     }
 
+    /**
+     * Replays every job's shell lines in order, tracking which variables
+     * .env.production holds (cp of the template, sed -i, echo >>), and
+     * checks each production Compose invocation: positive ones only once
+     * the file exists and every mandatory ${VAR:?} variable has a value,
+     * always with an explicit --env-file; negative "config" checks only
+     * inside refuse, and only while a mandatory variable is really missing.
+     */
+    public function testComposeInputsAreCompleteBeforeEveryProductionComposeCall(): void
+    {
+        preg_match_all('/\$\{([A-Z0-9_]+):\?/', (string) file_get_contents(self::path('docker-compose.prod.yml')), $m);
+        $mandatory = array_values(array_unique($m[1]));
+        self::assertContains('DLA_HTTP_BIND', $mandatory);
+        self::assertContains('DLA_HTTP_PORT', $mandatory);
+        self::assertContains('DLA_EDGE_SUBNET', $mandatory);
+        self::assertContains('DLA_EDGE_GATEWAY', $mandatory);
+        self::assertContains('DLA_STORAGE_ROOT', $mandatory);
+        self::assertContains('DLA_DATA_ROOT', $mandatory);
+        self::assertNotContains('DLA_HTTP_PORT', array_keys(self::assignments((string) file_get_contents(self::path('.env.production.example')))), 'The port has no default anywhere');
+
+        $positives = 0;
+        $negatives = 0;
+        foreach (self::jobs() as $name => $job) {
+            $env = null; // .env.production does not exist yet
+            foreach ($job['steps'] ?? [] as $step) {
+                foreach (explode("\n", (string) ($step['run'] ?? '')) as $line) {
+                    $line = trim($line);
+                    if ($line === '' || str_starts_with($line, '#')) {
+                        continue;
+                    }
+                    if ($line === 'cp .env.production.example .env.production') {
+                        $env = self::assignments((string) file_get_contents(self::path('.env.production.example')));
+                    } elseif (preg_match('/^echo \'([A-Z0-9_]+)=(.+)\' >> \.env\.production$/', $line, $e) === 1) {
+                        self::assertNotNull($env, "{$name}: .env.production is created before it is appended to");
+                        $env[$e[1]] = $e[2];
+                    } elseif (preg_match('/^sed -i ["\']s#\^([A-Z0-9_]+)=\.\*#\1=([^#]*)#["\'] \.env\.production$/', $line, $e) === 1) {
+                        self::assertNotNull($env, "{$name}: .env.production is created before it is edited");
+                        self::assertArrayHasKey($e[1], $env, "{$name}: sed replaces a line the template has");
+                        $env[$e[1]] = $e[2];
+                    }
+                    if (str_starts_with($line, 'dc() {')) {
+                        self::assertStringContainsString('docker compose -f docker-compose.prod.yml --env-file .env.production "$@"', $line, "{$name}: dc always loads the env file explicitly");
+                        continue;
+                    }
+                    if (preg_match('/(^|\s|\$\()(docker compose -f docker-compose\.prod\.yml|dc)\s/', $line) !== 1) {
+                        continue;
+                    }
+                    if (str_contains($line, 'docker compose -f docker-compose.prod.yml')) {
+                        self::assertStringContainsString('docker compose -f docker-compose.prod.yml --env-file .env.production ', $line, "{$name}: explicit env file, never only the shell environment: {$line}");
+                    }
+                    self::assertNotNull($env, "{$name}: .env.production exists before: {$line}");
+                    $missing = array_values(array_filter($mandatory, static fn (string $k): bool => ($env[$k] ?? '') === ''));
+                    if (preg_match('/^refuse env ([A-Z0-9_]+)= /', $line, $o) === 1) {
+                        self::assertContains($o[1], $mandatory, "{$name}: the override empties a mandatory variable");
+                        $missing[] = $o[1];
+                    }
+                    if (str_starts_with($line, 'refuse ') && str_contains($line, ' config')) {
+                        self::assertNotSame([], $missing, "{$name}: a negative config test must really lack a mandatory variable: {$line}");
+                        $negatives++;
+                    } elseif (!str_starts_with($line, 'refuse ')) {
+                        self::assertSame([], $missing, "{$name}: mandatory Compose variables unset before: {$line}");
+                        $positives++;
+                    }
+                }
+            }
+        }
+        self::assertGreaterThanOrEqual(3, $negatives, 'The negative interpolation tests are kept');
+        self::assertGreaterThan(10, $positives);
+    }
+
+    /**
+     * The runtime proof that this runner's Compose honours
+     * "create_host_path: false": a disposable project whose bind source is
+     * missing must be refused, the source must not appear, and a control run
+     * with the source present must succeed. Only temporary paths are used.
+     */
+    public function testRuntimeProbeRefusesAMissingBindSource(): void
+    {
+        $steps = self::jobs()['production-stack']['steps'];
+        $names = array_column($steps, 'name');
+        $index = array_search('Compose refuses a missing bind source (create_host_path false)', $names, true);
+        self::assertIsInt($index, 'The runtime negative test exists');
+        self::assertLessThan($index, array_search('Start the stack and wait for every health check', $names, true), 'Runs once the pinned images are present');
+        self::assertArrayNotHasKey('if', $steps[$index], 'Always runs');
+        self::assertArrayNotHasKey('continue-on-error', $steps[$index], 'A failure fails the job');
+        $run = (string) $steps[$index]['run'];
+        $code = implode("\n", array_filter(explode("\n", $run), static fn (string $l): bool => !str_starts_with(ltrim($l), '#')));
+
+        // Versions are reported, the project is throwaway and temporary only.
+        self::assertStringStartsWith("set -eux\n", $run);
+        self::assertStringContainsString('docker compose version', $code);
+        self::assertStringContainsString("docker version --format 'Docker Engine {{.Server.Version}} (API {{.Server.APIVersion}})'", $code);
+        self::assertStringContainsString('probe=$(mktemp -d "$RUNNER_TEMP/dla-create-host-path.XXXXXX")', $code);
+        self::assertStringContainsString('missing="$probe/missing-source"', $code);
+        self::assertStringContainsString('project=dla-create-host-path-probe', $code);
+        self::assertDoesNotMatchRegularExpression('#/opt/|/mnt/|/srv/|/home/brais|\.env\.production up|docker-compose\.prod\.yml[^|]*\b(up|down|stop|rm)\b#', $code, 'No production path or stack operation');
+        self::assertDoesNotMatchRegularExpression('/\bsudo\b|systemctl|dockerd/', $code);
+        self::assertSame(1, preg_match_all('/\|\| true/', $code), 'Only the cleanup may tolerate a failure');
+        self::assertStringContainsString('cleanup() { docker compose -p "$project" -f "$probe/compose.yml" down --remove-orphans || true; rm -rf -- "$probe"; }', $code);
+        self::assertStringContainsString('trap cleanup EXIT', $code);
+
+        // The disposable project: one service, one bind from the missing
+        // source, explicitly create_host_path false, the pinned local image.
+        preg_match('/cat > "\$probe\/compose\.yml" <<EOF\n(.*?)\nEOF\n/s', $run, $heredoc);
+        self::assertNotEmpty($heredoc, 'The project is written inline');
+        $file = sys_get_temp_dir() . '/dla-probe-' . bin2hex(random_bytes(4)) . '.yml';
+        file_put_contents($file, $heredoc[1]);
+        try {
+            $probe = BlockYaml::parseFile($file);
+        } finally {
+            unlink($file);
+        }
+        self::assertSame(['probe'], array_keys($probe['services']));
+        $service = $probe['services']['probe'];
+        self::assertSame('$image', $service['image']);
+        self::assertSame('never', $service['pull_policy']);
+        self::assertSame([['type' => 'bind', 'source' => '$missing', 'target' => '/probe', 'bind' => ['create_host_path' => 'false']]], $service['volumes']);
+        self::assertStringContainsString("image=\$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -r '.services.db.image')", $code);
+
+        // The source is absent before; creation must fail (success fails the
+        // job), for the missing source, and must not create it.
+        $up = 'if out=$(docker compose -p "$project" -f "$probe/compose.yml" up -d 2>&1); then';
+        $before = strpos($code, 'test ! -e "$missing"');
+        $attempt = strpos($code, $up);
+        self::assertIsInt($before);
+        self::assertIsInt($attempt);
+        self::assertLessThan($attempt, $before);
+        $success = substr($code, $attempt, (int) strpos($code, "\nfi\n", $attempt) - $attempt);
+        self::assertMatchesRegularExpression('/::error::Compose created and started a container whose bind source does not exist[^\n]*docker compose version --short[^\n]*\n\s*exit 1$/', $success, 'Successful creation fails the job, with the versions');
+        $after = substr($code, $attempt + strlen($success));
+        self::assertMatchesRegularExpression("/^\\s*fi\\n\\s*printf '%s\\\\n' \"\\\$out\"\\n\\s*printf '%s\\\\n' \"\\\$out\" \\| grep -F 'source path does not exist'\\n\\s*if \\[ -e \"\\\$missing\" \\]; then\\n[^\\n]*::error::the missing bind source was created[^\\n]*\\n\\s*exit 1\\n\\s*fi\\n/", $after, 'Refused for the missing source, and nothing created');
+
+        // Control: with the source present the same project is accepted.
+        $control = strpos($code, 'mkdir "$missing"');
+        self::assertIsInt($control);
+        self::assertGreaterThan($attempt, $control);
+        self::assertStringContainsString("mkdir \"\$missing\"\ndocker compose -p \"\$project\" -f \"\$probe/compose.yml\" up -d\n", substr($code, $control));
+    }
+
+    /**
+     * KEY=value lines of an env file (comments and blank values ignored).
+     *
+     * @return array<string, string>
+     */
+    private static function assignments(string $content): array
+    {
+        preg_match_all('/^([A-Z0-9_]+)=(.+)$/m', $content, $m);
+
+        return array_combine($m[1], $m[2]);
+    }
+
     public function testLeastPrivilegeAndSafeTriggers(): void
     {
         self::assertSame(['contents' => 'read'], self::$workflow['permissions']);

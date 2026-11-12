@@ -52,7 +52,10 @@ final class ProductionComposeTest extends TestCase
             self::assertSame('json-file', $service['logging']['driver'] ?? null, $name);
             self::assertNotEmpty($service['logging']['options']['max-size'] ?? null, $name . ': bounded logs');
             self::assertNotEmpty($service['logging']['options']['max-file'] ?? null, $name . ': bounded logs');
-            self::assertSame($name === 'ops' ? 'no' : 'unless-stopped', $service['restart'] ?? null, $name);
+            // Phase 5C: the Docker daemon never starts the stack by itself
+            // (digital-library.service is the only boot path, after the
+            // storage preflight; PersistentStorageTest).
+            self::assertSame('no', $service['restart'] ?? null, $name);
             if ($name !== 'ops') {
                 self::assertSame('CMD', $service['healthcheck']['test'][0] ?? null, $name . ': health check without a shell');
             }
@@ -161,7 +164,8 @@ final class ProductionComposeTest extends TestCase
         self::assertSame(['db_root_password', 'db_password', 'db_migration_password'], $services['db']['secrets']);
         self::assertArrayNotHasKey('secrets', $services['nginx']);
         foreach (self::$compose['secrets'] as $name => $secret) {
-            self::assertSame('./secrets/' . $name, $secret['file']);
+            // Phase 5C: in the SSD data root, outside the working tree; no default.
+            self::assertMatchesRegularExpression('/^\$\{DLA_DATA_ROOT:\?[^}]+\}\/secrets\/' . preg_quote($name, '/') . '$/', $secret['file']);
         }
 
         self::assertSame('web', $services['php']['environment']['APP_ROLE']);
@@ -245,9 +249,8 @@ final class ProductionComposeTest extends TestCase
     {
         $test = self::services()['db']['healthcheck']['test'];
         self::assertSame(['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '--silent'], $test);
-        self::assertSame(['db-data:/var/lib/mysql', './docker/mysql/init:/docker-entrypoint-initdb.d:ro', './docker/mysql/my.cnf:/etc/mysql/conf.d/app.cnf:ro'], self::services()['db']['volumes']);
-        self::assertSame(['app-storage:/var/www/html/storage'], self::services()['php']['volumes'], 'The web container cannot read backups');
-        self::assertSame(['app-storage:/var/www/html/storage', 'app-backups:/var/www/html/storage/backups'], self::services()['ops']['volumes']);
+        // Mounts (persistent storage): PersistentStorageTest.
+        self::assertSame(['./docker/mysql/db-guard.sh:/usr/local/bin/dla-db-guard:ro', './docker/mysql/init:/docker-entrypoint-initdb.d:ro', './docker/mysql/my.cnf:/etc/mysql/conf.d/app.cnf:ro'], array_values(array_filter(self::services()['db']['volumes'], 'is_string')));
     }
 
     /**

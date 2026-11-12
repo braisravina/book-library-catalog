@@ -393,6 +393,29 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   configuration error. Migrations, backups and restores run in the one-off
   `ops` container. The MySQL root password exists only in the `db` container
   (`root@localhost`).
+- **Persistent storage (Phase 5C, split layout):**
+  - MySQL data (`999:999`, 0700, db only) and the secrets are on the
+    system SSD in `/opt/digital-library-data`, outside the deployed working
+    tree `/opt/digital-library` (code only, from the bare repository; no
+    `.git` inside), so outside Git and every build context; not writable
+    by the deploying user; checked by the preflight, which also refuses
+    data or `.git` in the working tree.
+  - The preflight runs as root at boot, so systemd runs a root-owned
+    installed copy (`/usr/local/sbin/digital-library-preflight`), never
+    the user-writable working tree's; a checkout cannot change it.
+    `docker compose` still reads the working tree as root, so it must stay
+    writable by the deploying administrator only (DEPLOYMENT.md 3.4).
+  - Covers, backups (ops only) and application storage are on the storage
+    HDD under `/mnt/bravina-shared/digital-library`.
+  - All are bind mounts with `create_host_path: false`. There are no named
+    volumes, and `/mnt/dockerdata` is never used.
+  - A database guard in the db container refuses to initialise a new,
+    empty database without an explicit first-deployment authorisation.
+  - A read-only preflight verifies the HDD UUID and mountpoint, both
+    layouts, owners and modes, and the database state. Restart policies are `"no"`, so the Docker daemon never
+  starts the stack by itself. A dedicated `digital-library.service` (not a
+  change to `docker.service`) is the only boot path and runs the preflight
+  first (docs/DEPLOYMENT.md, sections 3.4 and 3.5).
 - **Fail-closed start-up:** the PHP container runs `config:check` before
   PHP-FPM; the nginx container refuses to start without an explicit,
   placeholder-free client IP policy acknowledged by `DLA_TRUSTED_PROXY`.
@@ -527,7 +550,7 @@ done on the production host yet.
       `APP_DEBUG=false`, `APP_URL=https://library.bravina.co.uk`,
       `SESSION_SECURE_COOKIE=true`, `SECURITY_HSTS=true`,
       `INVITATION_LINK_FORMAT=fragment`
-- [ ] Unique random secrets in `./secrets/` with the owners and modes of
+- [ ] Unique random secrets in `/opt/digital-library-data/secrets/` with the owners and modes of
       DEPLOYMENT.md section 2, copies kept in your password manager
       (OPERATIONS.md, "Secrets to preserve")
 - [ ] `config:check --strict` passes in the `php` (`APP_ROLE=web`) and `ops`
@@ -555,6 +578,28 @@ done on the production host yet.
 - [ ] If query-format invitation links are used: Cloudflare and cloudflared
       (log level info or lower) verified not to retain `/invite?token=` URLs;
       nginx error log access and retention restricted
+
+**Persistent storage**
+- [ ] SSD and HDD directories initialised as in DEPLOYMENT.md 3.2; HDD
+      mountpoint still `root:root` 0755; no `chmod 777` or recursive change;
+      `books/` not created
+- [ ] Code deployed only by `git --git-dir=/home/brais/git/digital-library.git
+      --work-tree=/opt/digital-library checkout -f main` as the deploying
+      user, never a clone or `git clean -x` there (DEPLOYMENT.md 3.2, 4)
+- [ ] Secrets in `/opt/digital-library-data/secrets` (DEPLOYMENT.md section 2)
+- [ ] Preflight installed root-owned at `/usr/local/sbin/digital-library-preflight`
+      from the reviewed release, reinstalled after every reviewed change
+- [ ] First deployment done with the authorisation file, which was removed
+      afterwards; `/usr/local/sbin/digital-library-preflight --env-file
+      /opt/digital-library/.env.production --existing-installation` passes
+- [ ] `digital-library.service` installed (working tree `/opt/digital-library`) and
+      enabled; every container shows restart policy `no`; immutable
+      mountpoint decided (DEPLOYMENT.md 3.4)
+- [ ] Fail-closed drill done once: with the disk unmounted,
+      `systemctl start digital-library` fails and nothing is created under
+      `/mnt/bravina-shared`
+- [ ] External `/health` monitoring in place (crashed containers are not
+      restarted automatically; DEPLOYMENT.md 3.4)
 
 **Images, stack and CI**
 - [ ] CI executed and green on GitHub (all four jobs, including

@@ -297,7 +297,9 @@ Production deployment to the Bravina Docker infrastructure is **not** done yet.
 The production stack is prepared in `docker-compose.prod.yml` (unprivileged,
 read-only containers, private networks, only nginx published, on
 `127.0.0.1` for the existing Cloudflare Tunnel's host cloudflared, file-based
-secrets, separate web/ops roles, pinned images, health checks). Follow the
+secrets, separate web/ops roles, pinned images, health checks, persistent
+data in host directories on the dedicated storage disk that fail closed
+when the disk is missing). Follow the
 operator runbook **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**; the design is
 in [ARCHITECTURE.md › Deployment](ARCHITECTURE.md#deployment) and the
 go-live checklist in [SECURITY.md](SECURITY.md#production-deployment-checklist).
@@ -326,6 +328,17 @@ These must be resolved and verified before any deployment:
 5. **Proxy logging of invitation URLs** must be checked on the real
    Cloudflare/cloudflared setup if query-format invitation links are
    used (the default production template uses fragment links).
+6. **The storage directories do not exist yet.** Initialise
+   `/opt/digital-library` (SSD: the working tree, checked out from the bare
+   repository `/home/brais/git/digital-library.git`, code only),
+   `/opt/digital-library-data` (SSD: MySQL data and secrets, outside the
+   working tree), the root-owned installed preflight, and
+   `/mnt/bravina-shared/digital-library` (HDD: covers, backups, storage)
+   once, do the explicit first deployment, run the read-only preflight,
+   and, after the first deployment, install and enable
+   `digital-library.service`, the only boot path (docs/DEPLOYMENT.md,
+   section 3).
+   Until the directories exist, the stack refuses to start (by design).
 
 ## Project layout
 

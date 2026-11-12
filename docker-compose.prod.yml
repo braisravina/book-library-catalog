@@ -10,10 +10,16 @@
 # refuses to start without the client IP policy. See docs/DEPLOYMENT.md,
 # section 0, and ARCHITECTURE.md, "Production ingress".
 #
-# On the Docker host, from the repository checkout:
+# On the Docker host, from the deployed working tree /opt/digital-library
+# (checked out from the bare repository; never a clone with .git inside):
 #   cp .env.production.example .env.production   # review; never commit it
-#   (create ./secrets/*; see ARCHITECTURE.md "Production secrets")
+#   (create the data directories, secrets and the installed preflight once:
+#   docs/DEPLOYMENT.md, sections 2 and 3)
+#   sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --existing-installation   # read-only (first deployment: section 6)
+#   (after the first deployment: enable digital-library.service, the only
+#   boot path; DEPLOYMENT.md 3.4)
 #   docker compose -f docker-compose.prod.yml --env-file .env.production build
+#   (first deployment only: authorise the new, empty database; section 6)
 #   docker compose -f docker-compose.prod.yml --env-file .env.production up -d db
 #   docker compose -f docker-compose.prod.yml --env-file .env.production run --rm ops php bin/console migrate
 #   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
@@ -89,7 +95,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    restart: unless-stopped
+    # Never started by the Docker daemon itself (not even after a reboot or
+    # an unclean shutdown): only digital-library.service starts the stack,
+    # after the storage preflight (docs/DEPLOYMENT.md, section 3.4).
+    restart: "no"
     logging:
       driver: json-file
       options:
@@ -125,7 +134,18 @@ services:
     secrets:
       - db_password
     volumes:
-      - app-storage:/var/www/html/storage
+      # Host directories on the storage disk (section "Persistent storage"
+      # below). Never backups or MySQL data in the web container.
+      - type: bind
+        source: ${DLA_STORAGE_ROOT:?set DLA_STORAGE_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/storage
+        target: /var/www/html/storage
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DLA_STORAGE_ROOT:?set DLA_STORAGE_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/covers
+        target: /var/www/html/storage/covers
+        bind:
+          create_host_path: false
     networks:
       - frontend
       - backend
@@ -143,7 +163,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    restart: unless-stopped
+    # Never started by the Docker daemon itself (not even after a reboot or
+    # an unclean shutdown): only digital-library.service starts the stack,
+    # after the storage preflight (docs/DEPLOYMENT.md, section 3.4).
+    restart: "no"
     logging:
       driver: json-file
       options:
@@ -175,8 +198,21 @@ services:
       - db_password
       - db_migration_password
     volumes:
-      - app-storage:/var/www/html/storage
-      - app-backups:/var/www/html/storage/backups
+      - type: bind
+        source: ${DLA_STORAGE_ROOT:?set DLA_STORAGE_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/storage
+        target: /var/www/html/storage
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DLA_STORAGE_ROOT:?set DLA_STORAGE_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/covers
+        target: /var/www/html/storage/covers
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DLA_STORAGE_ROOT:?set DLA_STORAGE_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/backups
+        target: /var/www/html/storage/backups
+        bind:
+          create_host_path: false
     networks:
       - backend
     depends_on:
@@ -209,8 +245,31 @@ services:
       - db_root_password
       - db_password
       - db_migration_password
+    # The image's entrypoint runs only after docker/mysql/db-guard.sh: with no
+    # database in /var/lib/mysql it refuses to initialise a new, empty one
+    # unless the owner has authorised a first deployment (an
+    # allow-empty-init file in <data>/mysql-init-guard; section 3).
+    entrypoint:
+      - /usr/local/bin/dla-db-guard
+    command:
+      - mysqld
     volumes:
-      - db-data:/var/lib/mysql
+      # MySQL data on the system SSD, in the data root outside the working
+      # tree, so outside Git and every build context. Never a named volume,
+      # never created on demand: a missing directory stops db instead of
+      # starting an empty database.
+      - type: bind
+        source: ${DLA_DATA_ROOT:?set DLA_DATA_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/mysql
+        target: /var/lib/mysql
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DLA_DATA_ROOT:?set DLA_DATA_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/mysql-init-guard
+        target: /run/dla-db-init
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./docker/mysql/db-guard.sh:/usr/local/bin/dla-db-guard:ro
       - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
       - ./docker/mysql/my.cnf:/etc/mysql/conf.d/app.cnf:ro
     networks:
@@ -231,7 +290,10 @@ services:
       retries: 30
       start_period: 60s
     stop_grace_period: 60s
-    restart: unless-stopped
+    # Never started by the Docker daemon itself (not even after a reboot or
+    # an unclean shutdown): only digital-library.service starts the stack,
+    # after the storage preflight (docs/DEPLOYMENT.md, section 3.4).
+    restart: "no"
     logging:
       driver: json-file
       options:
@@ -261,21 +323,41 @@ networks:
   egress:
     driver: bridge
 
-volumes:
-  db-data:
-  # storage/ (covers, tmp, cache, logs, maintenance flag): shared by php and
-  # ops. Created from the image on first use: owned by www-data (uid 82), 0750.
-  app-storage:
-  # storage/backups: ops only. Copy archives off the host (OPERATIONS.md).
-  app-backups:
+# Persistent storage (Phase 5C, split layout): host directories, never
+# named volumes, never /mnt/dockerdata. Neither root has a default (Compose
+# refuses to run until both are set; the template sets the owner-confirmed
+# paths). Every source must already exist: "create_host_path: false" makes
+# Compose refuse to create a missing one, and Docker refuses to start a
+# container whose source is missing.
+#   System SSD, code: /opt/digital-library, the deployed working tree of
+#   this repository (the Compose project directory and build context; Git
+#   objects in the bare repository /home/brais/git/digital-library.git).
+#   No production data there.
+#   System SSD, data: DLA_DATA_ROOT (/opt/digital-library-data, root:root
+#   0755), outside the working tree:
+#     mysql/     999:999 0700  db only (/var/lib/mysql)
+#     secrets/   root:root 0700; files as in ARCHITECTURE.md "Production secrets"
+#     mysql-init-guard/  root:root 0755, db only, read-only: holds
+#                allow-empty-init only during a first deployment
+#   Storage HDD, DLA_STORAGE_ROOT (/mnt/bravina-shared/digital-library,
+#   ext4 UUID ad62670f-861d-47a4-a68d-967272d27866):
+#     storage/    82:82 0750  php, ops (tmp, cache, logs, maintenance flag)
+#     covers/     82:82 0750  php, ops (storage/covers)
+#     backups/    82:82 0700  ops only (storage/backups)
+#     books/      reserved (future PDF/EPUB); not created, not mounted
+# Restart policies are "no": after a reboot the Docker daemon starts none of
+# these containers; digital-library.service (systemd, not a change to
+# docker.service) starts them only after the read-only preflight has
+# verified both disks, so no container can bypass it. Owners come from the
+# images (mysql 999, www-data 82). Initialisation, preflight and the boot
+# unit: docs/DEPLOYMENT.md, section 3.
 
-# Docker secrets read from files on the host (never committed; .gitignore
-# and .dockerignore exclude secrets/). Ownership and modes: ARCHITECTURE.md
-# "Production secrets".
+# Docker secrets read from files in the data root on the SSD, outside the
+# working tree (never committed, never in a build context). Ownership and modes: ARCHITECTURE.md "Production secrets".
 secrets:
   db_root_password:
-    file: ./secrets/db_root_password
+    file: ${DLA_DATA_ROOT:?set DLA_DATA_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/secrets/db_root_password
   db_password:
-    file: ./secrets/db_password
+    file: ${DLA_DATA_ROOT:?set DLA_DATA_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/secrets/db_password
   db_migration_password:
-    file: ./secrets/db_migration_password
+    file: ${DLA_DATA_ROOT:?set DLA_DATA_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/secrets/db_migration_password

@@ -55,9 +55,10 @@ COPY --chown=root:root templates ./templates
 COPY --from=vendor --chown=root:root /app/vendor ./vendor
 COPY docker/php/entrypoint-prod.sh /usr/local/bin/entrypoint-prod.sh
 # Code is owned by root and read-only to the FPM user; only storage is
-# writable. storage/ and storage/backups are volumes in production
-# (docker-compose.prod.yml): Docker copies this ownership (www-data, 0750)
-# into a new, empty named volume on first use.
+# writable. In production storage/, storage/covers and storage/backups are
+# host directories on the storage disk (docker-compose.prod.yml), created by
+# the owner with the same owner (www-data, uid/gid 82); these image
+# directories are then hidden by the mounts.
 RUN set -eux; \
     chmod 0755 /usr/local/bin/entrypoint-prod.sh; \
     chmod -R go-w /var/www/html; \
