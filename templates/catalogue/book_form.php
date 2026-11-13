@@ -4,7 +4,8 @@
  * @var \DigitalLibrary\Catalogue\Input\WorkInput $work  @var \DigitalLibrary\Catalogue\Input\EditionInput $edition
  * @var array<string, list<string>> $errors  @var list<array<string, mixed>> $title_matches
  * @var bool $add_copy  @var \DigitalLibrary\Catalogue\Input\CopyInput|null $copy  @var bool $can_add_copy
- * @var list<array<string, mixed>> $location_tree
+ * @var list<array<string, mixed>> $location_tree  @var array<string, mixed>|null $lookup
+ * @var list<array<string, mixed>> $similar_works  @var string|null $isbn13
  */
 ?>
 <section class="form-card form-card-wide">
@@ -13,6 +14,7 @@
         <div class="alert alert-error" role="alert"><?= $view->t('validation.summary') ?></div>
     <?php endif; ?>
     <?php if ($lookup !== null): ?>
+        <?php $throttled = ($lookup['throttled'] ?? []) !== []; ?>
         <?php if ($lookup['found']): ?>
             <div class="alert alert-info" role="status">
                 <?php if ($lookup['sources'] !== []): ?>
@@ -21,12 +23,23 @@
                     <?= $view->t('metadata.found_cached') ?>
                 <?php endif; ?>
                 <?= $view->t('metadata.review') ?>
+                <?php if ($throttled): ?>
+                    <?= $view->t('metadata.throttled') ?>
+                <?php elseif ($lookup['failures'] !== []): ?>
+                    <?= $view->t('metadata.partial') ?>
+                <?php endif; ?>
             </div>
         <?php elseif ($lookup['failures'] !== []): ?>
-            <div class="alert alert-info" role="status"><?= $view->t('metadata.unavailable') ?></div>
+            <div class="alert alert-info" role="status"><?= $view->t($throttled ? 'metadata.unavailable_throttled' : 'metadata.unavailable') ?></div>
         <?php else: ?>
             <div class="alert alert-info" role="status"><?= $view->t('metadata.not_found') ?></div>
         <?php endif; ?>
+    <?php endif; ?>
+    <?php if (($similar_works ?? []) !== [] && ($isbn13 ?? null) !== null): ?>
+        <?= $view->partial('catalogue/_similar_works', ['works' => $similar_works, 'isbn13' => $isbn13]) ?>
+    <?php endif; ?>
+    <?php if (($lookup['review'] ?? null) !== null): ?>
+        <?= $view->partial('catalogue/_lookup_review', ['review' => $lookup['review']]) ?>
     <?php endif; ?>
     <?php if ($title_matches !== []): ?>
         <div class="alert alert-info" role="alert">

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Catalogue\Repository;
 
+use DigitalLibrary\Database\Params;
+
 final class WorkRepository extends Repository
 {
     public const FIELDS = ['title', 'subtitle', 'original_title', 'original_language', 'first_published_year', 'description'];
@@ -47,6 +49,69 @@ final class WorkRepository extends Repository
              WHERE id = :id AND row_version = :expected',
             self::only($data) + ['updated_by' => $userId, 'id' => $id, 'expected' => $expectedVersion],
         )->rowCount() === 1;
+    }
+
+    /**
+     * Works that may be the same book as looked-up metadata, for the user to
+     * consider adding a new edition to. Matches: the same title or original
+     * title (ignoring case and accents: column collation), also without a
+     * subtitle part, or a title containing it by one of the same authors.
+     * Suggestions only: nothing is ever merged automatically.
+     *
+     * @param list<string> $authorNames
+     *
+     * @return list<array{id: int, title: string, subtitle: string, authors: string, edition_count: int, author_match: bool}>
+     */
+    public function similar(string $title, array $authorNames, int $limit = 5): array
+    {
+        $titles = self::titleVariants($title);
+        if ($titles === []) {
+            return [];
+        }
+        $names = array_slice(array_values(array_unique(array_filter(array_map(
+            static fn (string $n): string => mb_substr(trim($n), 0, 255),
+            $authorNames,
+        ), static fn (string $n): bool => $n !== ''))), 0, 10);
+
+        $params = new Params();
+        $titleMatch = fn (): string => '(w.title IN (' . $params->in($titles) . ') OR w.original_title IN (' . $params->in($titles) . '))';
+        $authorMatch = fn (): string => $names === []
+            ? '0'
+            : 'EXISTS (SELECT 1 FROM work_authors wa JOIN authors a ON a.id = wa.author_id WHERE wa.work_id = w.id AND a.name IN (' . $params->in($names) . '))';
+        $sql = 'SELECT w.id, w.title, w.subtitle, ' . $titleMatch() . ' AS title_match, ' . $authorMatch() . ' AS author_match,
+                       (SELECT COUNT(*) FROM editions e WHERE e.work_id = w.id) AS edition_count,
+                       (SELECT GROUP_CONCAT(a.name ORDER BY wa.position, a.sort_name SEPARATOR \'; \')
+                          FROM work_authors wa JOIN authors a ON a.id = wa.author_id WHERE wa.work_id = w.id) AS author_names
+                FROM works w
+                WHERE ' . $titleMatch() . ' OR (' . $authorMatch() . ' AND w.title LIKE ' . $params->add(Params::likeContains($titles[count($titles) - 1])) . ')
+                ORDER BY title_match DESC, author_match DESC, w.id
+                LIMIT ' . $params->add(max(1, min(20, $limit)));
+
+        return array_map(static fn (array $r): array => [
+            'id' => (int) $r['id'],
+            'title' => (string) $r['title'],
+            'subtitle' => (string) ($r['subtitle'] ?? ''),
+            'authors' => (string) ($r['author_names'] ?? ''),
+            'edition_count' => (int) $r['edition_count'],
+            'author_match' => (bool) $r['author_match'],
+        ], $this->many($sql, $params->all()));
+    }
+
+    /**
+     * The title, and the title without a subtitle part ("Title: sub",
+     * "Title (series)", "Title - sub") when that differs. The shortest is last.
+     *
+     * @return list<string>
+     */
+    public static function titleVariants(string $title): array
+    {
+        $title = mb_substr(trim((string) preg_replace('/\s+/u', ' ', $title)), 0, 500);
+        if ($title === '') {
+            return [];
+        }
+        $base = trim(preg_split('/\s*[:(\[;]|\s+[-\x{2013}\x{2014}]\s+|\.\s/u', $title, 2)[0] ?? '');
+
+        return mb_strlen($base) >= 2 && $base !== $title ? [$title, $base] : [$title];
     }
 
     /**

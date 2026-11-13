@@ -34,6 +34,37 @@ final class Isbn
     }
 
     /**
+     * Why $input is not a valid ISBN, as a translation key, or null when it
+     * is valid. public/assets/js/app.js applies the same rules in the browser
+     * (keep both in step); the server is authoritative.
+     *
+     * @return array{string, array<string, int>}|null key and its parameters
+     */
+    public static function problem(string $input): ?array
+    {
+        $value = self::normalize($input);
+        if ($value === '') {
+            return ['validation.isbn_required', []];
+        }
+        // Digits only, except an X as the check digit of an ISBN-10.
+        if (!preg_match('/^\d+$/', $value) && !preg_match('/^\d{9}X$/', $value)) {
+            return ['validation.isbn_characters', []];
+        }
+        $length = strlen($value);
+        if ($length !== 10 && $length !== 13) {
+            return ['validation.isbn_length', ['count' => $length]];
+        }
+        if ($length === 13 && !preg_match('/^97[89]/', $value)) {
+            return ['validation.isbn_prefix', []];
+        }
+        if ($length === 10 ? !self::isValidIsbn10($value) : !self::isValidIsbn13($value)) {
+            return ['validation.isbn_checksum', []];
+        }
+
+        return null;
+    }
+
+    /**
      * Removes hyphens, spaces and an "ISBN" prefix; upper-cases the X check digit.
      */
     public static function normalize(string $input): string

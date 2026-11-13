@@ -116,6 +116,17 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 - **Secrets:** `GOOGLE_BOOKS_API_KEY` is optional; supply it as
   `GOOGLE_BOOKS_API_KEY_FILE` in production. It's sent only to
   googleapis.com.
+- **Rate limits and server errors:** HTTP 429 and 500/502/503/504 pause
+  that provider (bounded backoff, `Retry-After` honoured within 5 s –
+  15 min), so a struggling provider is not hammered; no request is retried
+  or delayed inside a web request. The state files in `storage/cache` hold
+  only a failure count and a timestamp.
+- **Review panel and suggestions:** provider values, including conflicting
+  alternatives in `data-fill-value` attributes, are escaped like any other
+  output, and "Use this value" only copies text into a form field with
+  `value`/`textContent` (no HTML sinks). Existing-work suggestions are
+  links; nothing is merged. The `isbn` parameter of the new-edition form is
+  validated with `Isbn::tryParse()` and only reads the cache.
 - **Residual risk:** DNS for the allowlisted domains is trusted. Network
   egress filtering at the host or container level is a sensible extra layer.
 

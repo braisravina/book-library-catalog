@@ -69,4 +69,56 @@ final class IsbnTest extends TestCase
             self::assertSame($isbn10, Isbn::isbn13To10(Isbn::isbn10To13($isbn10)));
         }
     }
+
+    /**
+     * @return iterable<string, array{string, ?string, array<string, int>}>
+     */
+    public static function problems(): iterable
+    {
+        yield 'valid isbn-13' => ['978-0-306-40615-7', null, []];
+        yield 'valid isbn-10 with X' => ['84-376-0494-X', null, []];
+        yield 'valid with prefix' => ['ISBN: 0 306 40615 2', null, []];
+        yield 'empty' => ['  ', 'validation.isbn_required', []];
+        yield 'letters' => ['abcdefghij', 'validation.isbn_characters', []];
+        yield 'X in isbn-13' => ['978030640615X', 'validation.isbn_characters', []];
+        yield 'X not last' => ['03064X6152', 'validation.isbn_characters', []];
+        yield 'sql' => ["' OR 1=1 --", 'validation.isbn_characters', []];
+        yield 'too short' => ['12345', 'validation.isbn_length', ['count' => 5]];
+        yield 'eleven digits' => ['97803064061', 'validation.isbn_length', ['count' => 11]];
+        yield 'too long' => ['97803064061570', 'validation.isbn_length', ['count' => 14]];
+        yield 'wrong prefix' => ['9770306406157', 'validation.isbn_prefix', []];
+        yield 'bad isbn-13 checksum' => ['9780306406158', 'validation.isbn_checksum', []];
+        yield 'bad isbn-10 checksum' => ['0306406153', 'validation.isbn_checksum', []];
+    }
+
+    /**
+     * @param array<string, int> $params
+     */
+    #[DataProvider('problems')]
+    public function testProblemExplainsWhyAnIsbnIsInvalid(string $input, ?string $key, array $params): void
+    {
+        self::assertSame($key === null ? null : [$key, $params], Isbn::problem($input));
+    }
+
+    public function testProblemAgreesWithTryParse(): void
+    {
+        $samples = ['0306406152', '0306406153', '9780306406157', '9790306406156', '9770306406157', '843760494X', '843760494x', 'X', '978-84-376-0494-7', ''];
+        for ($i = 0; $i < 300; $i++) {
+            $samples[] = (string) random_int(0, 9) . substr(str_shuffle(str_repeat('0123456789', 3)), 0, random_int(8, 13));
+        }
+        foreach ($samples as $sample) {
+            self::assertSame(Isbn::tryParse($sample) === null, Isbn::problem($sample) !== null, $sample);
+        }
+    }
+
+    public function testProblemMessagesExistInEveryLanguage(): void
+    {
+        foreach (['en', 'es', 'gl'] as $locale) {
+            $strings = require dirname(__DIR__, 3) . '/lang/' . $locale . '.php';
+            foreach (['isbn_required', 'isbn_characters', 'isbn_length', 'isbn_prefix', 'isbn_checksum'] as $key) {
+                self::assertIsString($strings['validation'][$key] ?? null, $locale . ': ' . $key);
+            }
+            self::assertStringContainsString(':count', $strings['validation']['isbn_length']);
+        }
+    }
 }

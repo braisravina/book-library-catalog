@@ -90,6 +90,18 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
   the server downloads it, then validates and re-encodes it like an upload.
   Failures fall back to manual entry. Set `METADATA_PROVIDERS=none` to turn
   lookups off.
+- **ISBN-assisted entry.** The ISBN step checks the number as it is typed
+  and explains what is wrong (characters, length, 978/979 prefix or check
+  digit); the server applies the same rules. Nothing is looked up until
+  **Look up book** is pressed; an accessible status shows progress, and
+  **Enter details manually** keeps the ISBN but skips the lookup. The
+  review panel shows which provider supplied each value, which fields no
+  provider supplied, and values the providers disagree on ("Use this value"
+  copies one into the still-editable form). Works with a matching title or
+  author are suggested with **Add as a new edition**; nothing is ever merged
+  automatically. A provider answering HTTP 429 or a temporary 5xx is paused
+  with a bounded backoff (honouring `Retry-After`) while the other provider
+  and manual entry keep working.
 
 ### Library management (Phase 4A)
 
@@ -221,7 +233,12 @@ The database has no published port. Only the `php` service can reach it.
   - metadata parsing, cleaning and merging;
   - the full lookup flow against an offline HTTP fake: pre-fill, caching,
     negative caching, provider failure, hostile payloads, cover import and
-    rejected cover bytes.
+    rejected cover bytes;
+  - ISBN-assisted entry: specific ISBN messages (server rules and the
+    browser copy kept in step), manual entry, the review panel (sources,
+    conflicts, missing fields, escaping), existing-work suggestions and the
+    pre-filled new edition, per-provider backoff on 429/5xx and recovery,
+    translations, and static checks of the CSP-safe script and phone CSS.
   Tests never touch the network.
 - **Phase 4A tests** cover:
   - loans: lending, return, history, duplicate active loans (service and

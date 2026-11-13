@@ -8,7 +8,7 @@
 $titleFields = $view->partial('partials/input', ['name' => 'edition_title', 'label' => 'fields.edition_title', 'value' => $combined && $edition->title === ($work_title ?? null) ? '' : $edition->title, 'errors' => $errors, 'required' => !$combined, 'maxlength' => 500, 'hint' => $combined ? 'catalogue.edition.title_hint' : null])
     . $view->partial('partials/input', ['name' => 'edition_subtitle', 'label' => 'fields.edition_subtitle', 'value' => $combined && $edition->subtitle === ($work_subtitle ?? null) ? '' : $edition->subtitle, 'errors' => $errors, 'maxlength' => 500]);
 ?>
-<?= $view->partial('partials/input', ['name' => 'isbn', 'label' => 'fields.isbn', 'value' => $edition->isbn, 'errors' => $errors, 'inputmode' => 'numeric', 'maxlength' => 32, 'autocomplete' => 'off', 'hint' => 'catalogue.edition.isbn_hint']) ?>
+<?= $view->partial('partials/input', ['name' => 'isbn', 'label' => 'fields.isbn', 'value' => $edition->isbn, 'errors' => $errors, 'maxlength' => 32, 'autocomplete' => 'off', 'hint' => 'catalogue.edition.isbn_hint']) ?>
 <?php if ($combined): ?>
     <details class="subsection"<?= isset($errors['edition_title']) || isset($errors['edition_subtitle']) ? ' open' : '' ?>>
         <summary><?= $view->t('catalogue.edition.title_differs') ?></summary>

@@ -292,6 +292,7 @@ database does not survive a lost disk, host or volume. After each backup:
 | `TEMP_PATH` (`storage/tmp`) | `www-data` | work directories `0700`; `operations.lock` `0600` |
 | maintenance flag and restore marker | `www-data` | `0640` |
 | restored cover files | `www-data` | `0640`; bucket directories `0750` |
+| metadata provider backoff (`storage/cache/metadata-backoff-<provider>.json`) | `www-data` | `0600`; holds only a failure count and a timestamp. Safe to delete (resets the backoff); not part of backups |
 
 Backups never live under `public/` (refused by the code and by
 `config:check`) and are never served: nginx serves `public/assets` only, and

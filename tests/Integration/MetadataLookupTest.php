@@ -104,10 +104,23 @@ final class MetadataLookupTest extends IntegrationTestCase
 
         $response = $this->request($browser, 'GET', '/books/new?isbn=' . self::ISBN);
         self::assertSame(200, $response->status());
-        self::assertStringContainsString('The online lookup is unavailable right now.', $response->body());
+        // Google Books' 429 puts it into backoff, so the message says "busy".
+        self::assertStringContainsString('The online sources are busy right now.', $response->body());
         self::assertStringContainsString('value="' . self::ISBN . '"', $response->body());
         self::assertStringNotContainsString('name="metadata_record_id"', $response->body());
         self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM metadata_records'), 'Failures are not cached');
+    }
+
+    public function testTransportFailuresWithoutRateLimitSayUnavailable(): void
+    {
+        self::$http->on(self::OL, new HttpException('timeout'));
+        self::$http->onPrefix(self::GB, new HttpException('connection refused'));
+        [$browser] = $this->signedIn('member@example.org');
+
+        $response = $this->request($browser, 'GET', '/books/new?isbn=' . self::ISBN);
+        self::assertSame(200, $response->status());
+        self::assertStringContainsString('The online lookup is unavailable right now.', $response->body());
+        self::assertSame([], self::$backoff->states, 'Transport errors do not start a backoff');
     }
 
     public function testNotFoundIsCachedBriefly(): void

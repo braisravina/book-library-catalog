@@ -40,7 +40,7 @@ final class GoogleBooksProvider implements MetadataProvider
     {
         $response = $this->http->get($this->url($isbn), self::MAX_BYTES);
         if ($response->status !== 200) {
-            throw new HttpException('Google Books returned HTTP ' . $response->status);
+            throw HttpException::forStatus('Google Books', $response);
         }
         $data = json_decode($response->body, true);
         if (!is_array($data)) {

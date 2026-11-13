@@ -19,6 +19,9 @@
     <?php elseif ($errors !== []): ?>
         <div class="alert alert-error" role="alert"><?= $view->t('validation.summary') ?></div>
     <?php endif; ?>
+    <?php if (!empty($prefilled)): ?>
+        <div class="alert alert-info" role="status"><?= $view->t('metadata.edition_prefilled') ?> <?= $view->t('metadata.review') ?></div>
+    <?php endif; ?>
     <form method="post" action="<?= $view->e($action) ?>" class="form" novalidate>
         <?= $view->csrfField() ?>
         <?php if (isset($edition['row_version'])): ?><input type="hidden" name="row_version" value="<?= (int) $edition['row_version'] ?>"><?php endif; ?>
