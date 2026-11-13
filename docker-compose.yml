@@ -46,11 +46,13 @@ services:
     restart: unless-stopped
 
   db:
-    # Same pinned image as production (docker-compose.prod.yml).
-    image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    # Same pinned image as production (docker-compose.prod.yml): MariaDB 11.4.
+    # (MySQL 8.4 stays covered by the CI regression job.)
+    image: mariadb:11.4.13-noble@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
-      MYSQL_DATABASE: ${DB_DATABASE:?set DB_DATABASE in .env}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      MARIADB_ROOT_HOST: localhost
+      MARIADB_DATABASE: ${DB_DATABASE:?set DB_DATABASE in .env}
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
       DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME}
@@ -61,12 +63,14 @@ services:
       DB_TEST_MIGRATION_USERNAME: ${DB_TEST_MIGRATION_USERNAME:-}
       DB_TEST_MIGRATION_PASSWORD: ${DB_TEST_MIGRATION_PASSWORD:-}
     volumes:
-      - db-data:/var/lib/mysql
+      # A new volume name for MariaDB: an existing "db-data" volume holds MySQL
+      # 8 files, which MariaDB must never open. The old volume is left alone.
+      - mariadb-data:/var/lib/mysql
       - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
       - ./docker/mysql/my.cnf:/etc/mysql/conf.d/app.cnf:ro
     # No published port: only the php service can reach the database.
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      test: ["CMD", "mariadb-admin", "ping", "-h", "127.0.0.1", "--silent"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -74,6 +78,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  db-data:
+  mariadb-data:
   covers-data:
   backups-data:

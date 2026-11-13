@@ -612,7 +612,7 @@ final class BackupRecoveryTest extends IntegrationTestCase
         $tar->addString('manifest.json', (string) json_encode([
             'format' => 'dla-backup', 'format_version' => 1, 'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
             'application' => ['schema_version' => 'x', 'migrations' => []],
-            'database' => ['file' => 'database.sql', 'tables' => (object) $tables],
+            'database' => ['file' => 'database.sql', 'server_version' => (string) $this->pdo()->query('SELECT VERSION()')->fetchColumn(), 'tables' => (object) $tables],
             'covers' => ['referenced' => 0, 'files' => 0, 'missing' => []],
             'files' => [['path' => 'database.sql', 'size' => strlen($text), 'sha256' => $hash]],
         ]));

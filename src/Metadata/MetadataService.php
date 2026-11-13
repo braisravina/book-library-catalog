@@ -157,11 +157,14 @@ final class MetadataService
     {
         $payload = $provider->fetch($isbn);
         $json = json_encode($payload ?? [self::NOT_FOUND => true], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        // Portable upsert (MariaDB and MySQL): no row alias ("VALUES ... AS
+        // fresh" is MySQL-only) and no deprecated VALUES() function; the new
+        // values are bound a second time under their own placeholder names.
         $this->pdo->prepare(
             'INSERT INTO metadata_records (provider, isbn_13, payload, fetched_by, fetched_at)
-             VALUES (:p, :i, :payload, :u, UTC_TIMESTAMP()) AS fresh
-             ON DUPLICATE KEY UPDATE payload = fresh.payload, fetched_by = fresh.fetched_by, fetched_at = fresh.fetched_at'
-        )->execute(['p' => $provider->name(), 'i' => $isbn->isbn13, 'payload' => $json, 'u' => $userId]);
+             VALUES (:p, :i, :payload, :u, UTC_TIMESTAMP())
+             ON DUPLICATE KEY UPDATE payload = :payload_update, fetched_by = :u_update, fetched_at = UTC_TIMESTAMP()'
+        )->execute(['p' => $provider->name(), 'i' => $isbn->isbn13, 'payload' => $json, 'u' => $userId, 'payload_update' => $json, 'u_update' => $userId]);
         $id = $this->pdo->prepare('SELECT id FROM metadata_records WHERE provider = :p AND isbn_13 = :i');
         $id->execute(['p' => $provider->name(), 'i' => $isbn->isbn13]);
 

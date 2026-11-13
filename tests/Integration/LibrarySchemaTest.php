@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Tests\Integration;
 
+use DigitalLibrary\Database\Engine;
 use DigitalLibrary\Security\Role;
 use PDO;
 use PDOException;
@@ -81,7 +82,7 @@ final class LibrarySchemaTest extends IntegrationTestCase
                 $insert($values);
                 self::fail("Accepted: {$label}");
             } catch (PDOException $e) {
-                self::assertContains($e->errorInfo[1], [3819, 1452], $label); // CHECK violated / FK violated
+                self::assertContains($e->errorInfo[1], [...Engine::CHECK_VIOLATION_ERRORS, 1452], $label); // CHECK violated / FK violated
             }
         }
         $insert("NULL, 'A', '2026-01-10', '2026-01-10', '2026-01-10'");

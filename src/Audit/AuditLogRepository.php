@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DigitalLibrary\Audit;
 
 use DigitalLibrary\Catalogue\Repository\Repository;
+use DigitalLibrary\Database\Engine;
 use DigitalLibrary\Database\Params;
 
 /**
@@ -15,7 +16,7 @@ use DigitalLibrary\Database\Params;
 final class AuditLogRepository extends Repository
 {
     public const PER_PAGE = 50;
-    /** Upper bound on statement time (MySQL optimizer hint), in milliseconds. */
+    /** Upper bound on statement time, in milliseconds (Database\Engine::boundedSelect: MariaDB and MySQL). */
     public const MAX_EXECUTION_MS = 5000;
 
     /**
@@ -55,16 +56,16 @@ final class AuditLogRepository extends Repository
         }
         $limit = $params->add(self::PER_PAGE + 1);
 
-        $stmt = $this->pdo->prepare(
-            'SELECT /*+ MAX_EXECUTION_TIME(' . self::MAX_EXECUTION_MS . ') */
-                    a.id, a.user_id, a.action, a.entity_type, a.entity_id, a.ip_address, a.created_at,
+        $stmt = $this->pdo->prepare(Engine::boundedSelect($this->pdo,
+            'SELECT a.id, a.user_id, a.action, a.entity_type, a.entity_id, a.ip_address, a.created_at,
                     u.display_name AS user_name
              FROM audit_log a
              LEFT JOIN users u ON u.id = a.user_id
              WHERE ' . implode(' AND ', $where) . '
              ORDER BY a.id DESC
-             LIMIT ' . $limit
-        );
+             LIMIT ' . $limit,
+            self::MAX_EXECUTION_MS,
+        ));
         $params->bind($stmt);
         $stmt->execute();
         $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
@@ -112,6 +113,6 @@ final class AuditLogRepository extends Repository
 
     public static function isTimeout(\PDOException $e): bool
     {
-        return in_array($e->errorInfo[1] ?? null, [3024, 1317], true); // max_execution_time exceeded / query interrupted
+        return Engine::isTimeout($e);
     }
 }

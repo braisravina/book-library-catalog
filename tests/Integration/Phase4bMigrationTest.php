@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Tests\Integration;
 
+use DigitalLibrary\Database\Engine;
 use DigitalLibrary\Database\Migrator;
 use PDO;
 use PDOException;
@@ -37,13 +38,17 @@ final class Phase4bMigrationTest extends IntegrationTestCase
         // Schema exactly as of Phase 4A.
         $phase4a = sys_get_temp_dir() . '/dla-phase4a-migrations-' . bin2hex(random_bytes(4));
         mkdir($phase4a);
-        foreach (glob(dirname(__DIR__, 2) . '/database/migrations/*.sql') as $file) {
-            if (basename($file, '.sql') < self::PHASE4B) {
-                copy($file, $phase4a . '/' . basename($file));
+        mkdir($phase4a . '/mariadb');
+        foreach (['', '/mariadb'] as $variant) {
+            foreach (glob(dirname(__DIR__, 2) . '/database/migrations' . $variant . '/*.sql') as $file) {
+                if (basename($file, '.sql') < self::PHASE4B) {
+                    copy($file, $phase4a . $variant . '/' . basename($file));
+                }
             }
         }
         (new Migrator($pdo, $phase4a))->migrate();
-        array_map('unlink', glob($phase4a . '/*.sql'));
+        array_map('unlink', array_merge(glob($phase4a . '/*.sql'), glob($phase4a . '/mariadb/*.sql')));
+        rmdir($phase4a . '/mariadb');
         rmdir($phase4a);
         self::assertSame(0, (int) $pdo->query("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invitations' AND COLUMN_NAME = 'open_email'")->fetchColumn());
 
@@ -79,11 +84,13 @@ final class Phase4bMigrationTest extends IntegrationTestCase
                 $this->pdo()->exec($sql);
                 self::fail('Accepted: ' . $label);
             } catch (PDOException $e) {
-                self::assertContains($e->errorInfo[1], [1062, 3819], $label);
+                self::assertContains($e->errorInfo[1], [1062, ...Engine::CHECK_VIOLATION_ERRORS], $label);
             }
         }
         $rules = $this->pdo()->query("SELECT CONSTRAINT_NAME, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'invitations' ORDER BY CONSTRAINT_NAME")->fetchAll(PDO::FETCH_KEY_PAIR);
-        self::assertSame(['fk_invitations_accepted_user' => 'SET NULL', 'fk_invitations_invited_by' => 'SET NULL', 'fk_invitations_replaced_by' => 'SET NULL', 'fk_invitations_revoked_by' => 'SET NULL', 'fk_invitations_role' => 'NO ACTION'], $rules);
+        // No ON DELETE clause: InnoDB's default, reported as NO ACTION by MySQL and RESTRICT by MariaDB (same behaviour).
+        $default = Engine::of($this->pdo()) === Engine::MARIADB ? 'RESTRICT' : 'NO ACTION';
+        self::assertSame(['fk_invitations_accepted_user' => 'SET NULL', 'fk_invitations_invited_by' => 'SET NULL', 'fk_invitations_replaced_by' => 'SET NULL', 'fk_invitations_revoked_by' => 'SET NULL', 'fk_invitations_role' => $default], $rules);
 
         // Re-running is a no-op and nothing is reported as modified.
         $migrator = new Migrator($pdo, dirname(__DIR__, 2) . '/database/migrations');

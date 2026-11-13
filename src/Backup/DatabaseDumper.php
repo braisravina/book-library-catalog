@@ -7,7 +7,7 @@ namespace DigitalLibrary\Backup;
 use PDO;
 
 /**
- * Logical MySQL dump written by PHP (no mysqldump binary needed in the
+ * Logical MariaDB/MySQL dump written by PHP (no dump binary needed in the
  * application image).
  *
  * Consistency: everything (table definitions, rows and the list of cover
@@ -15,7 +15,7 @@ use PDO;
  * started WITH CONSISTENT SNAPSHOT at REPEATABLE READ, so the dump is a
  * point-in-time image of the database without locking writers.
  *
- * File format (still valid input for the mysql client): a header line,
+ * File format (still valid input for the mariadb/mysql client): a header line,
  * then each statement preceded by "-- dla:statement <bytes>" so the
  * restorer can read statements exactly, without parsing SQL, and a final
  * "-- dla:end <count>" line.
@@ -49,7 +49,7 @@ final class DatabaseDumper
         $this->pdo->exec('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
         try {
             $version = (string) $this->pdo->query('SELECT VERSION()')->fetchColumn();
-            $this->write($out, self::HEADER . "\n-- MySQL " . preg_replace('/[^0-9A-Za-z.\-]/', '', $version) . ', created ' . gmdate('Y-m-d\TH:i:s\Z') . "\n");
+            $this->write($out, self::HEADER . "\n-- Server " . preg_replace('/[^0-9A-Za-z.\-]/', '', $version) . ', created ' . gmdate('Y-m-d\TH:i:s\Z') . "\n");
             $emit('SET NAMES utf8mb4;');
             $emit("SET time_zone = '+00:00';");
             $emit('SET FOREIGN_KEY_CHECKS = 0;');

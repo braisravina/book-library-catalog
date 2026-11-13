@@ -91,6 +91,45 @@ final class MigrationFilesTest extends TestCase
     }
 
     /**
+     * MariaDB overrides (database/migrations/mariadb/, used by the Migrator
+     * only on a server positively identified as MariaDB) replace a released
+     * migration of the same name with the smallest possible change: a "-- "
+     * comment header and exactly the documented replacements. Released
+     * overrides are frozen like released migrations.
+     */
+    public function testMariadbOverridesDifferOnlyByTheDocumentedChange(): void
+    {
+        $documented = [
+            '2026_10_13_155739_create_wishlist_items_table.sql' => [
+                'sha256' => '962ff21c936c8bad159c640ce2bf16b2b129d3b00979a587efa7107a67ba3b24',
+                // MariaDB error 1901: a stored generated column may not return a CHAR column.
+                'replace' => ["IF(status = 'wanted', isbn_13, NULL)" => "IF(status = 'wanted', RTRIM(isbn_13), NULL)"],
+            ],
+        ];
+        $released = self::migrations();
+        $overrides = [];
+        foreach (glob(dirname(__DIR__, 3) . '/database/migrations/mariadb/*') ?: [] as $file) {
+            $overrides[basename($file)] = (string) file_get_contents($file);
+        }
+        self::assertSame(array_keys($documented), array_keys($overrides), 'Every override is documented here');
+        foreach ($documented as $name => $rule) {
+            self::assertArrayHasKey($name, $released, $name . ': overrides a released migration of the same name');
+            $override = $overrides[$name];
+            self::assertSame($rule['sha256'], hash('sha256', $override), $name . ': a released override is frozen');
+            $expected = $released[$name];
+            foreach ($rule['replace'] as $from => $to) {
+                self::assertSame(1, substr_count($expected, $from), $name . ': ' . $from);
+                $expected = str_replace($from, $to, $expected);
+            }
+            self::assertStringEndsWith($expected, $override, $name . ': the released file with only the documented replacements');
+            $header = substr($override, 0, strlen($override) - strlen($expected));
+            self::assertMatchesRegularExpression('/\A(?:-- [^\n]*\n)+\z/', $header, $name . ': before it, only a "-- " header that explains the override');
+            self::assertStringContainsString('error 1901', $header);
+            self::assertCount(count(SqlSplitter::split($released[$name])), SqlSplitter::split($override), $name . ': same statements');
+        }
+    }
+
+    /**
      * Migrations are forward-only and additive: no destructive statements.
      */
     public function testMigrationsAreForwardOnlyAndNonDestructive(): void

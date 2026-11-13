@@ -186,7 +186,7 @@ final class CiWorkflowTest extends TestCase
         self::assertStringNotContainsString('pull_request_target', $code);
         self::assertStringNotContainsString('workflow_run', $code);
         self::assertDoesNotMatchRegularExpression('/\$\{\{\s*secrets\./', self::$source, 'No repository secrets are needed');
-        self::assertSame(['test', 'unit-php83', 'static', 'production-stack'], array_keys(self::jobs()));
+        self::assertSame(['test', 'test-mysql', 'unit-php83', 'static', 'production-stack'], array_keys(self::jobs()));
         foreach (self::jobs() as $name => $job) {
             self::assertArrayNotHasKey('permissions', $job, $name . ': no job widens the token');
             self::assertSame('ubuntu-24.04', $job['runs-on'], $name . ': pinned runner image');
@@ -208,7 +208,13 @@ final class CiWorkflowTest extends TestCase
             }
         }
         $compose = BlockYaml::parseFile(self::path('docker-compose.prod.yml'));
-        self::assertSame($compose['services']['db']['image'], self::jobs()['test']['services']['mysql']['image'], 'CI tests against the production MySQL image');
+        self::assertSame($compose['services']['db']['image'], self::jobs()['test']['services']['mariadb']['image'], 'CI tests against the production MariaDB image');
+        self::assertMatchesRegularExpression('/^mysql:8\.4\.\d+@sha256:[0-9a-f]{64}$/', self::jobs()['test-mysql']['services']['mysql']['image'], 'MySQL 8.4 regression job, pinned');
+        foreach (['test' => '11.4.*-MariaDB*', 'test-mysql' => '8.4.*'] as $job => $pattern) {
+            $runs = implode("\n", array_column(self::jobs()[$job]['steps'], 'run'));
+            self::assertStringContainsString('case "$version" in ' . $pattern . ') ;;', $runs, $job . ': the engine is confirmed before the suite runs');
+            self::assertStringContainsString('vendor/bin/phpunit --fail-on-skipped --fail-on-warning', $runs, $job . ': the full suite');
+        }
     }
 
     public function testShellBlocksParseAndNeverRelyOnNegatedCommands(): void
@@ -249,7 +255,7 @@ final class CiWorkflowTest extends TestCase
                 $versions[$job] = $step['with']['php-version'];
             }
         }
-        self::assertSame(['test' => '8.4', 'unit-php83' => '8.3'], $versions, 'PHP 8.4 runtime and 8.3 tooling compatibility (CLAUDE.md)');
+        self::assertSame(['test' => '8.4', 'test-mysql' => '8.4', 'unit-php83' => '8.3'], $versions, 'PHP 8.4 runtime and 8.3 tooling compatibility (CLAUDE.md)');
 
         // Every shell script in the repository is checked by shellcheck.
         $scripts = array_merge(glob(self::path('docker/*/*.sh')) ?: [], glob(self::path('docker/*/*/*.sh')) ?: []);

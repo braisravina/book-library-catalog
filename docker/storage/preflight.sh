@@ -15,12 +15,15 @@
 #   sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --first-deployment
 #   sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --existing-installation
 #
-#   --first-deployment       a NEW, EMPTY database is expected: the MySQL
+#   --first-deployment       a NEW, EMPTY database is expected: the database
 #                            directory must be empty and the owner must have
 #                            authorised initialisation (allow-empty-init).
-#   --existing-installation  an existing database is expected: mysql.ibd and
-#                            the application schema must be present, and no
-#                            initialisation authorisation may be left behind.
+#   --existing-installation  an existing MariaDB database is expected: the
+#                            system schema (mysql/), the completed-
+#                            initialisation marker (.dla-init-complete) and
+#                            the application schema must be present, no MySQL
+#                            8 files (mysql.ibd), and no initialisation
+#                            authorisation may be left behind.
 #
 # Checks:
 #   Storage HDD: mounted at exactly /mnt/bravina-shared with the exact
@@ -38,9 +41,9 @@
 #     and not symlinks.
 #   Data root /opt/digital-library-data (system SSD, outside the working
 #     tree and every build context): DLA_DATA_ROOT is exactly that; the
-#     MySQL, secrets and guard directories and the secret files have their
-#     owners and modes; the MySQL directory is not on the HDD and not under
-#     /mnt/dockerdata.
+#     database (mysql/), secrets and guard directories and the secret files
+#     have their owners and modes; the database directory is not on the HDD
+#     and not under /mnt/dockerdata.
 #   The database state of the chosen mode; free space on the HDD.
 #
 # It only reads (findmnt, stat, find, df, grep, cmp); it never creates,
@@ -289,7 +292,7 @@ for rel in "${TREE_USED[@]}"; do
     fi
 done
 
-# 6. The MySQL directory is on the system SSD: not on the HDD, not under
+# 6. The database directory is on the system SSD: not on the HDD, not under
 #    /mnt/dockerdata (it is outside the working tree by construction).
 on=$(findmnt --noheadings --raw --output TARGET --target "$MYSQL_DIR" 2>/dev/null || true)
 case "$on" in
@@ -312,11 +315,18 @@ if [ "$mode" = first ]; then
         *) fail "initialisation not authorised: create $INIT_AUTHORISATION as root (docs/DEPLOYMENT.md, section 6)" ;;
     esac
 else
-    if [ "$(stat -c '%F' -- "$MYSQL_DIR/mysql.ibd" 2>/dev/null || true)" = 'regular file' ]; then
-        ok "existing MySQL database (mysql.ibd present)"
-    else
-        fail "no MySQL database in $MYSQL_DIR (mysql.ibd): wrong or empty directory? Never start db here (section 3.5)"
+    if [ -n "$(stat -c '%F' -- "$MYSQL_DIR/mysql.ibd" 2>/dev/null || true)" ]; then
+        fail "$MYSQL_DIR holds MySQL 8 files (mysql.ibd): MariaDB cannot use them; not this installation's database (section 3.5)"
     fi
+    if [ "$(stat -c '%F' -- "$MYSQL_DIR/mysql" 2>/dev/null || true)" = directory ]; then
+        ok "existing MariaDB database (system schema mysql/ present)"
+    else
+        fail "no MariaDB database in $MYSQL_DIR (mysql/): wrong or empty directory? Never start db here (section 3.5)"
+    fi
+    case "$(stat -c '%F' -- "$MYSQL_DIR/.dla-init-complete" 2>/dev/null || true)" in
+        'regular empty file' | 'regular file') ok "database initialisation completed (.dla-init-complete present)" ;;
+        *) fail "$MYSQL_DIR/.dla-init-complete missing: the first initialisation did not finish (its accounts may be incomplete); the database guard will refuse it (section 3.5)" ;;
+    esac
     if [ -n "$db" ]; then
         if [ "$(stat -c '%F' -- "$MYSQL_DIR/$db" 2>/dev/null || true)" = directory ]; then
             ok "application schema '$db' present"

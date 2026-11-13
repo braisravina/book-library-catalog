@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Tests\Integration;
 
+use DigitalLibrary\Database\Engine;
 use DigitalLibrary\Export\CatalogueExport;
 use DigitalLibrary\Export\CsvWriter;
 use DigitalLibrary\Export\PersonalExport;
@@ -210,7 +211,10 @@ final class ExportTest extends IntegrationTestCase
     public function testLargeCataloguesStreamInBatchesWithBoundedMemory(): void
     {
         $count = CatalogueExport::BATCH * 5 + 37;
-        $this->pdo()->exec('SET SESSION cte_max_recursion_depth = 10000');
+        // The recursion limit variable differs: MariaDB max_recursive_iterations, MySQL cte_max_recursion_depth.
+        $this->pdo()->exec(Engine::of($this->pdo()) === Engine::MARIADB
+            ? 'SET SESSION max_recursive_iterations = 10000'
+            : 'SET SESSION cte_max_recursion_depth = 10000');
         $this->pdo()->exec("INSERT INTO works (title, description, created_by, created_at, updated_at)
             WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {$count})
             SELECT CONCAT('Bulk work ', i), REPEAT('x', 2000), {$this->aliceId}, UTC_TIMESTAMP(), UTC_TIMESTAMP() FROM n");

@@ -321,7 +321,9 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   token, secret, CSRF, API keys, session, cookie, authorization, hash) and
   escapes every value, including the pretty-printed JSON. Each query is
   bounded: at most 366 UTC days, indexed filters, keyset pagination and a
-  5-second `MAX_EXECUTION_TIME` hint. The viewer shows IP addresses and
+  5-second statement time limit (`Database\Engine::boundedSelect()`:
+  `SET STATEMENT max_statement_time` on MariaDB, which ignores MySQL's
+  `MAX_EXECUTION_TIME` hint; the hint on MySQL). The viewer shows IP addresses and
   browser strings to administrators; treat exports of these pages as
   personal data.
 - **Viewer limitations.**
@@ -388,8 +390,18 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 ### Infrastructure
 
 - **Least-privilege database accounts:** the web application has DML only;
-  migrations use a separate DDL-capable account. MySQL has no published port.
-  `local-infile` is off.
+  migrations use a separate DDL-capable account. MariaDB has no published port.
+  `local-infile` is off. The MariaDB image's `healthcheck` accounts
+  (`localhost`, `127.0.0.1`, `::1`) hold `USAGE` only; root exists only as
+  `root@localhost` (CI checks the account list and grants).
+- **Database start guard:** the db entrypoint refuses to initialise an
+  empty data directory without the owner's first-deployment authorisation,
+  and refuses a data directory whose initialisation did not finish (no
+  `.dla-init-complete`, written after every account and grant) or that
+  holds MySQL 8 files.
+- **Production CPU:** the database, PHP and nginx images run on the
+  x86-64 baseline (no SSE4.1/SSE4.2/POPCNT needed); see ARCHITECTURE.md,
+  "Production database". CI checks the built images on every run.
 - Nginx executes only the front controller. Dotfiles, source, `.env` and
   `vendor/` aren't reachable. `server_tokens` is off.
 - PHP: `expose_php=Off`, `display_errors=Off`, `allow_url_fopen=Off`. FPM
@@ -402,10 +414,10 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 - **Credential separation:** the web container (`APP_ROLE=web`) holds only
   the runtime database account; migration or root credentials there are a
   configuration error. Migrations, backups and restores run in the one-off
-  `ops` container. The MySQL root password exists only in the `db` container
-  (`root@localhost`).
+  `ops` container. The MariaDB root password exists only in the `db` container
+  (`root@localhost`; `MARIADB_ROOT_HOST=localhost`).
 - **Persistent storage (Phase 5C, split layout):**
-  - MySQL data (`999:999`, 0700, db only) and the secrets are on the
+  - MariaDB data (`999:999`, 0700, db only) and the secrets are on the
     system SSD in `/opt/digital-library-data`, outside the deployed working
     tree `/opt/digital-library` (code only, from the bare repository; no
     `.git` inside), so outside Git and every build context; not writable
@@ -536,7 +548,8 @@ erase `audit_log` rows. It cannot `TRUNCATE` or `DROP` the table: those need
 the `DROP` privilege, which it lacks. The application itself never updates
 or deletes audit rows.
 
-**Can MySQL enforce append-only?** Options evaluated against MySQL 8.4:
+**Can the database enforce append-only?** Options evaluated against MySQL 8.4
+(MariaDB 11.4 has the same grant model, so the conclusions hold):
 
 | Option | Assessment |
 |---|---|
@@ -633,5 +646,5 @@ done on the production host yet.
 
 **Open decisions**
 - [ ] Audit-log integrity decision implemented (see review above)
-- [ ] PHP-FPM worker count and MySQL memory settings measured and tuned
+- [ ] PHP-FPM worker count and MariaDB memory settings measured and tuned
       (DEPLOYMENT.md, "Resource planning")

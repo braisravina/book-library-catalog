@@ -3,7 +3,7 @@
 A private, self-hosted, multi-user web application for cataloguing and managing
 a personal collection of physical books. Intended domain: `library.bravina.co.uk`.
 
-- **Stack:** PHP 8.4 (PHP-FPM) · MySQL 8.4 · Nginx (Alpine) · Docker Compose ·
+- **Stack:** PHP 8.4 (PHP-FPM) · MariaDB 11.4 LTS (MySQL 8.4 also tested) · Nginx (Alpine) · Docker Compose ·
   HTML5/CSS3/vanilla JS. No framework. PDO with prepared statements, Argon2id.
 - **Languages:** English, Spanish (Español), Galician (Galego).
 - **Status:** Phases 1 (foundation), 2 (functional catalogue) and 3 (user
@@ -254,7 +254,7 @@ The database has no published port. Only the `php` service can reach it.
     ranges, keyset pagination, redaction and escaping of stored values;
   - migration verification: released migrations are frozen by checksum, all
     migrations are non-destructive, and the new tables, indexes, generated
-    columns, CHECK constraints and foreign-key actions exist on MySQL.
+    columns, CHECK constraints and foreign-key actions exist (on MariaDB and MySQL).
 - **Phase 4B tests** cover:
   - invitations: creation, hashing (no token stored anywhere), expiry, revocation, replacement, single use, concurrent redemption (two connections), role restrictions (application and database), rate limiting, administrator-only access, and the token-free redirect and headers;
   - exports: JSON structure and versioning, CSV quoting, BOM, no truncation and formula-injection protection, per-user isolation and IDOR attempts, administrator-only catalogue export and its exclusions, headers, and a large catalogue streamed in batches with bounded memory;
@@ -262,8 +262,15 @@ The database has no published port. Only the `php` service can reach it.
   - disaster recovery end to end (back up, lose every table and cover, restore, compare checksums and foreign keys), rollback from the safety backup after a failed restore, the incomplete-restore marker, role separation (`APP_ROLE`), operation locks including a killed holder, snapshot consistency under concurrent writes, vanished covers, full disks, literal-only dumps and foreign-key violations;
   - cleanup: dry runs, retention, symbolic-link safety, report-only orphaned covers, and backup retention that keeps the newest verified archive;
   - the Phase 4B migration applied to a database holding Phase 4A data.
-- **Integration tests** (`tests/Integration`) run against the MySQL database
-  named in `DB_TEST_DATABASE`, using the same least-privilege accounts as the
+- **Database engines** (`DatabaseEngineTest`, on MariaDB 11.4 and MySQL 8.4):
+  engine identification, one migration variant per engine with its own
+  checksum and refusal of the other engine's history, the wishlist's
+  generated ISBN (values, index, uniqueness, with and without
+  `PAD_CHAR_TO_FULL_LENGTH`), collation semantics, CHECK and JSON
+  validation, bounded statement time, and least-privilege accounts.
+  Backups from the other engine are refused before any change.
+- **Integration tests** (`tests/Integration`) run against the MariaDB (or
+  MySQL) database named in `DB_TEST_DATABASE`, using the same least-privilege accounts as the
   application. They rebuild the schema from the migrations and drive the full
   HTTP stack in-process. They're skipped automatically when no test database
   is configured.
@@ -281,9 +288,11 @@ docker compose exec php php -m | grep -i gd     # must print "gd"
 docker compose exec php vendor/bin/phpunit --filter CoverImageProcessorTest --fail-on-skipped
 ```
 
-The MySQL init script creates `DB_TEST_DATABASE` (default `library_test`) the
+The database init script creates `DB_TEST_DATABASE` (default `library_test`) the
 first time the data volume is initialised. If you added it later, run
-`docker compose down -v` to re-initialise.
+`docker compose down -v` to re-initialise. The development database moved to
+MariaDB in a new volume (`mariadb-data`); an old MySQL `db-data` volume is
+left untouched and is never opened by MariaDB.
 
 ## Configuration
 
@@ -348,7 +357,7 @@ These must be resolved and verified before any deployment:
 6. **The storage directories do not exist yet.** Initialise
    `/opt/digital-library` (SSD: the working tree, checked out from the bare
    repository `/home/brais/git/digital-library.git`, code only),
-   `/opt/digital-library-data` (SSD: MySQL data and secrets, outside the
+   `/opt/digital-library-data` (SSD: MariaDB data and secrets, outside the
    working tree), the root-owned installed preflight, and
    `/mnt/bravina-shared/digital-library` (HDD: covers, backups, storage)
    once, do the explicit first deployment, run the read-only preflight,
@@ -363,7 +372,7 @@ These must be resolved and verified before any deployment:
 bin/console              CLI: migrations, users, backups, restore, maintenance, cleanup
 config/routes.php        Route table and per-route middleware
 database/migrations/     Versioned SQL migrations (applied in filename order)
-docker/                  PHP-FPM image, Nginx vhost, MySQL init and config
+docker/                  PHP-FPM image, Nginx vhost, MariaDB init, guard and config
 docs/OPERATIONS.md       Backup, restore, disaster recovery, retention and scheduling
 lang/{en,es,gl}.php      Translation catalogues
 public/                  Web root: front controller and static assets only

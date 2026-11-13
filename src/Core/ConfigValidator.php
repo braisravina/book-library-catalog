@@ -95,9 +95,9 @@ final class ConfigValidator
         }
         if ($this->read($config, 'DB_ROOT_PASSWORD') !== null) {
             if ($this->role($config) !== null) {
-                $this->error('DB_ROOT_PASSWORD', 'must not be available to application containers (APP_ROLE is set); only the MySQL container needs it.');
+                $this->error('DB_ROOT_PASSWORD', 'must not be available to application containers (APP_ROLE is set); only the database container needs it.');
             } elseif ($production) {
-                $this->warning('DB_ROOT_PASSWORD', 'is visible to the application; only the MySQL container needs it. Do not pass it to the PHP container.');
+                $this->warning('DB_ROOT_PASSWORD', 'is visible to the application; only the database container needs it. Do not pass it to the PHP container.');
             }
         }
         if ($production) {

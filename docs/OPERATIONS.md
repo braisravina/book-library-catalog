@@ -17,8 +17,9 @@ The `php` (web) container has the runtime account only (`APP_ROLE=web`), so
 `ops` as well: only `ops` mounts the backups directory. The web container
 sees only an unusable stub there.
 
-> **Status.** The commands are implemented and tested against MySQL 8.4 and
-> PHP 8.4 in a development environment. Nothing has been scheduled or run
+> **Status.** The commands are implemented and tested against MariaDB 11.4
+> (the production engine) and MySQL 8.4 (CI regression job) with PHP 8.4 in
+> development and CI environments. Nothing has been scheduled or run
 > against production. Schedules, off-site copies and the production backup
 > location are future production configuration (see "Before production"
 > below).
@@ -31,7 +32,7 @@ only):
 
 | Member | Contents |
 |---|---|
-| `database.sql` | Logical dump of every table: definitions and rows. It is written by PHP, so no `mysqldump` is needed. It is also valid input for the `mysql` client. |
+| `database.sql` | Logical dump of every table: definitions and rows. It is written by PHP, so no dump tool is needed. It is also valid input for the `mariadb`/`mysql` client. Its table definitions are engine-specific: a backup is restored only into the same engine (MariaDB into MariaDB), see "Database engine". |
 | `covers/ab/<key>.jpg`, `….thumb.jpg` | Every cover image and thumbnail in the covers directory |
 | `manifest.json` | Format `dla-backup`, format version, creation time (UTC), application schema version (latest migration) and migration list, row counts per table, cover statistics, and the size and SHA-256 of every other member |
 
@@ -134,8 +135,8 @@ A restore replaces data, so it is guarded. In order:
 3. **Verification:** the archive is fully verified (as `backup:verify`).
 4. **Space pre-flight:** the temporary directory must hold the whole
    extracted backup and the covers directory the cover files to be written,
-   each with 16 MiB to spare. MySQL's own free space cannot be measured from
-   the application; check it on the host (`df` on the MySQL data directory) before a
+   each with 16 MiB to spare. The database's own free space cannot be measured from
+   the application; check it on the host (`df` on the database data directory) before a
    large restore.
 5. **Extraction** into a private temporary directory (`TEMP_PATH`, mode
    0700), re-hashing every member against the manifest, so the archive cannot
@@ -170,7 +171,7 @@ A restore replaces data, so it is guarded. In order:
     written. Maintenance mode stays on until you check the site and run
     `maintenance:off`.
 
-**A restore is not atomic.** MySQL commits `DROP TABLE` and `CREATE TABLE`
+**A restore is not atomic.** MariaDB (like MySQL) commits `DROP TABLE` and `CREATE TABLE`
 immediately; they cannot be rolled back. If anything fails from step 10 on,
 the command exits with code `2`, says the database is **PARTIALLY restored**
 or the restore is **INCOMPLETE**, and prints the rollback command for the
@@ -196,7 +197,7 @@ database name. Nothing else clears the marker: not `maintenance:on`/`off`,
 
 **Restoring into a new, empty database** is the safest route; it needs a
 database administrator to create it. For example:
-1. As MySQL root: `CREATE DATABASE library_restore …;` and grant the migration
+1. As the database root (inside the db container: `mariadb -uroot -p`): `CREATE DATABASE library_restore …;` and grant the migration
    and application accounts the same privileges as on `library`
    (`docker/mysql/init/01-create-users.sh` shows them).
 2. Run `backup:restore --file=… --database=library_restore --confirm=library_restore`.
@@ -244,7 +245,7 @@ statement, at most 1 MiB as written and 16 MiB as accepted). Disk:
   covers plus 64 MiB first and refuses otherwise.
 - `backup:restore` needs, in `TEMP_PATH`, the uncompressed backup (dump and
   covers), plus the new cover files in the covers directory, plus room in
-  MySQL for the restored tables (and, with a safety backup, a second backup in
+  the database for the restored tables (and, with a safety backup, a second backup in
   `BACKUP_PATH`).
 
 ## Backup strategy: frequency, retention, off-host copies
@@ -260,7 +261,7 @@ good off-host copy:
 | Daily backup (default suggestion) | up to 24 h | one short job per day; little disk |
 | Every 6 hours | up to 6 h | 4× the archives; same retention settings keep fewer days |
 | Hourly | up to 1 h | frequent full archives; consider disk and CPU on a small server |
-| Binary-log point-in-time recovery | minutes | MySQL configuration and tooling outside this application (not implemented) |
+| Binary-log point-in-time recovery | minutes | Database configuration and tooling outside this application (not implemented) |
 
 Every backup is a full backup (no incrementals): size grows with the library
 and its covers.
@@ -307,7 +308,7 @@ The application cannot do these for you:
 - copy archives off-host, verify the copies, and protect them (encryption,
   access control) as personal data;
 - keep the secrets (below) separately from the backups;
-- check free space on the backup, temporary and MySQL directories;
+- check free space on the backup, temporary and database directories;
 - run and record a restore drill (suggested: monthly, and after upgrades);
 - decide and document your RPO and RTO.
 
@@ -326,7 +327,7 @@ container:
 - [ ] **Copy** the archive and its `.sha256` into the backups directory.
 - [ ] **Verify:** `ops backup:verify --file=…` prints `VALID`.
 - [ ] **Space:** enough free space for the extraction (`TEMP_PATH`), the
-      covers and MySQL (see "Resources").
+      covers and the database (see "Resources").
 - [ ] **No other operation running** (a running backup or cleanup makes the
       restore refuse; wait for it).
 - [ ] **Maintenance on:** `ops maintenance:on --reason="restore"`.
@@ -364,7 +365,7 @@ above (same steps, run in the `ops` container).
 
 1. **Prepare.** Check out the code. Recreate `.env`, or the Docker secrets,
    from your secure store. Start the stack: `docker compose up -d --wait`.
-   On an empty MySQL data directory, the init script creates the databases and accounts.
+   On an empty data directory, the init script creates the databases and accounts.
    In production, an empty data directory is initialised only with the
    first-deployment authorisation (DEPLOYMENT.md section 6); otherwise the
    database guard refuses to start db.
@@ -401,6 +402,39 @@ Store these in a password manager or secrets vault, never with the archives:
 Sessions are deliberately not preserved in backups. Existing session files
 are not cleared by a restore; restart the PHP container afterwards so that
 users sign in again.
+
+## Database engine
+
+Production runs **MariaDB 11.4 LTS** (the production CPU cannot run the
+MySQL 8.4 image: docs/DEPLOYMENT.md 5.1). MySQL 8.4 stays supported for
+development and is tested in CI, so the two must never be mixed in one
+database:
+
+- **Migrations.** `migrate:status` prints the engine. A released migration
+  that MariaDB cannot run has a MariaDB variant with the same name in
+  `database/migrations/mariadb/`, used only on a server that identifies
+  itself as MariaDB; the history records the checksum of the file that ran.
+  `OTHER-ENGINE` in `migrate:status` (exit 1), or a `migrate` refusal that
+  names "a migration history written by", means the database was migrated
+  by the other engine. Nothing was changed. Never edit `schema_migrations`
+  to silence it: use the database with the engine that created it, or
+  start from an empty database on this engine and run `migrate`.
+- **Backups.** Table definitions in a dump come from the engine that wrote
+  it. `backup:restore` refuses, before any change, an archive taken from
+  the other engine or one that does not record its server version.
+- **Image updates.** `MARIADB_AUTO_UPGRADE` is off, so a new MariaDB image
+  never changes the system tables by itself. After updating the pinned
+  image (same 11.4 series), with a verified backup taken first:
+
+  ```bash
+  dc up -d --wait db
+  dc exec -T db sh -c 'MYSQL_PWD="$(cat /run/secrets/db_root_password)" exec mariadb-upgrade -uroot'
+  dc run --rm ops php bin/console migrate:status
+  ```
+
+  A change of major series (for example 11.4 to 11.8) is a planned
+  migration: read MariaDB's upgrade notes, back up, test the restore on a
+  copy first.
 
 ## Maintenance and retention
 
