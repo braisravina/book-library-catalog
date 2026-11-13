@@ -21,7 +21,7 @@ final class OutboundPolicy
     public static function defaults(): self
     {
         return new self([
-            'openlibrary.org',      // Books API and covers.openlibrary.org
+            'openlibrary.org',      // /isbn, search and works JSON; covers.openlibrary.org
             'archive.org',          // Open Library cover redirects (*.us.archive.org)
             'googleapis.com',       // www.googleapis.com/books/v1
             'books.google.com',     // Google Books cover images

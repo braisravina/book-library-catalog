@@ -101,6 +101,21 @@ final class Request
     }
 
     /**
+     * A list-valued query parameter (name="field[]"). Non-scalar entries are dropped.
+     *
+     * @return list<string>
+     */
+    public function queryList(string $key): array
+    {
+        $value = $this->query[$key] ?? [];
+        if (!is_array($value)) {
+            return [];
+        }
+
+        return array_values(array_map('strval', array_filter($value, 'is_scalar')));
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function file(string $key): ?array

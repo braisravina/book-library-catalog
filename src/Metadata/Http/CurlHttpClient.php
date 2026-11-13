@@ -30,13 +30,13 @@ final class CurlHttpClient implements HttpClient
         }
         for ($hop = 0; $hop <= self::MAX_REDIRECTS; $hop++) {
             if (!$this->policy->allows($url)) {
-                throw new HttpException('URL refused by outbound policy');
+                throw new HttpException('URL refused by outbound policy', null, null, HttpException::POLICY);
             }
             [$status, $headers, $body] = $this->request($url, $maxBytes);
             if ($status >= 300 && $status < 400 && isset($headers['location'])) {
                 $next = OutboundPolicy::resolveRedirect($url, $headers['location']);
                 if ($next === null) {
-                    throw new HttpException('Unusable redirect');
+                    throw new HttpException('Unusable redirect', null, null, HttpException::REDIRECT);
                 }
                 $url = $next;
                 continue;
@@ -45,7 +45,20 @@ final class CurlHttpClient implements HttpClient
             return new HttpResponse($status, $body, $headers['content-type'] ?? '', $headers);
         }
 
-        throw new HttpException('Too many redirects');
+        throw new HttpException('Too many redirects', null, null, HttpException::REDIRECT);
+    }
+
+    /**
+     * Groups curl error numbers into the causes the lookup explains.
+     */
+    public static function kindOf(int $errno): string
+    {
+        return match (true) {
+            in_array($errno, [5, 6], true) => HttpException::DNS,                // proxy or host not resolved
+            $errno === 28 => HttpException::TIMEOUT,                              // CURLE_OPERATION_TIMEDOUT
+            in_array($errno, [35, 51, 53, 54, 58, 59, 60, 64, 66, 77, 80, 82, 83, 90, 91], true) => HttpException::TLS,
+            default => HttpException::NETWORK,                                    // connect refused, reset, ...
+        };
     }
 
     /**
@@ -93,13 +106,14 @@ final class CurlHttpClient implements HttpClient
         $ok = curl_exec($handle);
         $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
         $error = curl_error($handle);
+        $errno = curl_errno($handle);
         curl_close($handle);
 
         if ($tooLarge) {
-            throw new HttpException('Response exceeds size limit');
+            throw new HttpException('Response exceeds size limit', null, null, HttpException::TOO_LARGE);
         }
         if ($ok === false) {
-            throw new HttpException('Request failed: ' . $error);
+            throw new HttpException('Request failed: ' . $error, null, null, self::kindOf($errno));
         }
 
         return [$status, $headers, $body];

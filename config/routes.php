@@ -103,6 +103,8 @@ return static function (Router $router, Services $s): void {
     $router->post('/works/{id:\d+}/editions', $works->storeEdition(...), $create, 'editions.store');
 
     $router->get('/editions/{id:\d+}', $editions->show(...), $view, 'editions.show');
+    // Optional, manual Open Library contribution: read-only preparation (nothing is sent).
+    $router->get('/editions/{id:\d+}/open-library', $editions->openLibrary(...), $view, 'editions.open_library');
     $router->get('/editions/{id:\d+}/edit', $editions->edit(...), $editOwn, 'editions.edit');
     $router->post('/editions/{id:\d+}', $editions->update(...), $editOwn, 'editions.update');
     $router->post('/editions/{id:\d+}/delete', $editions->destroy(...), $delete, 'editions.delete');

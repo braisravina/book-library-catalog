@@ -276,7 +276,7 @@ final class BackupRecoveryTest extends IntegrationTestCase
         $commands = [
             ['migrate'], ['user:create', '--email=new@example.org', '--name=New'], ['backup:create'],
             ['backup:restore', '--file=' . $archive, '--confirm=' . $db, '--replace', '--skip-maintenance-check'],
-            ['maintenance:on'], ['maintenance:off'], ['cleanup', '--apply'],
+            ['maintenance:on'], ['maintenance:off'], ['cleanup', '--apply'], ['metadata:refresh', '--isbn=9780306406157'],
         ];
         self::assertSame(Console::OPS_COMMANDS, array_map(static fn (array $c): string => $c[0], $commands), 'Every ops command is covered');
         foreach ([

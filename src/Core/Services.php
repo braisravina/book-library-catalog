@@ -35,6 +35,8 @@ use DigitalLibrary\Loans\LoanService;
 use DigitalLibrary\Wishlist\WishlistRepository;
 use DigitalLibrary\Wishlist\WishlistService;
 use DigitalLibrary\Metadata\Backoff\FileBackoffStore;
+use DigitalLibrary\Metadata\Backoff\FileRequestPacer;
+use DigitalLibrary\Metadata\Backoff\RequestPacer;
 use DigitalLibrary\Metadata\Backoff\ProviderBackoff;
 use DigitalLibrary\Metadata\CoverImporter;
 use DigitalLibrary\Metadata\Http\CurlHttpClient;
@@ -251,7 +253,25 @@ final class Services
         return $this->once(HttpClient::class, fn (): HttpClient => new CurlHttpClient(
             OutboundPolicy::defaults(),
             max(2, min(20, $this->config->int('METADATA_TIMEOUT_SECONDS', 8))),
+            self::userAgent($this->config->get('METADATA_CONTACT')),
         ));
+    }
+
+    /**
+     * The application's User-Agent. A contact (METADATA_CONTACT: an e-mail
+     * address or https URL the owner chose to publish) is added only when
+     * configured; Open Library then allows 3 instead of 1 request per second
+     * (the pacer still uses 1/s). Unset by default: nothing personal is sent.
+     */
+    public static function userAgent(?string $contact): string
+    {
+        $base = 'DigitalLibraryArchive/1.0 (private catalogue';
+        $contact = trim((string) $contact);
+        if ($contact !== '' && (filter_var($contact, FILTER_VALIDATE_EMAIL) !== false || preg_match('#^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~/-]*)?$#', $contact) === 1) && strlen($contact) <= 200) {
+            return $base . '; ' . $contact . ')';
+        }
+
+        return $base . ')';
     }
 
     /**
@@ -267,7 +287,7 @@ final class Services
             $providers = [];
             foreach (array_unique($names) as $name) {
                 $providers[] = match ($name) {
-                    'open_library' => new OpenLibraryProvider($this->httpClient()),
+                    'open_library' => new OpenLibraryProvider($this->httpClient(), $this->metadataPacer()),
                     'google_books' => new GoogleBooksProvider($this->httpClient(), $this->config->get('GOOGLE_BOOKS_API_KEY')),
                     'none' => null,
                     default => throw new \DigitalLibrary\Core\ConfigException('Unknown metadata provider: ' . $name),
@@ -293,6 +313,15 @@ final class Services
         return $this->once(ProviderBackoff::class, fn (): ProviderBackoff => new ProviderBackoff(
             new FileBackoffStore($this->basePath . '/storage/cache'),
         ));
+    }
+
+    /**
+     * Spaces Open Library requests across PHP workers (1 per second, the
+     * published limit without a contact). State in storage/cache.
+     */
+    public function metadataPacer(): RequestPacer
+    {
+        return $this->once(RequestPacer::class, fn (): RequestPacer => new FileRequestPacer($this->basePath . '/storage/cache'));
     }
 
     public function coverImporter(): CoverImporter

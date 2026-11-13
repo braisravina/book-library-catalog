@@ -1,0 +1,18 @@
+{
+  "key": "/books/OL26222911M",
+  "type": {"key": "/type/edition"},
+  "title": "Clean Code",
+  "subtitle": "A Handbook of Agile Software Craftsmanship",
+  "publishers": ["Prentice Hall"],
+  "publish_date": "July 2008",
+  "isbn_13": ["9780132350884"],
+  "isbn_10": ["0132350882"],
+  "works": [{"key": "/works/OL17618370W"}],
+  "languages": [{"key": "/languages/eng"}],
+  "number_of_pages": 431,
+  "covers": [8085499],
+  "description": {"type": "/type/text", "value": "Synthetic test description of a handbook about writing maintainable code."},
+  "created": {"type": "/type/datetime", "value": "2017-02-09T02:17:10.400677"},
+  "source_records": ["test:record-1", "test:record-2"],
+  "table_of_contents": [{"title": "Chapter 1"}]
+}

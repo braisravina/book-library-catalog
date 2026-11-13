@@ -16,9 +16,11 @@ use DigitalLibrary\Security\PasswordHasher;
 use DigitalLibrary\Security\Role;
 use DigitalLibrary\Security\Session;
 use DigitalLibrary\Metadata\Backoff\ProviderBackoff;
+use DigitalLibrary\Metadata\Backoff\RequestPacer;
 use DigitalLibrary\Metadata\Http\HttpClient;
 use DigitalLibrary\Tests\Support\FakeHttpClient;
 use DigitalLibrary\Tests\Support\InMemoryBackoffStore;
+use DigitalLibrary\Tests\Support\RecordingPacer;
 use DigitalLibrary\Tests\Support\TestDatabaseGuard;
 use DigitalLibrary\Tests\Support\TestDatabaseSafetyException;
 use DigitalLibrary\Upload\CoverImageProcessor;
@@ -79,12 +81,16 @@ abstract class IntegrationTestCase extends TestCase
     /** Seconds added to the backoff clock, to simulate time passing. */
     protected static int $clockOffset = 0;
 
+    /** Open Library request pacing (never waits in tests; reset in setUp). */
+    protected static RecordingPacer $pacer;
+
     protected function setUp(): void
     {
         self::$configOverrides = [];
         self::$http = new FakeHttpClient();
         self::$backoff = new InMemoryBackoffStore();
         self::$clockOffset = 0;
+        self::$pacer = new RecordingPacer();
         if (self::$skipReason !== null) {
             self::markTestSkipped(self::$skipReason);
         }
@@ -191,6 +197,7 @@ abstract class IntegrationTestCase extends TestCase
         $services->set(Session::class, $browser);
         $services->set(HttpClient::class, self::$http);
         $services->set(ProviderBackoff::class, new ProviderBackoff(self::$backoff, static fn (): int => time() + self::$clockOffset));
+        $services->set(RequestPacer::class, self::$pacer);
         $services->set(CoverImageProcessor::class, new CoverImageProcessor(
             self::coverDirectory(),
             isUploadedFile: static fn (string $path): bool => self::$trustUploads,

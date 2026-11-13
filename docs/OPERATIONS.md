@@ -294,6 +294,7 @@ database does not survive a lost disk, host or volume. After each backup:
 | maintenance flag and restore marker | `www-data` | `0640` |
 | restored cover files | `www-data` | `0640`; bucket directories `0750` |
 | metadata provider backoff (`storage/cache/metadata-backoff-<provider>.json`) | `www-data` | `0600`; holds only a failure count and a timestamp. Safe to delete (resets the backoff); not part of backups |
+| Open Library request pacing (`storage/cache/metadata-pace-open_library.json`) | `www-data` | `0600`; holds only the next request time. Safe to delete; not part of backups |
 
 Backups never live under `public/` (refused by the code and by
 `config:check`) and are never served: nginx serves `public/assets` only, and
@@ -435,6 +436,22 @@ database:
   A change of major series (for example 11.4 to 11.8) is a planned
   migration: read MariaDB's upgrade notes, back up, test the restore on a
   copy first.
+
+## Metadata cache
+
+Online lookups are cached in `metadata_records` (one row per provider and
+ISBN; backed up with the database).
+- **Refreshing a wrong entry.** When a provider has corrected a wrong
+  record, ask again on the next lookup without deleting anything:
+  ```bash
+  dc run --rm ops php bin/console metadata:refresh --isbn=9780132350884 --provider=open_library
+  ```
+  Omit `--provider` for every provider.
+- **Corrupt entries.** Corrupt entries and those written by older code are
+  ignored and replaced automatically. Manual entry never depends on the
+  cache.
+- **Do not truncate the table.** Editions may reference rows (their
+  provenance and cover import).
 
 ## Maintenance and retention
 

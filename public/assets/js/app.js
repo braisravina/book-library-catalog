@@ -97,7 +97,13 @@ var DigitalLibraryIsbn = (function () {
             button.hidden = false;
             button.addEventListener('click', function () {
                 navigator.clipboard.writeText(field.value).then(function () {
-                    button.textContent = button.getAttribute('data-copied') || button.textContent;
+                    var done = button.getAttribute('data-copied') || button.textContent;
+                    button.textContent = done;
+                    // Optional screen-reader announcement (role="status").
+                    var status = document.getElementById(button.getAttribute('data-copy-status') || '');
+                    if (status) {
+                        status.textContent = done;
+                    }
                 });
             });
         });

@@ -127,6 +127,34 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   `value`/`textContent` (no HTML sinks). Existing-work suggestions are
   links; nothing is merged. The `isbn` parameter of the new-edition form is
   validated with `Isbn::tryParse()` and only reads the cache.
+- **Untrusted metadata:** an HTTP 200 or an ISBN match proves nothing.
+  - Records with strong spam signals (promotional wording, the title also
+    being the publisher with no author, a future year) are shown for
+    review but never pre-fill the form, never supply a cover and are never
+    linked.
+  - Open Library editions are used only if they list the ISBN.
+  - Records claiming the same ISBN are listed, not chosen.
+  - Corroboration needs two independent providers.
+  - Nothing is saved without the user.
+- **Outcomes, pacing and cache:**
+  - TLS failures are reported, never bypassed.
+  - Open Library requests are paced to its published limit, with no
+    retries inside a request.
+  - The User-Agent carries a contact only if the owner sets
+    `METADATA_CONTACT`.
+  - Cache entries are validated on every read; corrupt or legacy entries
+    are refetched, never used as a fallback.
+- **Open Library contributions** (`/editions/{id}/open-library`):
+  - Read-only GET pages, with the edition page's permission.
+  - Nothing is sent to Open Library from the server. No Open Library
+    credentials, cookies or tokens are requested, stored or used, and no
+    browser session is driven.
+  - The prepared text holds only the bibliographic fields the user
+    selected from an allowlist. Never copies, owners, locations, prices,
+    acquisition data, notes, collections, wishlists, internal IDs or cover
+    files.
+  - Links open Open Library (or the user's e-mail draft) in the user's
+    browser.
 - **Residual risk:** DNS for the allowlisted domains is trusted. Network
   egress filtering at the host or container level is a sensible extra layer.
 

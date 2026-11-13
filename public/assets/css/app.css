@@ -372,3 +372,42 @@ legend { font-weight: 600; padding: 0; margin-bottom: var(--space-2); }
     .similar-item, .similar-actions { flex-direction: column; align-items: stretch; }
     .lookup-alternatives .button:not([hidden]) { display: flex; width: 100%; margin: var(--space-1) 0 0; }
 }
+
+/* ---------------------------------------------------------------------------
+   Metadata provenance, provider outcomes and Open Library contributions
+   ------------------------------------------------------------------------- */
+.lookup-status-summary p { margin: 0 0 var(--space-1); }
+.lookup-outcomes { margin: 0; padding-left: 1.2rem; }
+.lookup-warning { margin: var(--space-2) 0; padding: var(--space-2) var(--space-3); border-left: 4px solid var(--color-warning-text); background: var(--color-warning-bg); color: var(--color-warning-text); border-radius: 0 var(--radius) var(--radius) 0; }
+.lookup-warning p, .lookup-warning ul { margin: 0; }
+.lookup-warning ul { padding-left: 1.2rem; }
+.lookup-warning.is-set-aside { border-left-color: var(--color-error-text); background: var(--color-error-bg); color: var(--color-error-text); }
+.lookup-candidates { margin: var(--space-2) 0; }
+.lookup-candidates p, .lookup-candidates ul { margin: 0; }
+.lookup-candidates ul { padding-left: 1.2rem; overflow-wrap: anywhere; }
+/* Status is always a text label (never colour alone). */
+.lookup-badge { display: inline-block; margin-right: var(--space-1); padding: 0.05rem 0.45rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; background: var(--color-surface-alt); color: var(--color-text); border: 1px solid var(--color-border); }
+.status-corroborated .lookup-badge { background: var(--color-success-bg); color: var(--color-success-text); }
+.status-conflict .lookup-badge, .status-questionable .lookup-badge { background: var(--color-warning-bg); color: var(--color-warning-text); }
+.lookup-alternatives li.is-questionable { border-left-color: var(--color-error-text); }
+.lookup-legend { margin-top: var(--space-2); }
+.lookup-legend summary { cursor: pointer; }
+.lookup-legend dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-1) var(--space-3); margin: var(--space-2) 0 0; }
+.lookup-legend dt { font-weight: 600; }
+.lookup-legend dd { margin: 0; }
+
+.open-library-hint { margin: var(--space-4) 0; }
+.open-library-situation h2 { border-bottom: 0; margin-top: 0; }
+.open-library-situation ul { padding-left: 1.2rem; overflow-wrap: anywhere; }
+.open-library-field { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 0 var(--space-2); margin-bottom: var(--space-2); }
+.open-library-field input { margin-top: 0.3rem; }
+.open-library-field .hint { grid-column: 2; }
+.open-library-value { overflow-wrap: anywhere; }
+.open-library-prepared textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+.open-library-links ul { padding-left: 1.2rem; display: grid; gap: var(--space-2); }
+.open-library-links li .hint { display: block; }
+
+@media (max-width: 40rem) {
+    .lookup-legend dl { grid-template-columns: 1fr; }
+    .open-library .form-actions { flex-direction: column; align-items: stretch; }
+}

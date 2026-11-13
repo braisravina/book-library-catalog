@@ -49,7 +49,7 @@ final class IsbnEntryAssetsTest extends TestCase
         foreach (['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'eval(', 'new Function', 'document.write'] as $sink) {
             self::assertStringNotContainsString($sink, $js);
         }
-        foreach (['templates/catalogue/isbn_step.php', 'templates/catalogue/_lookup_review.php', 'templates/catalogue/_similar_works.php', 'templates/catalogue/book_form.php'] as $template) {
+        foreach (['templates/catalogue/isbn_step.php', 'templates/catalogue/_lookup_review.php', 'templates/catalogue/_similar_works.php', 'templates/catalogue/book_form.php', 'templates/catalogue/_lookup_status.php', 'templates/catalogue/edition_open_library.php', 'templates/catalogue/edition_show.php'] as $template) {
             $html = self::read($template);
             self::assertDoesNotMatchRegularExpression('/<script|\sstyle=|\son[a-z]+=/i', $html, $template);
         }
@@ -73,5 +73,15 @@ final class IsbnEntryAssetsTest extends TestCase
         self::assertStringContainsString('@media (prefers-reduced-motion: reduce) { .isbn-form[aria-busy="true"] .lookup-status::before { animation: none; } }', $css);
         self::assertStringContainsString('.similar-actions .button { min-height: 2.75rem; }', $css, '44px touch targets');
         self::assertStringContainsString('.button[hidden] { display: none; }', $css, 'Enhancement-only buttons stay hidden without JavaScript');
+    }
+
+    public function testContributionLinksAreExternalAndCopyIsAnnounced(): void
+    {
+        $page = self::read('templates/catalogue/edition_open_library.php');
+        self::assertStringContainsString('$external = \' rel="noopener noreferrer external"\';', $page);
+        self::assertStringNotContainsString('target=', $page, 'Nothing opens by itself in another window');
+        self::assertStringNotContainsString('method="post"', $page, 'Read-only page: nothing is submitted to this application');
+        self::assertStringContainsString("document.getElementById(button.getAttribute('data-copy-status') || '')", self::read('public/assets/js/app.js'));
+        self::assertMatchesRegularExpression('/@media \(max-width: 40rem\) \{\s*\.lookup-legend dl \{ grid-template-columns: 1fr; \}/', self::read('public/assets/css/app.css'));
     }
 }

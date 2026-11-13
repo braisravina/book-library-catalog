@@ -14,26 +14,7 @@
         <div class="alert alert-error" role="alert"><?= $view->t('validation.summary') ?></div>
     <?php endif; ?>
     <?php if ($lookup !== null): ?>
-        <?php $throttled = ($lookup['throttled'] ?? []) !== []; ?>
-        <?php if ($lookup['found']): ?>
-            <div class="alert alert-info" role="status">
-                <?php if ($lookup['sources'] !== []): ?>
-                    <?= $view->t('metadata.found', ['sources' => implode(', ', array_map(static fn (string $s): string => $view->trans('metadata.providers.' . $s), $lookup['sources']))]) ?>
-                <?php else: ?>
-                    <?= $view->t('metadata.found_cached') ?>
-                <?php endif; ?>
-                <?= $view->t('metadata.review') ?>
-                <?php if ($throttled): ?>
-                    <?= $view->t('metadata.throttled') ?>
-                <?php elseif ($lookup['failures'] !== []): ?>
-                    <?= $view->t('metadata.partial') ?>
-                <?php endif; ?>
-            </div>
-        <?php elseif ($lookup['failures'] !== []): ?>
-            <div class="alert alert-info" role="status"><?= $view->t($throttled ? 'metadata.unavailable_throttled' : 'metadata.unavailable') ?></div>
-        <?php else: ?>
-            <div class="alert alert-info" role="status"><?= $view->t('metadata.not_found') ?></div>
-        <?php endif; ?>
+        <?= $view->partial('catalogue/_lookup_status', ['lookup' => $lookup]) ?>
     <?php endif; ?>
     <?php if (($similar_works ?? []) !== [] && ($isbn13 ?? null) !== null): ?>
         <?= $view->partial('catalogue/_similar_works', ['works' => $similar_works, 'isbn13' => $isbn13]) ?>

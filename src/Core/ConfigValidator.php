@@ -308,6 +308,10 @@ final class ConfigValidator
 
     private function metadata(Config $config): void
     {
+        $contact = $this->read($config, 'METADATA_CONTACT');
+        if ($contact !== null && \DigitalLibrary\Core\Services::userAgent($contact) === \DigitalLibrary\Core\Services::userAgent(null)) {
+            $this->warning('METADATA_CONTACT', 'is not an e-mail address or https URL, so it is not sent (the User-Agent has no contact).');
+        }
         $providers = $this->read($config, 'METADATA_PROVIDERS');
         if ($providers === null) {
             return;
