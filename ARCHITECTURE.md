@@ -644,13 +644,15 @@ See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the operator's view.
   `TEMP_PATH/operations.lock`; released by the kernel when the process
   exits, so locks never go stale).
 
-## Households (phase H1, development-only)
+## Households (phases H1 and H2, development-only)
 
 Households are the access boundary for **physical inventory**. Phase H1
-adds the schema, the membership infrastructure, administrator pages and
-the household of a copy. It does **not** restrict what users see: read and
-write paths are scoped in phases H2 and H3, which ship together. Until
-then the feature cannot be switched on in production.
+added the schema, the membership infrastructure, administrator pages and
+the household of a copy. Phase H2 scopes every **read** to what the viewer
+may see ("Read isolation" below). The rules for **changing** shared
+records and the workflows around them are phase H3. H2 and H3 ship
+together: until H3 is complete the feature cannot be switched on in
+production, and while it is off nothing is filtered.
 
 **Two layers.**
 
@@ -660,8 +662,8 @@ then the feature cannot be switched on in production.
 | Household inventory | `copies`, `locations` (and `loans` through their copy) | `household_id`: each row belongs to one household |
 | Personal | `wishlist_items`, `collections`, `collection_items` | none: owner-only wishlists; collections are curated lists, never a permission boundary |
 
-Bibliographic visibility will be *derived* from inventory (an edition is
-visible when one of its copies is in a household the user reaches), so the
+Bibliographic visibility is *derived*: an edition is visible to the user
+who catalogued it and to everyone who reaches one of its copies, so the
 shared layer never reveals who holds a title, how many copies exist, where
 they are, or who borrowed them.
 
@@ -708,8 +710,8 @@ override):
   must belong to it. `CopyRepository::update()` changes the household only
   when the caller names it.
 - Editing a copy stays **owner-only** for members (`copy.manage_own`) plus
-  administrators. Membership gives visibility (from H2), not the right to
-  modify other members' copies.
+  administrators. Membership gives visibility, not the right to modify
+  other members' copies.
 - `Admin\HouseholdController` (`/admin/households`): `household.manage`
   route guard, 404 for everyone while the feature is disabled, and the
   service checks the permission again. Audit events: `household.created`,
@@ -720,30 +722,100 @@ override):
   default household. Per-household location trees are managed in H3.
 
 **Feature switch.** `HOUSEHOLDS_ENABLED` (default `false`) shows the
-administration pages and the household choice in copy forms.
-`Services::householdsEnabled()` is always false in production and
-`ConfigValidator` makes production refuse to start with it on.
+administration pages and the household choice in copy forms, and turns
+read isolation on. `Services::householdsEnabled()` is always false in
+production and `ConfigValidator` makes production refuse to start with it
+on.
+
+**Read isolation (phase H2).** `Security\Visibility` is the single
+definition of what a viewer may read. It is built per request from the
+user's `HouseholdScope` (`Services::visibility()`, `Controller::visibility()`)
+and produces SQL conditions, every value bound through `Database\Params`:
+
+| Record | Visible when |
+|---|---|
+| copy, location | its household is in the viewer's scope (none assigned: administrators only) |
+| edition | the viewer catalogued it, or it has a visible copy |
+| work | the viewer catalogued it, or it has a visible edition |
+| author, publisher | credited on / publishing a visible work or edition |
+| user (by name) | the viewer, or someone sharing a household with them |
+
+- **Creators keep their records.** Cataloguing a work or edition keeps it
+  in view for its creator even when only other households hold copies of
+  it. It never shows those copies: inventory is reached through the copy
+  rule alone, so the creator sees the description with their own
+  households' copies, or none.
+- **Unrestricted** for administrators, and for everyone while the feature
+  is disabled: the conditions are then the constant `1 = 1`, so queries
+  and results are those of the version before households.
+  `Visibility::unrestricted()` is named only in `Services` (a unit test
+  enforces it).
+- **Repositories require it.** Every method that reads works, editions,
+  copies, covers, loans, authors, publishers, collection items or
+  wishlist links takes a `Visibility` argument with no default; forgetting
+  it is a type error, not a leak. Methods that deliberately count across
+  households are deletion guards (`editionCount`, `copyCount`,
+  `countItems`) and are never shown.
+- **404, for GET and POST alike.** Controllers load records through
+  `visibility()`, so a record outside the viewer's view is answered
+  exactly like one that does not exist (same status and page), before any
+  permission check (403 is only ever given for a record the user can
+  see), validation, error page or write. This is why routes whose write
+  rules are phase H3 already carry `'read' => 'H2'` in the matrix.
+- **Counts and options.** Dashboard figures (`StatsRepository`), search
+  totals and pages, copy counts, author and publisher counts and
+  collection item counts are computed over visible records. Filters and
+  forms offer only visible locations, household co-members as owners,
+  languages of visible editions, and visible author and publisher names.
+- **ISBN.** ISBN-13 stays unique across the shared catalogue, so entering
+  an ISBN that another household holds must say so. It shows the shared
+  bibliographic description (`EditionRepository::bibliographic()`) and
+  nothing else: no copy count, owner, household, location or link. The
+  "ISBN already used" error on edition forms links to the other edition
+  only when it is visible. Same-title warnings and similar-work
+  suggestions come from visible records.
+- **Loans.** Lists show loans of visible copies. A user's own borrowings
+  are always listed (their data) but, for a copy no longer in view, with
+  the title and dates only. Lending offers and accepts only the active
+  members of the copy's household (every active user for an unrestricted
+  viewer) besides a free-text name.
+- **Collections and wishlists.** Collection visibility (private/shared) is
+  unchanged; items are filtered per viewer and the owner's name is given
+  only to household co-members. A wishlist entry linked to an edition out
+  of view is listed without the link.
+- **Covers.** 404 unless the edition is visible, checked before the ETag
+  comparison; with the feature enabled they are served `private, no-cache`
+  so a revoked membership applies to the next request.
+- **Personal export** follows the same rules (`PersonalExport`).
+- **No schema change.** The conditions use the composite indexes on
+  `copies` added in H1.
 
 **Route/access matrix.** `config/household_access.php` classifies every
-route (kind, phase, rule) and is the plan for H2/H3.
-`HouseholdAccessMatrixTest` fails when a route is not classified, when an
-"administrators only" entry is not behind an administrator-only permission,
-or when a catalogue or inventory route claims to need no household rule.
-Nothing reads the file at runtime.
+route (kind, phase, rule, and `'read' => 'H2'` where the record lookup is
+already scoped). `HouseholdAccessMatrixTest` fails when a route is not
+classified, when an "administrators only" entry is not behind an
+administrator-only permission, when a catalogue or inventory route claims
+to need no household rule, or when a route that returns record data is not
+read-enforced. `HouseholdReadIsolationTest` requests every such GET route
+as users of another household and fails if any of their data is sent, and
+fails if a new GET route is not added to that crawl. Nothing reads the
+matrix at runtime.
 
-**Planned rules that H2/H3 must implement** (recorded in the matrix):
+**Still to implement in H3** (recorded in the matrix):
 
-- Out-of-scope records answer 404, never 403.
-- An ISBN that exists but is not visible is not reported as a duplicate
-  with holdings; the user adds their own copy to the shared record.
 - Shared metadata is edited by administrators, or by its creator while the
-  record is held only by households the creator reaches. A record also
-  held by another household is edited by administrators only, so one
-  household cannot change what another sees.
-- Borrowers offered when lending are users sharing a household with the
-  copy, plus the free-text name.
-- Collection items, counts, statistics, search totals, covers and exports
-  are filtered to visible records.
+  record is held only by households the creator reaches. Today the creator
+  can still edit a record that another household also holds.
+- "Add your copy" for an ISBN held only by other households (today the
+  notice tells the user to ask an administrator).
+- Household checks repeated under the row locks in `LoanService` and copy
+  updates; wishlist ISBN auto-linking only to visible editions; ordering a
+  collection over its visible items.
+- Per-household location management, household columns in the catalogue
+  export, and invitations that carry household assignments.
+- Inventory codes are unique across all households (a uniqueness change is
+  left to H4), so "code already in use" can refer to another household's
+  copy.
 
 ## Database access
 

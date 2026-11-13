@@ -366,13 +366,15 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   - Wishlist changes aren't audited by design (private, not catalogue
     data).
 
-### Households (phase H1, development-only)
+### Households (phases H1 and H2, development-only)
 
-Phase H1 prepares household-based access control. **It is not a security
-boundary yet**: every signed-in user with `catalogue.view` still sees the
-whole catalogue. Enforcement on read paths (H2) and write paths (H3) ships
-together, and no household functionality is enabled in production before
-that.
+Household-based access control is being built in phases. Reads are
+isolated since phase H2; the rules for changing shared records are phase
+H3. **It is not a complete security boundary yet**, so enforcement on read
+paths (H2) and write paths (H3) ships together and no household
+functionality is enabled in production before that. While the feature is
+disabled, every signed-in user with `catalogue.view` sees the whole
+catalogue, as before.
 
 - **Fail closed.** `HOUSEHOLDS_ENABLED` defaults to `false`. In production
   the application ignores it and `config:check` reports it as an error, so
@@ -401,13 +403,47 @@ that.
   are nullable, so the previous application version runs on the migrated
   schema; rows it writes have no household and are reachable by
   administrators only once enforcement lands.
-- **Known gaps until H2/H3** (each listed per route in
-  `config/household_access.php`): search, direct URLs, dashboard
-  statistics, cover images, loans and borrower lists, author and publisher
-  pages, duplicate-ISBN and similar-title prompts, collections, wishlist
-  links and exports are not yet filtered by household; shared metadata can
-  still be edited by its creator regardless of who else holds the title;
-  locations are one global tree.
+- **Read isolation (H2).** With the feature enabled, a user reads only
+  the inventory of their own households (copies, locations, loans), the
+  bibliographic records those households hold, and the ones they
+  catalogued themselves. `Security\Visibility` is the single definition
+  and every repository read requires it. Administrators are unrestricted.
+  - A record outside the user's view answers **404, identical to a record
+    that does not exist**, for GET and POST, before any permission check,
+    validation or write. 403 is only given for records the user can see.
+    This covers detail pages, edit and lending forms, covers and every
+    state-changing route that loads a record.
+  - Lists, search results, totals, page counts, dashboard figures, copy
+    counts, filters and option lists are computed over visible records
+    only. Users of other households are never listed or named (owner
+    filter, borrower choice, collection owners).
+  - Another household's holdings are never revealed: not its copies, copy
+    counts, owners, locations, notes, prices, inventory codes, loans or
+    borrowers. A user who catalogued a record keeps seeing its
+    description after another household adds a copy, without that copy.
+  - **Residual, accepted:** ISBN-13 is unique across the shared catalogue,
+    so entering an ISBN that only another household holds reveals that
+    the book is catalogued, with its bibliographic description and
+    nothing else. Shared collections are still visible to every user with
+    `catalogue.view` (name and description; items filtered per viewer,
+    owner named only to household co-members).
+  - **Revocation** applies to the next request in the existing session:
+    memberships are read from the database per request and never stored
+    in the session; covers are served `private, no-cache` and the
+    visibility check precedes the ETag comparison; exports are not cached.
+  - Tests: `HouseholdReadIsolationTest` (a leak canary over every GET route
+    that returns record data, identical-404 comparison, counts, revocation,
+    feature-off behaviour) on MariaDB and MySQL; `VisibilityTest`;
+    `HouseholdAccessMatrixTest`.
+- **Known gaps until H3** (each listed per route in
+  `config/household_access.php`): the creator of a shared work or edition
+  can still edit it when another household also holds it; an ISBN held
+  only by another household cannot be adopted by the user (an
+  administrator must add the copy); household checks are not yet repeated
+  under row locks; inventory codes are unique across households, so the
+  "code already in use" error can refer to another household's copy;
+  locations are administered as one tree; invitations cannot assign
+  households.
 
 ### Request integrity
 
@@ -534,8 +570,9 @@ that.
 
 ## Known limitations and follow-ups
 
-- Households (phase H1): development-only and not an access boundary; see
-  "Households" above. Do not deploy before phases H2 and H3 are complete.
+- Households (phases H1 and H2): development-only. Reads are isolated, but
+  the write rules of phase H3 are missing; see "Households" above. Do not
+  deploy or enable before phase H3 is complete.
 - Phase 4B:
   - Without trusted-proxy configuration, the per-IP invitation limit applies
     to the proxy's address, as the login limit does.

@@ -83,6 +83,11 @@ These rules apply to every commit, in every phase, with no exceptions.
     merge of the Open Library metadata integration, commit
     `aee3f3deb08c4791f9fde9cde9cc4f35363fd779` (tree
     `c7739f1923b5c4d3d440a2f24e412efb809698f5`).
+  - Households phase H2: branch `household-access-h2` from the committed
+    phase H1, commit `9d613f3acca77e2bb605e18f887e551e3de7d82b` (tree
+    `534fb1d6d63fe180ec80c405f7ff416b0959c97a`). From this phase on, work
+    happens only in the main project directory on ordinary branches (no
+    extra worktrees or delivery directories); the owner commits.
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -184,7 +189,7 @@ These rules apply to every commit, in every phase, with no exceptions.
     server, no credentials, only allowlisted bibliographic fields the user
     selects, never private data.
   - Only the owner may set `METADATA_CONTACT`.
-- **Households** (phase H1 is development-only; ARCHITECTURE.md,
+- **Households** (phases H1 and H2 are development-only; ARCHITECTURE.md,
   "Households"). Shared bibliographic records (works, editions, authors,
   publishers, covers) have no household; inventory (`copies`, `locations`)
   belongs to one. Never add per-household roles, never cache memberships
@@ -194,12 +199,29 @@ These rules apply to every commit, in every phase, with no exceptions.
   `Households\HouseholdService` and are audited (members by id only).
   Membership never grants editing of another member's copy. Collections
   stay curated lists, not permission boundaries. `HOUSEHOLDS_ENABLED` must
-  stay off in production until H2 and H3 are complete (`ConfigValidator`
-  enforces it); do not start H2, H3, H4 or DVD/CD work without the owner's
+  stay off in production until H3 is complete (`ConfigValidator`
+  enforces it); do not start H3, H4 or DVD/CD work without the owner's
   approval. Every new route must be classified in
   `config/household_access.php` (`HouseholdAccessMatrixTest`). Keep
   `household_id` nullable and uniqueness unchanged until H4 has evaluated
   rollback compatibility.
+- **Household read isolation (H2).** `Security\Visibility` is the only
+  definition of what a viewer may read: copies and locations through the
+  household, editions and works when the viewer catalogued them or through
+  a visible copy/edition, authors/publishers/user names derived from
+  those. Every repository method that reads those records takes a
+  `Visibility` with no default; never add an optional one, never call
+  `Visibility::unrestricted()` outside `Services`, and never read record
+  data in a controller except through `$this->visibility()`. Load records
+  through it for GET **and** POST so an out-of-view record is 404 (never
+  403) before any check, form or write. Counts, totals, filters and
+  option lists use it too; cross-household counts are deletion guards
+  only and are never shown. Never show another household's copies,
+  counts, owners, locations, notes, loans, borrowers or user names; the
+  duplicate-ISBN notice shows the bibliographic description only. A new
+  GET route that returns record data must be read-enforced in the matrix
+  and added to the crawl in `HouseholdReadIsolationTest`. With the feature
+  disabled nothing may change (`Visibility` is then `1 = 1`).
 - Administrative account changes go through `Auth\UserAdministration`
   (lock-out safeguards).
 - Loans change `copies.status` only through `Loans\LoanService` (copy lock,

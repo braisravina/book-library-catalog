@@ -437,7 +437,7 @@ database:
   migration: read MariaDB's upgrade notes, back up, test the restore on a
   copy first.
 
-## Households (phase H1, development-only)
+## Households (phases H1 and H2, development-only)
 
 Not deployed to production yet (see DEPLOYMENT.md, section 11). For when it
 is, as part of the complete household release:
@@ -457,6 +457,13 @@ is, as part of the complete household release:
   After it, these must both return 0:
   `SELECT COUNT(*) FROM copies WHERE household_id IS NULL;`
   `SELECT COUNT(*) FROM locations WHERE household_id IS NULL;`
+- Once the feature is enabled (phase H2 onwards), a copy or location with
+  no household is shown to administrators only, and an account that
+  belongs to no household sees only the records it catalogued itself. The
+  two counts above and the membership list are therefore the things to
+  check when a user reports missing books. Membership changes apply to
+  the member's next request; nobody has to sign in again.
+- Phase H2 adds no migration and no setting.
 
 ## Metadata cache
 

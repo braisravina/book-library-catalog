@@ -431,12 +431,16 @@ tests/                   PHPUnit unit and integration suites
 - **Phase 4B — Invitations, data portability and recovery (done):**
   invitation-only registration, CSV/JSON export, backup/verify/restore
   tooling with maintenance mode, and retention housekeeping.
-- **Households — phase H1 (development-only, not for production):**
+- **Households — phases H1 and H2 (development-only, not for production):**
   household and membership schema, migration of existing records into a
   temporary default household, administrator pages behind
-  `HOUSEHOLDS_ENABLED`, and the household of each copy. Households do not
-  restrict what users see until phases H2/H3 (ARCHITECTURE.md,
-  "Households"; `config/household_access.php`).
+  `HOUSEHOLDS_ENABLED`, the household of each copy (H1), and read
+  isolation (H2): with the feature enabled a user sees only the inventory
+  of their own households, the bibliographic records those households
+  hold and the ones they catalogued themselves. The rules for changing
+  shared records are phase H3; until then the feature cannot be enabled
+  in production (ARCHITECTURE.md, "Households";
+  `config/household_access.php`).
 - **Phase 5 — proposed:** production readiness: build and validate the
   Alpine images and CI, configure the reverse proxy and client IP, implement
   the audit-database separation, schedule and drill backups. Then optional
