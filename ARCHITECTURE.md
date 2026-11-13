@@ -113,6 +113,7 @@ session or database work.
 | `collection.manage_any` (see and manage private collections) | ✔ | | |
 | `invitation.manage` (issue, revoke, replace invitations) | ✔ | | |
 | `catalogue.export` (whole-catalogue CSV/JSON export) | ✔ | | |
+| `household.manage` (households and their members; phase H1) | ✔ | | |
 
 Personal exports need no extra permission: they are always scoped to the
 signed-in user.
@@ -642,6 +643,107 @@ See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the operator's view.
   Commands that must not overlap take `OperationLock` (`flock` on
   `TEMP_PATH/operations.lock`; released by the kernel when the process
   exits, so locks never go stale).
+
+## Households (phase H1, development-only)
+
+Households are the access boundary for **physical inventory**. Phase H1
+adds the schema, the membership infrastructure, administrator pages and
+the household of a copy. It does **not** restrict what users see: read and
+write paths are scoped in phases H2 and H3, which ship together. Until
+then the feature cannot be switched on in production.
+
+**Two layers.**
+
+| Layer | Tables | Household |
+|---|---|---|
+| Shared bibliographic metadata | `works`, `editions`, `authors`, `publishers`, `categories`, `covers`, `metadata_records` | none: one record per title, ISBN-13 stays globally unique |
+| Household inventory | `copies`, `locations` (and `loans` through their copy) | `household_id`: each row belongs to one household |
+| Personal | `wishlist_items`, `collections`, `collection_items` | none: owner-only wishlists; collections are curated lists, never a permission boundary |
+
+Bibliographic visibility will be *derived* from inventory (an edition is
+visible when one of its copies is in a household the user reaches), so the
+shared layer never reveals who holds a title, how many copies exist, where
+they are, or who borrowed them.
+
+**Schema** (`2026_11_13_180000` to `180002`, additive, portable, no MariaDB
+override):
+
+- `households` (`name` unique, `system_key` unique and NULL for ordinary
+  households, `row_version`) and `household_members` (`household_id`,
+  `user_id`, `added_by`). Users may belong to several households. There
+  are no per-household roles: the global Administrator, Member and Viewer
+  roles are unchanged.
+- `copies.household_id` and `locations.household_id`: **nullable**, indexed,
+  `ON DELETE RESTRICT`. NULL means "not assigned" and is reachable by
+  administrators only. `NOT NULL` and any uniqueness change (for example a
+  per-household `inventory_code`) are left to phase H4, after rollback
+  compatibility has been evaluated: with a nullable column the previous
+  application version keeps working on the new schema.
+- Backfill (data only, idempotent): one temporary **default household**
+  (`system_key = 'default'`) receives every existing copy and location.
+  Accounts that are active **and** have signed in at least once become its
+  members, which preserves the access they have today. Disabled accounts
+  and accounts that never signed in are not added. Accounts created later
+  belong to no household until an administrator assigns one.
+
+**Code.**
+
+- `Security\HouseholdScope`: the households a user reaches, built from the
+  database on every request and never stored in the session, so a
+  membership change applies to the member's next request. Administrators
+  are unrestricted; a deactivated or signed-out user reaches nothing.
+  `Services::householdScope()`.
+- `Households\HouseholdRepository` (all SQL), `HouseholdService`
+  (transactions under a household row lock; refuses non-administrators,
+  deleting the default household, deleting a household with members,
+  copies or locations, and adding a deactivated account),
+  `HouseholdInput`.
+- `Households\CopyHousehold`: the only place that decides a copy's
+  household. Feature disabled: new copies go to the default household,
+  edits keep the household, and a submitted `household_id` is ignored.
+  Feature enabled: administrators choose any household; other users only
+  households they belong to (a single membership is used without asking);
+  an unknown household and a forbidden one give the same error; the owner
+  must be an administrator or a member of the household; the location
+  must belong to it. `CopyRepository::update()` changes the household only
+  when the caller names it.
+- Editing a copy stays **owner-only** for members (`copy.manage_own`) plus
+  administrators. Membership gives visibility (from H2), not the right to
+  modify other members' copies.
+- `Admin\HouseholdController` (`/admin/households`): `household.manage`
+  route guard, 404 for everyone while the feature is disabled, and the
+  service checks the permission again. Audit events: `household.created`,
+  `household.updated`, `household.deleted`, `household.member_added`,
+  `household.member_removed` (members by id only), and `copy.created` /
+  `copy.updated` carry `household_id` / `household_changed`.
+- New locations inherit their parent's household; a new root goes to the
+  default household. Per-household location trees are managed in H3.
+
+**Feature switch.** `HOUSEHOLDS_ENABLED` (default `false`) shows the
+administration pages and the household choice in copy forms.
+`Services::householdsEnabled()` is always false in production and
+`ConfigValidator` makes production refuse to start with it on.
+
+**Route/access matrix.** `config/household_access.php` classifies every
+route (kind, phase, rule) and is the plan for H2/H3.
+`HouseholdAccessMatrixTest` fails when a route is not classified, when an
+"administrators only" entry is not behind an administrator-only permission,
+or when a catalogue or inventory route claims to need no household rule.
+Nothing reads the file at runtime.
+
+**Planned rules that H2/H3 must implement** (recorded in the matrix):
+
+- Out-of-scope records answer 404, never 403.
+- An ISBN that exists but is not visible is not reported as a duplicate
+  with holdings; the user adds their own copy to the shared record.
+- Shared metadata is edited by administrators, or by its creator while the
+  record is held only by households the creator reaches. A record also
+  held by another household is edited by administrators only, so one
+  household cannot change what another sees.
+- Borrowers offered when lending are users sharing a household with the
+  copy, plus the free-text name.
+- Collection items, counts, statistics, search totals, covers and exports
+  are filtered to visible records.
 
 ## Database access
 

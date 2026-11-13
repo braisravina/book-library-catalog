@@ -92,6 +92,7 @@ final class CatalogueController extends CatalogueBaseController
         $work = WorkInput::fromRequest($request);
         $edition = EditionInput::fromRequest($request, $work->title, $work->subtitle);
         $addCopy = $request->input('add_copy') === '1' && $this->can($user, Permission::CopyManageOwn);
+        $copyHouseholdId = null;
         $copy = $addCopy ? new CopyInput(
             (string) $user->id,
             trim((string) $request->input('copy_location_id', '')),
@@ -99,6 +100,7 @@ final class CatalogueController extends CatalogueBaseController
             trim((string) $request->input('copy_condition', '')),
             'available',
             false, '', '', '', '', '',
+            trim((string) $request->input('copy_household_id', '')),
         ) : null;
 
         $validator = Validator::make([], []);
@@ -114,6 +116,17 @@ final class CatalogueController extends CatalogueBaseController
                 }
             }
             $this->validateLocation($copy->locationId(), $validator, 'copy_location_id');
+            // The first copy's household is decided like any other copy's
+            // (Households\CopyHousehold), never taken from the request as is.
+            [$copyHouseholdId, $householdError] = $this->services->copyHousehold()->resolve($user, $this->services->householdScope($user), $copy->householdId, null);
+            if ($householdError !== null) {
+                $validator->addError('copy_household_id', $householdError);
+            } elseif ($copyHouseholdId !== null && $this->services->copyHousehold()->enabled() && $copy->locationId() !== null && !isset($validator->errors()['copy_location_id'])) {
+                $locationHousehold = $this->services->locations()->householdId($copy->locationId());
+                if ($locationHousehold !== null && $locationHousehold !== $copyHouseholdId) {
+                    $validator->addError('copy_location_id', 'households.validation.location_household');
+                }
+            }
         }
 
         // A cached provider record is only honoured for the same ISBN.
@@ -146,7 +159,7 @@ final class CatalogueController extends CatalogueBaseController
         }
 
         try {
-            $ids = $this->services->books()->createBook($work, $edition, $copy, $user->id, $recordId);
+            $ids = $this->services->books()->createBook($work, $edition, $copy, $user->id, $recordId, $copyHouseholdId);
         } catch (DuplicateIsbnException $e) {
             return $this->duplicate($request, $e->existingEditionId, 409);
         }
@@ -154,7 +167,7 @@ final class CatalogueController extends CatalogueBaseController
         $this->audit($request, 'work.created', 'work', $ids['work_id'], ['title' => $work->title]);
         $this->audit($request, 'edition.created', 'edition', $ids['edition_id'], ['isbn_13' => $edition->parsedIsbn()?->isbn13]);
         if ($ids['copy_id'] !== null) {
-            $this->audit($request, 'copy.created', 'copy', $ids['copy_id'], ['edition_id' => $ids['edition_id']]);
+            $this->audit($request, 'copy.created', 'copy', $ids['copy_id'], ['edition_id' => $ids['edition_id'], 'household_id' => $copyHouseholdId]);
         }
         if ($importCover && $providerData instanceof BookMetadata) {
             $coverId = $this->services->coverImporter()->import($ids['edition_id'], $providerData, $user->id);
@@ -282,6 +295,7 @@ final class CatalogueController extends CatalogueBaseController
             'add_copy' => $addCopy,
             'copy' => $copy,
             'can_add_copy' => $this->can($this->user($request), Permission::CopyManageOwn),
+            'household_options' => $this->services->copyHousehold()->options($this->user($request), $this->services->householdScope($this->user($request)), null),
             'lookup' => $lookup,
             'similar_works' => $similar,
             'isbn13' => $edition->parsedIsbn()?->isbn13,

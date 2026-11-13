@@ -56,6 +56,9 @@
                 <legend class="visually-hidden"><?= $view->t('catalogue.copy.section') ?></legend>
                 <label class="checkbox"><input type="checkbox" name="add_copy" value="1"<?= $add_copy ? ' checked' : '' ?>> <?= $view->t('catalogue.add.i_own_a_copy') ?></label>
                 <div class="form-row">
+                    <?php if (($household_options ?? []) !== []): ?>
+                        <?= $view->partial('partials/select', ['name' => 'copy_household_id', 'label' => 'fields.household', 'value' => $copy?->householdId, 'options' => $household_options, 'errors' => $errors] + (count($household_options) > 1 ? ['blank' => 'households.choose'] : [])) ?>
+                    <?php endif; ?>
                     <div class="form-field">
                         <label for="copy_location_id"><?= $view->t('fields.location') ?></label>
                         <select id="copy_location_id" name="copy_location_id">

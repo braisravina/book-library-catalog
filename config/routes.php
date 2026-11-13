@@ -6,6 +6,7 @@ use DigitalLibrary\Core\Services;
 use DigitalLibrary\Http\Controllers\AccountController;
 use DigitalLibrary\Http\Controllers\Admin\AuditController;
 use DigitalLibrary\Http\Controllers\Admin\CategoryController;
+use DigitalLibrary\Http\Controllers\Admin\HouseholdController;
 use DigitalLibrary\Http\Controllers\Admin\InvitationController;
 use DigitalLibrary\Http\Controllers\Admin\LocationController;
 use DigitalLibrary\Http\Controllers\Admin\UserController;
@@ -60,6 +61,7 @@ return static function (Router $router, Services $s): void {
     $invitations = new InvitationController($s);
     $registration = new RegistrationController($s);
     $export = new ExportController($s);
+    $households = new HouseholdController($s);
 
     $view = ['auth', 'can:catalogue.view'];
     $create = ['auth', 'can:catalogue.create'];
@@ -195,6 +197,19 @@ return static function (Router $router, Services $s): void {
     $router->post('/admin/users/{id:\d+}', $users->update(...), ['auth', 'can:user.manage'], 'admin.users.update');
     $router->post('/admin/users/{id:\d+}/password', $users->resetPassword(...), ['auth', 'can:user.manage'], 'admin.users.password');
     $router->post('/admin/users/{id:\d+}/sessions', $users->revokeSessions(...), ['auth', 'can:user.manage'], 'admin.users.sessions');
+
+    // Households (phase H1, development-only): administrators only. Every action
+    // also answers 404 unless the household feature is enabled, which production
+    // never allows until the access boundary is complete (phases H2/H3).
+    $manageHouseholds = ['auth', 'can:household.manage'];
+    $router->get('/admin/households', $households->index(...), $manageHouseholds, 'admin.households');
+    $router->get('/admin/households/new', $households->create(...), $manageHouseholds, 'admin.households.create');
+    $router->post('/admin/households', $households->store(...), $manageHouseholds, 'admin.households.store');
+    $router->get('/admin/households/{id:\d+}/edit', $households->edit(...), $manageHouseholds, 'admin.households.edit');
+    $router->post('/admin/households/{id:\d+}', $households->update(...), $manageHouseholds, 'admin.households.update');
+    $router->post('/admin/households/{id:\d+}/delete', $households->destroy(...), $manageHouseholds, 'admin.households.delete');
+    $router->post('/admin/households/{id:\d+}/members', $households->addMember(...), $manageHouseholds, 'admin.households.members.add');
+    $router->post('/admin/households/{id:\d+}/members/{user:\d+}/remove', $households->removeMember(...), $manageHouseholds, 'admin.households.members.remove');
 
     $manageCategories = ['auth', 'can:category.manage'];
     $router->get('/admin/categories', $categories->index(...), $manageCategories, 'admin.categories');

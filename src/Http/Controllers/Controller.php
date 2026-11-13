@@ -26,6 +26,7 @@ abstract class Controller
         $view->share('current_user', $this->services->auth()->user());
         $view->share('authorizer', $this->services->authorizer());
         $view->share('flashes', $this->services->session()->takeFlashes());
+        $view->share('households_enabled', $this->services->householdsEnabled());
 
         return Response::html($view->render($template, $data), $status);
     }

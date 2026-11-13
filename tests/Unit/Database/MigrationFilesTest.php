@@ -152,6 +152,52 @@ final class MigrationFilesTest extends TestCase
         self::assertDoesNotMatchRegularExpression('/\b(DROP|MODIFY|CHANGE|RENAME)\b/i', $statements[0]);
     }
 
+    /**
+     * Household phase H1: additive schema (new tables, nullable columns),
+     * then an idempotent, data-only backfill. NOT NULL and uniqueness
+     * changes are deliberately left to a later phase.
+     */
+    public function testHouseholdMigrationsAreAdditiveNullableAndPortable(): void
+    {
+        $files = self::migrations();
+        $names = ['2026_11_13_180000_create_households.sql', '2026_11_13_180001_add_household_to_inventory.sql', '2026_11_13_180002_backfill_default_household.sql'];
+        foreach ($names as $name) {
+            self::assertArrayHasKey($name, $files);
+            // Nothing that MariaDB 11.4 and MySQL 8.4 treat differently.
+            self::assertDoesNotMatchRegularExpression('/GENERATED|\/\*\+|->>?|JSON_|\bAS\s+new\b|ON DUPLICATE|INSERT\s+IGNORE|REPLACE\s+INTO/i', (string) preg_replace('/^--.*$/m', '', $files[$name]), $name);
+            self::assertFileDoesNotExist(dirname(__DIR__, 3) . '/database/migrations/mariadb/' . $name, $name . ' needs no MariaDB override');
+        }
+
+        $create = SqlSplitter::split($files[$names[0]]);
+        self::assertCount(2, $create);
+        self::assertStringStartsWith('CREATE TABLE households (', $create[0]);
+        self::assertStringStartsWith('CREATE TABLE household_members (', $create[1]);
+        self::assertStringContainsString('UNIQUE KEY uq_households_system_key (system_key)', $create[0]);
+        self::assertStringContainsString('PRIMARY KEY (household_id, user_id)', $create[1]);
+        self::assertStringContainsString('REFERENCES households (id) ON DELETE RESTRICT', $create[1]);
+
+        $alter = SqlSplitter::split($files[$names[1]]);
+        self::assertCount(2, $alter);
+        foreach (['copies', 'locations'] as $i => $table) {
+            self::assertStringStartsWith('ALTER TABLE ' . $table, $alter[$i]);
+            self::assertStringContainsString('ADD COLUMN household_id INT UNSIGNED NULL', $alter[$i], 'Nullable: the previous application version keeps working');
+            self::assertStringContainsString('REFERENCES households (id) ON DELETE RESTRICT', $alter[$i]);
+            self::assertDoesNotMatchRegularExpression('/\b(MODIFY|CHANGE|DROP|RENAME)\b|NOT NULL|UNIQUE/i', $alter[$i], 'Only additions; no constraint that would break a rollback');
+        }
+
+        $backfill = SqlSplitter::split($files[$names[2]]);
+        self::assertCount(4, $backfill);
+        foreach ($backfill as $statement) {
+            self::assertMatchesRegularExpression('/^(INSERT INTO|UPDATE) /', $statement, 'Data only: no DDL in the backfill');
+        }
+        self::assertStringContainsString("WHERE NOT EXISTS (SELECT 1 FROM households WHERE system_key = 'default')", $backfill[0], 'Creates the default household once');
+        self::assertStringEndsWith('WHERE household_id IS NULL', $backfill[1], 'Never reassigns a copy that has a household');
+        self::assertStringEndsWith('WHERE household_id IS NULL', $backfill[2]);
+        self::assertStringContainsString('u.is_active = 1', $backfill[3], 'Disabled accounts gain no access');
+        self::assertStringContainsString('u.last_login_at IS NOT NULL', $backfill[3], 'Accounts that never signed in gain no access');
+        self::assertStringContainsString('NOT EXISTS (SELECT 1 FROM household_members m', $backfill[3], 'No duplicate memberships');
+    }
+
     public function testPhase4aTablesAreDefined(): void
     {
         $all = implode("\n", self::migrations());

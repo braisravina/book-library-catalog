@@ -25,4 +25,5 @@ enum Permission: string
     case CollectionManageAny = 'collection.manage_any';
     case InvitationManage = 'invitation.manage';
     case CatalogueExport = 'catalogue.export';
+    case HouseholdManage = 'household.manage';
 }

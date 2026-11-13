@@ -88,6 +88,7 @@ final class ConfigValidator
         $this->database($config, $production);
         $this->integers($config, $production);
         $this->invitations($config, $production);
+        $this->households($config, $production);
         $this->metadata($config);
         $this->paths($config);
         if ($production && $config->bool('APP_DEBUG')) {
@@ -293,6 +294,20 @@ final class ConfigValidator
             if ($config->int('ARGON2_MEMORY_KIB', 65536) < 19456 || $config->int('ARGON2_TIME_COST', 3) < 2) {
                 $this->warning('ARGON2_MEMORY_KIB', 'Argon2id parameters are below the OWASP minimum (19456 KiB, time cost 2).');
             }
+        }
+    }
+
+    /**
+     * Phase H1 of household access control is development-only: households
+     * can be administered, but they do not restrict what users see until
+     * the read and write paths are scoped (phases H2/H3). Production
+     * therefore refuses to serve with the feature switched on (and
+     * Services::householdsEnabled() ignores the setting there as well).
+     */
+    private function households(Config $config, bool $production): void
+    {
+        if ($production && $config->bool('HOUSEHOLDS_ENABLED', false)) {
+            $this->error('HOUSEHOLDS_ENABLED', 'must not be enabled in production: household access control is incomplete (it does not restrict what users see yet).');
         }
     }
 

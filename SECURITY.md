@@ -366,6 +366,49 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   - Wishlist changes aren't audited by design (private, not catalogue
     data).
 
+### Households (phase H1, development-only)
+
+Phase H1 prepares household-based access control. **It is not a security
+boundary yet**: every signed-in user with `catalogue.view` still sees the
+whole catalogue. Enforcement on read paths (H2) and write paths (H3) ships
+together, and no household functionality is enabled in production before
+that.
+
+- **Fail closed.** `HOUSEHOLDS_ENABLED` defaults to `false`. In production
+  the application ignores it and `config:check` reports it as an error, so
+  the incomplete feature cannot be exposed by a configuration mistake.
+  While disabled, every `/admin/households` route answers 404 (also for
+  administrators), the navigation entry is absent, and a `household_id`
+  submitted with a copy is ignored.
+- **Administration is administrator-only**: `household.manage` on the
+  routes, re-checked in `HouseholdService`; CSRF on every POST; optimistic
+  locking on rename; all changes audited. Members are recorded in the
+  audit log by user id only (no names or e-mail addresses).
+- **Membership** is read from the database on every request
+  (`Security\HouseholdScope`), never cached in the session: adding or
+  removing a member applies to that member's next request. Administrators
+  reach every household. Deactivated accounts reach none and cannot be
+  added to a household. New accounts, however created, belong to no
+  household.
+- **Copy assignment** goes through `Households\CopyHousehold` only. A
+  non-administrator can place a copy only in a household they belong to;
+  a household they may not use and one that does not exist produce the
+  same response, so the form does not reveal household ids. Membership
+  does not allow editing another member's copy (owner-only, unchanged).
+- **Migration.** Existing copies and locations move to a temporary default
+  household; only accounts that are active and have signed in become
+  members. No row is deleted and no other column changes. The new columns
+  are nullable, so the previous application version runs on the migrated
+  schema; rows it writes have no household and are reachable by
+  administrators only once enforcement lands.
+- **Known gaps until H2/H3** (each listed per route in
+  `config/household_access.php`): search, direct URLs, dashboard
+  statistics, cover images, loans and borrower lists, author and publisher
+  pages, duplicate-ISBN and similar-title prompts, collections, wishlist
+  links and exports are not yet filtered by household; shared metadata can
+  still be edited by its creator regardless of who else holds the title;
+  locations are one global tree.
+
 ### Request integrity
 
 - **CSRF:** a per-session synchroniser token (`hash_equals`) is required on
@@ -491,6 +534,8 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 
 ## Known limitations and follow-ups
 
+- Households (phase H1): development-only and not an access boundary; see
+  "Households" above. Do not deploy before phases H2 and H3 are complete.
 - Phase 4B:
   - Without trusted-proxy configuration, the per-IP invitation limit applies
     to the proxy's address, as the login limit does.

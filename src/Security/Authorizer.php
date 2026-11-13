@@ -105,6 +105,37 @@ final class Authorizer
         return $this->can($user, Permission::CollectionManageOwn) && $user->id === $ownerId;
     }
 
+    /**
+     * Creating, renaming and deleting households and assigning their
+     * members: administrators only.
+     */
+    public function canManageHouseholds(?User $user): bool
+    {
+        return $this->can($user, Permission::HouseholdManage);
+    }
+
+    /**
+     * Placing a copy in any household (copy.manage_any: administrators).
+     */
+    public function canAssignCopyToAnyHousehold(?User $user): bool
+    {
+        return $this->can($user, Permission::CopyManageAny);
+    }
+
+    /**
+     * Placing a copy in a household: administrators in any household,
+     * other users only in households they are a member of. Membership
+     * alone is not enough: the user must also be allowed to manage copies.
+     */
+    public function canAssignCopyToHousehold(?User $user, HouseholdScope $scope, int $householdId): bool
+    {
+        if ($this->canAssignCopyToAnyHousehold($user)) {
+            return true;
+        }
+
+        return $this->can($user, Permission::CopyManageOwn) && !$scope->unrestricted && $scope->includes($householdId);
+    }
+
     public function deny(): never
     {
         throw \DigitalLibrary\Http\HttpException::forbidden();

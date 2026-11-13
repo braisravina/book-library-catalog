@@ -437,6 +437,27 @@ database:
   migration: read MariaDB's upgrade notes, back up, test the restore on a
   copy first.
 
+## Households (phase H1, development-only)
+
+Not deployed to production yet (see DEPLOYMENT.md, section 11). For when it
+is, as part of the complete household release:
+
+- The migrations are additive. `2026_11_13_180002` moves existing copies
+  and locations into the default household and adds, as members, the
+  accounts that are active and have signed in. It deletes nothing and can
+  be run again safely. Take and verify a backup first, as for any
+  migration.
+- New tables `households` and `household_members` are included in backups
+  automatically (the dump covers every base table). A backup taken before
+  the migration restores the earlier schema; run `migrate` afterwards.
+  Backups restore only into the same engine, as before.
+- Before the migration, this read-only query shows which accounts will
+  become members of the default household:
+  `SELECT id, email FROM users WHERE is_active = 1 AND last_login_at IS NOT NULL;`
+  After it, these must both return 0:
+  `SELECT COUNT(*) FROM copies WHERE household_id IS NULL;`
+  `SELECT COUNT(*) FROM locations WHERE household_id IS NULL;`
+
 ## Metadata cache
 
 Online lookups are cached in `metadata_records` (one row per provider and

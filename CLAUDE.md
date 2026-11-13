@@ -79,6 +79,10 @@ These rules apply to every commit, in every phase, with no exceptions.
     `a1011219b94da04f18d75bc4093294107bc6739e` (tree
     `356e95b264f7e9025efef8a6d6671cb24e720ffe`). It supersedes the first
     delivery on `openlibrary-metadata` (based on `3f66a9e`).
+  - Households phase H1: branch `household-access-media` from `main` at the
+    merge of the Open Library metadata integration, commit
+    `aee3f3deb08c4791f9fde9cde9cc4f35363fd779` (tree
+    `c7739f1923b5c4d3d440a2f24e412efb809698f5`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -180,6 +184,22 @@ These rules apply to every commit, in every phase, with no exceptions.
     server, no credentials, only allowlisted bibliographic fields the user
     selects, never private data.
   - Only the owner may set `METADATA_CONTACT`.
+- **Households** (phase H1 is development-only; ARCHITECTURE.md,
+  "Households"). Shared bibliographic records (works, editions, authors,
+  publishers, covers) have no household; inventory (`copies`, `locations`)
+  belongs to one. Never add per-household roles, never cache memberships
+  in the session (`Security\HouseholdScope` is rebuilt per request), and
+  never read a copy's household from the request: it comes only from
+  `Households\CopyHousehold`. Household changes go through
+  `Households\HouseholdService` and are audited (members by id only).
+  Membership never grants editing of another member's copy. Collections
+  stay curated lists, not permission boundaries. `HOUSEHOLDS_ENABLED` must
+  stay off in production until H2 and H3 are complete (`ConfigValidator`
+  enforces it); do not start H2, H3, H4 or DVD/CD work without the owner's
+  approval. Every new route must be classified in
+  `config/household_access.php` (`HouseholdAccessMatrixTest`). Keep
+  `household_id` nullable and uniqueness unchanged until H4 has evaluated
+  rollback compatibility.
 - Administrative account changes go through `Auth\UserAdministration`
   (lock-out safeguards).
 - Loans change `copies.status` only through `Loans\LoanService` (copy lock,

@@ -40,9 +40,9 @@ final class BookService
      *
      * @throws DuplicateIsbnException
      */
-    public function createBook(WorkInput $work, EditionInput $edition, ?CopyInput $copy, int $userId, ?int $metadataRecordId = null): array
+    public function createBook(WorkInput $work, EditionInput $edition, ?CopyInput $copy, int $userId, ?int $metadataRecordId = null, ?int $copyHouseholdId = null): array
     {
-        return $this->guardDuplicate(fn (): array => Transaction::run($this->pdo, function () use ($work, $edition, $copy, $userId, $metadataRecordId): array {
+        return $this->guardDuplicate(fn (): array => Transaction::run($this->pdo, function () use ($work, $edition, $copy, $userId, $metadataRecordId, $copyHouseholdId): array {
             $this->assertIsbnFree($edition, null);
             $workId = $this->works->create($work->toRecord(), $userId);
             $this->works->setAuthors($workId, $this->resolvePeople($work->authors, $userId));
@@ -51,7 +51,7 @@ final class BookService
             if ($metadataRecordId !== null) {
                 $this->editions->linkMetadata($editionId, $metadataRecordId);
             }
-            $copyId = $copy === null ? null : $this->copies->create($editionId, $copy->toRecord(), $userId);
+            $copyId = $copy === null ? null : $this->copies->create($editionId, ['household_id' => $copyHouseholdId] + $copy->toRecord(), $userId);
 
             return ['work_id' => $workId, 'edition_id' => $editionId, 'copy_id' => $copyId];
         }));

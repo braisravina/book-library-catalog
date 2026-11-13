@@ -19,6 +19,9 @@ use DigitalLibrary\Catalogue\Repository\LocationRepository;
 use DigitalLibrary\Catalogue\Repository\PublisherRepository;
 use DigitalLibrary\Catalogue\Repository\WorkRepository;
 use DigitalLibrary\Database\ConnectionFactory;
+use DigitalLibrary\Households\CopyHousehold;
+use DigitalLibrary\Households\HouseholdRepository;
+use DigitalLibrary\Households\HouseholdService;
 use DigitalLibrary\I18n\Translator;
 use DigitalLibrary\Audit\AuditLogRepository;
 use DigitalLibrary\Backup\BackupCreator;
@@ -47,6 +50,7 @@ use DigitalLibrary\Metadata\Provider\GoogleBooksProvider;
 use DigitalLibrary\Metadata\Provider\OpenLibraryProvider;
 use DigitalLibrary\Security\Authorizer;
 use DigitalLibrary\Security\Csrf;
+use DigitalLibrary\Security\HouseholdScope;
 use DigitalLibrary\Security\LoginThrottle;
 use DigitalLibrary\Security\PasswordHasher;
 use DigitalLibrary\Security\PasswordPolicy;
@@ -368,6 +372,42 @@ final class Services
     public function collectionService(): CollectionService
     {
         return $this->once(CollectionService::class, fn (): CollectionService => new CollectionService($this->pdo(), $this->collections(), $this->authorizer()));
+    }
+
+    /**
+     * Whether the household feature (administration pages and explicit
+     * household choice for copies) is switched on. Phase H1 is
+     * development-only: the feature is incomplete until the read and write
+     * paths are scoped (phases H2/H3), so it can never be on in production,
+     * whatever HOUSEHOLDS_ENABLED says (ConfigValidator also refuses it).
+     */
+    public function householdsEnabled(): bool
+    {
+        return !$this->config->isProduction() && $this->config->bool('HOUSEHOLDS_ENABLED', false);
+    }
+
+    public function households(): HouseholdRepository
+    {
+        return $this->once(HouseholdRepository::class, fn (): HouseholdRepository => new HouseholdRepository($this->pdo()));
+    }
+
+    public function householdService(): HouseholdService
+    {
+        return $this->once(HouseholdService::class, fn (): HouseholdService => new HouseholdService($this->pdo(), $this->households(), $this->authorizer()));
+    }
+
+    public function copyHousehold(): CopyHousehold
+    {
+        return $this->once(CopyHousehold::class, fn (): CopyHousehold => new CopyHousehold($this->households(), $this->authorizer(), $this->householdsEnabled()));
+    }
+
+    /**
+     * The households the user may reach, read from the database now (it is
+     * deliberately not cached: membership changes apply immediately).
+     */
+    public function householdScope(?\DigitalLibrary\Auth\User $user): HouseholdScope
+    {
+        return HouseholdScope::forUser($user, fn (int $userId): array => $this->households()->idsForUser($userId));
     }
 
     public function authorizer(): Authorizer

@@ -4,6 +4,7 @@
  * @var \DigitalLibrary\Catalogue\Input\CopyInput $input  @var array<string, list<string>> $errors
  * @var list<\DigitalLibrary\Auth\User> $owners  @var bool $can_choose_owner  @var string $action
  * @var list<array<string, mixed>> $location_tree
+ * @var array<string, string> $household_options  id => name; empty while the household feature is disabled
  */
 use DigitalLibrary\Catalogue\Vocabulary;
 
@@ -36,6 +37,9 @@ $enum = static function (array $values, string $group) use ($view): array {
                     <p><?= $view->e($owners[0]->displayName) ?></p>
                     <input type="hidden" name="owner_user_id" value="<?= (int) $owners[0]->id ?>">
                 </div>
+            <?php endif; ?>
+            <?php if (($household_options ?? []) !== []): ?>
+                <?= $view->partial('partials/select', ['name' => 'household_id', 'label' => 'fields.household', 'value' => $input->householdId, 'options' => $household_options, 'errors' => $errors] + ($copy === null && count($household_options) > 1 ? ['blank' => 'households.choose'] : [])) ?>
             <?php endif; ?>
             <div class="form-field">
                 <label for="location_id"><?= $view->t('fields.location') ?></label>
