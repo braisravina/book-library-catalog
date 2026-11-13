@@ -25,12 +25,12 @@ changes.
 ```
 visitor --HTTPS--> Cloudflare edge --existing tunnel--> cloudflared (systemd, Docker host)
         --HTTP, loopback--> http://127.0.0.1:<DLA_HTTP_PORT>   (the one published port)
-        --> nginx:8080 --FastCGI (internal network)--> php-fpm --(internal)--> MySQL
+        --> nginx:8080 --FastCGI (internal network)--> php-fpm --(internal)--> MariaDB
 ```
 
 - **Only nginx is published, on `127.0.0.1` only.** The nginx entrypoint
   refuses any other bind address, so the origin is never reachable from the
-  LAN or the internet. PHP-FPM and MySQL have no host port.
+  LAN or the internet. PHP-FPM and MariaDB have no host port.
 - **Fail closed.** Compose refuses to run until `DLA_HTTP_PORT`,
   `DLA_EDGE_SUBNET` and `DLA_EDGE_GATEWAY` are set, because they have no
   defaults. nginx refuses to start without a client IP policy and
@@ -170,7 +170,7 @@ optional: the checks in 0.1 are enough.
   `/home/brais/git/digital-library.git` and checked out from it into the
   working tree `/opt/digital-library` (3.2; section 4 for updates). Pushing
   to the bare repository deploys nothing by itself.
-- The directories of section 3 initialised: on the system SSD the MySQL data,
+- The directories of section 3 initialised: on the system SSD the database data,
   secrets and guard directories in `/opt/digital-library-data` (outside
   the working tree), and the root-owned installed preflight;
   on the storage HDD (mounted at `/mnt/bravina-shared`) covers, backups and
@@ -203,7 +203,7 @@ sudo chmod 0440 "$data/secrets/db_password" "$data/secrets/db_migration_password
 Store copies in your password manager: restoring a backup on a new host
 needs them. An optional `GOOGLE_BOOKS_API_KEY` is added the same way, as
 another secret file plus an entry in `docker-compose.prod.yml` (not yet
-present). The owners are `999`, the `mysql` user of the MySQL image, and
+present). The owners are `999`, the `mysql` user of the MariaDB image, and
 `82`, the `www-data` user of the PHP image. Docker reads the files as root
 and shows each container the file's own owner and mode. The preflight
 checks owners and modes, never the values. 🧪 CI (same commands) ·
@@ -212,10 +212,15 @@ checks owners and modes, never the values. 🧪 CI (same commands) ·
 ## 3. Persistent storage, database and filesystem permissions
 
 - **Database accounts** (created by `docker/mysql/init/01-create-users.sh` on
-  the first start of an empty MySQL data directory): `library_app` (SELECT,
+  the first start of an empty data directory): `library_app` (SELECT,
   INSERT, UPDATE, DELETE) for the web container; `library_migrator` (plus
   CREATE, ALTER, DROP, INDEX, REFERENCES) for the ops container;
-  `root@localhost` only inside the db container. ✅ local (script) · 🧪 CI
+  `root@localhost` only inside the db container (`MARIADB_ROOT_HOST`, so
+  no `root@'%'`). The MariaDB image also creates `healthcheck@localhost`,
+  `@127.0.0.1` and `@::1` with USAGE only (no privilege; password in the
+  data directory), and the locked `mariadb.sys@localhost`. The script
+  writes `.dla-init-complete` last; the guard refuses a data directory
+  without it. ✅ local (script; real MariaDB 11.4.13 init) · 🧪 CI
 - **Roles in code:** the web container (`APP_ROLE=web`) refuses migration or
   root credentials and every operations command; production operations run
   only in the `ops` container. ✅ local
@@ -288,9 +293,11 @@ Where the owners come from:
 - **`82:82`**: `docker/php/Dockerfile`, `prod` stage, runs as `USER www-data`.
   The base image is `php:8.4.27-fpm-alpine3.24`, where `www-data` is uid 82,
   gid 82. CI checks `id -u` = 82.
-- **`999:999`**: the `mysql:8.4.13` image (no Dockerfile of ours) creates the
-  `mysql` user and group with uid/gid 999. Its entrypoint starts as root,
-  fixes ownership inside `/var/lib/mysql` and runs `mysqld` as `mysql`.
+- **`999:999`**: the `mariadb:11.4.13-noble` image (no Dockerfile of ours)
+  creates the `mysql` user and group with uid/gid 999 (checked in the image's
+  `/etc/passwd`). Its entrypoint starts as root, fixes ownership inside
+  `/var/lib/mysql` and runs `mariadbd` as `mysql`. The directory keeps the
+  name `mysql/` (MariaDB also uses `/var/lib/mysql`).
 - **nginx** (`USER nginx`, uid 101) mounts no storage.
 - The roots' modes only affect users on the host. Containers see their
   mounts directly and never walk the host path.
@@ -433,9 +440,10 @@ It exits 1 on any failure (then do not start the stack). It checks:
   - `--first-deployment`: `mysql/` must be **empty**, and the root-owned
     authorisation file `mysql-init-guard/allow-empty-init` must
     exist (section 6).
-  - `--existing-installation`: `mysql/mysql.ibd` **and** the application
-    schema directory (`mysql/<DB_DATABASE>`) must exist, and no
-    authorisation file may be left behind.
+  - `--existing-installation`: the MariaDB system schema `mysql/mysql/`,
+    the completion marker `mysql/.dla-init-complete` **and** the application
+    schema directory (`mysql/<DB_DATABASE>`) must exist; no MySQL 8 file
+    (`mysql/mysql.ibd`) and no authorisation file may be present.
 - **Space:** at least 20 GB free on the HDD (`--min-free-gb`).
 
 ✅ local (behaviour tests with simulated `findmnt`/`stat`/`find`) ·
@@ -474,8 +482,10 @@ boot path:
     refuses to *start* one whose source is missing. The source is never
     created.
   - The database guard (`docker/mysql/db-guard.sh`, the db entrypoint) runs
-    however db is started. It refuses to let MySQL initialise a new, empty
-    database unless a first deployment is authorised (section 6).
+    however db is started. It refuses to let MariaDB initialise a new, empty
+    database unless a first deployment is authorised (section 6), and it
+    refuses a data directory whose initialisation did not finish (no
+    `.dla-init-complete`) or that holds MySQL 8 files (`mysql.ibd`).
   - 🧪 CI (HDD root removed; SSD database directory replaced by an empty
     one; SSD database directory removed: each refused, nothing created) ·
     ⚠ production
@@ -532,7 +542,7 @@ mounts are the same as when you run `dc` there by hand.
 | Boot, HDD mounted and correct, database present | Docker starts (no Digital Library containers). The HDD mount, then the unit: preflight ok, `up --wait`, the stack runs. |
 | Boot, HDD missing (fstab `nofail`) | The mount unit fails, so the unit fails ("dependency failed"). **No container starts, db included**, although the database is on the SSD. Other workloads are unaffected. |
 | Boot, a different or misconfigured HDD at the mountpoint | The preflight fails (UUID, type, `ro`, owner/mode, missing directory), the unit fails, and the stack stays stopped. |
-| Boot, the SSD database directory is empty, replaced or missing | The preflight fails (`mysql.ibd` or schema missing, or the directory missing). Even if db is started some other way, the guard refuses to initialise, or Docker refuses the missing mount source. |
+| Boot, the SSD database directory is empty, replaced or missing | The preflight fails (`mysql/`, `.dla-init-complete` or schema missing, MySQL 8 files present, or the directory missing). Even if db is started some other way, the guard refuses to initialise or to start an incomplete database, or Docker refuses the missing mount source. |
 | Power loss, then boot | Same as the rows above. No container has a restart policy, so none starts before the unit. |
 | `sudo systemctl restart docker` (e.g. a Docker package upgrade) | Docker restarts your other workloads per their own policies. This unit is restarted with it (`Requires=`), so the preflight runs again. |
 | The Docker daemon crashes | Containers stop and are not restarted by Docker. Run `sudo systemctl restart digital-library`. |
@@ -655,6 +665,50 @@ To refresh a base image, change tag and digest together
 (`docker buildx imagetools inspect <image>:<tag>`), rebuild, and let CI pass.
 🧪 CI (build) · ⚠ production
 
+### 5.1 Database engine and the production CPU
+
+Production runs **MariaDB 11.4 LTS** (`mariadb:11.4.13-noble`, pinned by
+index digest). The Docker host's CPU (Intel Pentium E5300) has SSE2, SSE3
+and SSSE3 but not SSE4.1, SSE4.2 or POPCNT. The `mysql:8.4` image is built
+on Oracle Linux 9, whose glibc requires x86-64-v2 (SSE4.2, POPCNT), so it
+cannot start there ("Fatal glibc error: CPU does not support x86-64-v2").
+The MariaDB image is Ubuntu 24.04 based: its glibc and `mariadbd` require
+only the x86-64 baseline, and faster CRC-32 code is used only when `cpuid`
+reports the instructions. Never use the `-ubi` (RHEL 9) MariaDB tags.
+ARCHITECTURE.md, "Production database", has the evidence and the
+compatibility rules.
+
+Before the first deployment, prove it **on the Docker host** (read-only:
+it starts no database, mounts nothing, and the container is removed):
+
+```bash
+cd /opt/digital-library
+img=$(docker compose -f docker-compose.prod.yml --env-file .env.production config --format json | jq -r .services.db.image)
+docker run --rm --network none --entrypoint mariadbd "$img" --version      # prints "mariadbd  Ver 11.4.13-MariaDB..."; no glibc error
+docker run --rm --network none --entrypoint php "digital-library-php:${APP_IMAGE_TAG:-prod}" -r 'echo PHP_VERSION, PHP_EOL;'
+docker run --rm --network none --entrypoint nginx "digital-library-nginx:${APP_IMAGE_TAG:-prod}" -v
+```
+
+A "Fatal glibc error" or "Illegal instruction" in any of them means
+stop: do not start the stack. 🧪 CI (static CPU-baseline check of the
+images) · ⚠ production (the only check on the real CPU)
+
+**A server prepared for the MySQL image** (prepared, never started): the
+directories, owners, secrets and `.env.production` stay exactly as they
+are (MariaDB uses uid/gid 999 too, and the same secret files). Only the
+release changes. Check that the database directory is still empty and
+install the reviewed preflight again (section 3.2), because it changed:
+
+```bash
+sudo find /opt/digital-library-data/mysql -mindepth 1 -print -quit    # must print nothing
+sudo install -o root -g root -m 0755 /opt/digital-library/docker/storage/preflight.sh /usr/local/sbin/digital-library-preflight
+docker image rm mysql:8.4.13 2>/dev/null || true                      # optional: the unused MySQL image
+```
+
+**After a MariaDB image update** (a new pinned digest): with a backup
+taken, start db and run `mariadb-upgrade` once (MARIADB_AUTO_UPGRADE is
+deliberately off): docs/OPERATIONS.md, "Database engine".
+
 ## 6. Database: first deployment or existing installation
 
 **First deployment only: a new, empty database, explicitly authorised.**
@@ -667,7 +721,7 @@ dc up -d --wait db                         # the guard logs: "initialising a NEW
 sudo rm /opt/digital-library-data/mysql-init-guard/allow-empty-init        # withdraw it immediately
 dc run --rm ops php bin/console config:check --strict
 dc run --rm ops php bin/console migrate
-dc run --rm ops php bin/console migrate:status        # nothing pending or MODIFIED
+dc run --rm ops php bin/console migrate:status        # "Database engine: MariaDB"; nothing pending, MODIFIED or OTHER-ENGINE
 dc run --rm ops php bin/console user:create --email=<you> --name="<name>" --role=admin   # password from STDIN
 sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --existing-installation   # from now on, always this mode
 ```
@@ -680,14 +734,17 @@ sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.
 dc up -d --wait db
 dc run --rm ops php bin/console config:check --strict
 dc run --rm ops php bin/console migrate
-dc run --rm ops php bin/console migrate:status        # nothing pending or MODIFIED
+dc run --rm ops php bin/console migrate:status        # nothing pending, MODIFIED or OTHER-ENGINE
 ```
 
 The guard in the db container (`docker/mysql/db-guard.sh`) is the safety
 net. If `/opt/digital-library-data/mysql` is empty and no authorisation file is
 present, db refuses to start ("refusing to initialise a new, empty
 database") instead of silently creating a new database. It also refuses a
-directory that has files but no database. Migrations are forward-only.
+directory that has files but no database, a database whose initialisation
+did not finish (no `.dla-init-complete`: the accounts may be missing) and
+MySQL 8 files. Migrations are forward-only; one released migration has a
+MariaDB variant (ARCHITECTURE.md, "Migrations").
 ✅ local (guard behaviour tests) · 🧪 CI · ⚠ production
 
 ## 7. Health checks
@@ -695,12 +752,13 @@ directory that has files but no database. Migrations are forward-only.
 ```bash
 dc up -d --wait                       # waits for db, php and nginx to be healthy
 dc ps
-dc exec -T nginx wget -q -O - http://127.0.0.1:8080/health   # {"status":"ok"}: nginx -> PHP -> MySQL
+dc exec -T nginx wget -q -O - http://127.0.0.1:8080/health   # {"status":"ok"}: nginx -> PHP -> MariaDB
 dc exec -T php php bin/console config:check --strict
 ```
 
 The containers' health checks: nginx `GET /health` every 30 s; php a TCP
-connect to PHP-FPM every 30 s; MySQL `mysqladmin ping` every 10 s. `/health`
+connect to PHP-FPM every 30 s; MariaDB `mariadb-admin ping` every 10 s (no
+credentials: it succeeds whenever the server answers, even "access denied"). `/health`
 reports only up/down and is exempt from the Host and trusted-proxy checks so
 probes work from inside the container. ✅ local (application and nginx
 behaviour) · 🧪 CI (containers)
@@ -817,7 +875,7 @@ directories under `/mnt/bravina-shared/digital-library`, which Compose never
 deletes, but `-v` is the habit that destroys data on stacks with volumes.
 Never delete or move those directories while the stack runs. After a suspected compromise: stop the stack, keep the
 volumes and logs for investigation, rotate every secret (section 2; the
-database passwords must also be changed inside MySQL), and restore from a
+database passwords must also be changed inside MariaDB), and restore from a
 backup made before the incident onto a rebuilt host. ⚠ production
 
 ## Resource planning
@@ -830,11 +888,11 @@ measured, and a wrong limit causes OOM kills during backups or restores.
 | Component | Current setting | Notes and conservative starting point |
 |---|---|---|
 | PHP-FPM | `pm = dynamic`, `max_children = 10`, `start_servers = 2`, `max_requests = 500` | Each worker typically uses tens of MB; `memory_limit = 256M` is a per-request ceiling, not usage. A sign-in hashes with Argon2id at `ARGON2_MEMORY_KIB=65536` (64 MiB for its duration). Size `max_children` ≈ (RAM you can give PHP) ÷ (measured p95 worker RSS + 64 MiB); on a 2 GB host start around 5–6. |
-| MySQL 8.4 | image defaults (`innodb_buffer_pool_size` 128 MiB, `max_connections` 151, Performance Schema on) | Performance Schema alone can take a few hundred MB. Options for a small host, in `docker/mysql/my.cnf` after measuring: `performance_schema = OFF` (loses diagnostics), `max_connections = 30` (PHP-FPM workers + ops + margin), `innodb_buffer_pool_size` ≈ data size + 25 %. |
-| Health checks | nginx/php 30 s, MySQL 10 s | Negligible: one small request, one TCP connect, one ping. |
+| MariaDB 11.4 | image defaults (`innodb_buffer_pool_size` 128 MiB, `max_connections` 151, Performance Schema off) | Options for a small host, in `docker/mysql/my.cnf` after measuring: `max_connections = 30` (PHP-FPM workers + ops + margin), `innodb_buffer_pool_size` ≈ data size + 25 %. |
+| Health checks | nginx/php 30 s, MariaDB 10 s | Negligible: one small request, one TCP connect, one ping. |
 | `/tmp` tmpfs | nginx 64 MB, php/ops 256 MB | Counts against RAM only when used: uploads (≤ 8 MB per request), sessions. |
 | Backups | single process, gzip level 6, 1 MiB chunks, 1,000-row batches | CPU-bound for a few seconds to minutes; schedule at night. Disk in `BACKUP_PATH`: the uncompressed dump plus the archive while running. |
-| Restore | streamed | `TEMP_PATH`: the whole uncompressed backup; covers: the files written; MySQL: the restored tables; with a safety backup, a second backup in `BACKUP_PATH`. |
+| Restore | streamed | `TEMP_PATH`: the whole uncompressed backup; covers: the files written; MariaDB: the restored tables; with a safety backup, a second backup in `BACKUP_PATH`. |
 | Logs | 10 MB × 5 per container | At most 200 MB for the four services. |
 
 ## First CI run (after you commit and push)

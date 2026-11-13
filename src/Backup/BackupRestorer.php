@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Backup;
 
+use DigitalLibrary\Database\Engine;
 use PDO;
 
 /**
@@ -28,7 +29,7 @@ use PDO;
  *  6. post-check: per-table row counts, foreign-key integrity and
  *     referenced covers.
  *
- * NOT atomic: MySQL DDL (DROP/CREATE TABLE) commits implicitly and cannot
+ * NOT atomic: MariaDB/MySQL DDL (DROP/CREATE TABLE) commits implicitly and cannot
  * be rolled back, so a failure in step 4 or 5 leaves the target PARTIALLY
  * restored. Such failures are reported as PARTIAL/INCOMPLETE (exit 2 from
  * the console), never as success; recovery is to restore again, or to
@@ -71,6 +72,23 @@ final class BackupRestorer
             throw new BackupException("The backup failed verification; nothing was changed:\n - " . implode("\n - ", $verification['errors']));
         }
         $manifest = $verification['manifest'];
+        // Table definitions are engine-specific (SHOW CREATE TABLE output,
+        // engine-specific migration variants): a MySQL backup cannot be
+        // restored into MariaDB or the reverse. Refuse before any change.
+        $sourceVersion = (string) ($manifest['database']['server_version'] ?? '');
+        if ($sourceVersion === '') {
+            throw new BackupException('The backup does not record its database server version, so its engine cannot be checked. Nothing was changed.');
+        }
+        $source = Engine::fromVersion($sourceVersion);
+        $target = Engine::of($this->pdo);
+        if ($source !== $target) {
+            throw new BackupException(sprintf(
+                'The backup was taken from %s (%s) and this server is %s; table definitions differ between engines, so it cannot be restored here. Nothing was changed.',
+                $source === Engine::MARIADB ? 'MariaDB' : 'MySQL',
+                preg_replace('/[^0-9A-Za-z.+\-]/', '', $sourceVersion),
+                $target === Engine::MARIADB ? 'MariaDB' : 'MySQL',
+            ));
+        }
         $expected = [];
         foreach ($manifest['files'] as $file) {
             $expected[$file['path']] = $file;

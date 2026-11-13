@@ -93,7 +93,11 @@ final class ProductionComposeTest extends TestCase
             self::assertMatchesRegularExpression(self::PINNED, $image);
         }
         self::assertStringContainsString('ARG PHP_IMAGE=php:8.4.', self::file('docker/php/Dockerfile'), 'PHP 8.4');
-        self::assertStringStartsWith('mysql:8.4.', self::services()['db']['image'], 'MySQL 8.4');
+        // MariaDB 11.4 LTS on Ubuntu noble (x86-64 baseline: runs on the production
+        // Pentium E5300 without SSE4.1/SSE4.2/POPCNT); 11.4.5+ for utf8mb4_0900_*.
+        self::assertMatchesRegularExpression('/^mariadb:11\.4\.(?:[5-9]|\d{2,})-noble@sha256:[0-9a-f]{64}$/', self::services()['db']['image'], 'MariaDB 11.4 (>= 11.4.5) on noble');
+        self::assertStringNotContainsString('ubi', self::services()['db']['image'], 'never the UBI (RHEL 9, x86-64-v2) variant');
+        self::assertSame(['mariadbd'], self::services()['db']['command']);
         foreach (['FROM ${COMPOSER_IMAGE} AS composer', 'FROM ${PHP_IMAGE} AS base'] as $from) {
             self::assertStringContainsString($from, self::file('docker/php/Dockerfile'));
         }
@@ -173,7 +177,11 @@ final class ProductionComposeTest extends TestCase
         foreach (['DB_MIGRATION_USERNAME', 'DB_MIGRATION_PASSWORD', 'DB_MIGRATION_PASSWORD_FILE', 'DB_ROOT_PASSWORD', 'DB_ROOT_PASSWORD_FILE'] as $key) {
             self::assertSame('', $services['php']['environment'][$key], "web container: {$key} explicitly cleared");
         }
-        self::assertSame('localhost', $services['db']['environment']['MYSQL_ROOT_HOST'], 'root only inside the db container');
+        self::assertSame('localhost', $services['db']['environment']['MARIADB_ROOT_HOST'], 'root only inside the db container (the image default would add root@%)');
+        self::assertSame('/run/secrets/db_root_password', $services['db']['environment']['MARIADB_ROOT_PASSWORD_FILE']);
+        foreach (['MYSQL_ROOT_HOST', 'MYSQL_ROOT_PASSWORD', 'MYSQL_ROOT_PASSWORD_FILE', 'MARIADB_ROOT_PASSWORD', 'MARIADB_RANDOM_ROOT_PASSWORD', 'MARIADB_ALLOW_EMPTY_ROOT_PASSWORD', 'MARIADB_USER', 'MARIADB_PASSWORD', 'MARIADB_AUTO_UPGRADE', 'MARIADB_MYSQL_LOCALHOST_USER'] as $key) {
+            self::assertArrayNotHasKey($key, $services['db']['environment'], "db: {$key} is not used (one root secret file; no extra accounts; explicit upgrades)");
+        }
         foreach ($services as $name => $service) {
             self::assertNotContains('.env', (array) ($service['env_file'] ?? []), $name . ': never the development .env');
             foreach ($service['environment'] ?? [] as $key => $value) {
@@ -248,7 +256,8 @@ final class ProductionComposeTest extends TestCase
     public function testDatabaseHealthCheckNeedsNoCredentials(): void
     {
         $test = self::services()['db']['healthcheck']['test'];
-        self::assertSame(['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '--silent'], $test);
+        // mariadb-admin ping exits 0 whenever the server answers, even with "access denied".
+        self::assertSame(['CMD', 'mariadb-admin', 'ping', '-h', '127.0.0.1', '--silent'], $test);
         // Mounts (persistent storage): PersistentStorageTest.
         self::assertSame(['./docker/mysql/db-guard.sh:/usr/local/bin/dla-db-guard:ro', './docker/mysql/init:/docker-entrypoint-initdb.d:ro', './docker/mysql/my.cnf:/etc/mysql/conf.d/app.cnf:ro'], array_values(array_filter(self::services()['db']['volumes'], 'is_string')));
     }

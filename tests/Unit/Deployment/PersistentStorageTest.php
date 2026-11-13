@@ -220,16 +220,18 @@ final class PersistentStorageTest extends TestCase
         }
     }
 
-    public function testTheGuardWrapsTheMysqlEntrypoint(): void
+    public function testTheGuardWrapsTheDatabaseEntrypoint(): void
     {
         $db = self::$compose['services']['db'];
         self::assertSame(['/usr/local/bin/dla-db-guard'], $db['entrypoint']);
-        self::assertSame(['mysqld'], $db['command'], 'The image\'s own command, passed through');
+        self::assertSame(['mariadbd'], $db['command'], 'The image\'s own command, passed through');
         self::assertContains('./docker/mysql/db-guard.sh:/usr/local/bin/dla-db-guard:ro', $db['volumes']);
         self::assertSame('100755', self::mode(self::GUARD));
         $guard = self::code(self::GUARD);
         self::assertSame(2, substr_count($guard, 'exec docker-entrypoint.sh "$@"'), 'Only two ways in: an existing database, or an authorised first deployment');
         self::assertStringContainsString('authorisation=${DLA_DB_INIT_DIR:-/run/dla-db-init}/allow-empty-init', $guard);
+        self::assertStringContainsString('marker=.dla-init-complete', $guard, 'Written last by docker/mysql/init/01-create-users.sh');
+        self::assertStringContainsString(': > "$DATADIR/.dla-init-complete"', self::code('docker/mysql/init/01-create-users.sh'));
         self::assertArrayNotHasKey('DLA_DB_DATADIR', $db['environment'], 'Test hooks are never set in production');
         self::assertArrayNotHasKey('DLA_DB_INIT_DIR', $db['environment']);
     }
@@ -246,7 +248,7 @@ final class PersistentStorageTest extends TestCase
         if ($files !== null) {
             mkdir($this->dir . '/data', 0700);
             foreach ($files as $file) {
-                file_put_contents($this->dir . '/data/' . $file, 'x');
+                str_ends_with($file, '/') ? mkdir($this->dir . '/data/' . $file, 0700) : file_put_contents($this->dir . '/data/' . $file, '');
             }
         }
         if ($authorised) {
@@ -255,20 +257,29 @@ final class PersistentStorageTest extends TestCase
         file_put_contents($this->dir . '/bin/docker-entrypoint.sh', "#!/bin/sh\necho \"STARTED \$*\"\n");
         chmod($this->dir . '/bin/docker-entrypoint.sh', 0700);
         $env = ['PATH' => $this->dir . '/bin:' . (string) getenv('PATH'), 'DLA_DB_DATADIR' => $this->dir . '/data', 'DLA_DB_INIT_DIR' => $this->dir . '/init'];
-        [$code, $output] = self::execute(['sh', self::path(self::GUARD), 'mysqld'], $env);
+        [$code, $output] = self::execute(['sh', self::path(self::GUARD), 'mariadbd'], $env);
 
         self::assertSame($starts ? 0 : 1, $code, $output);
-        self::assertSame($starts, str_contains($output, 'STARTED mysqld'), $output);
+        self::assertSame($starts, str_contains($output, 'STARTED mariadbd'), $output);
         self::assertStringContainsString($expect, $output);
     }
 
     /**
+     * Entries ending in "/" are directories. A MariaDB data directory has the
+     * system schema mysql/; the init script writes .dla-init-complete last.
+     *
      * @return iterable<string, array{list<string>|null, bool, bool, string}>
      */
     public static function guardCases(): iterable
     {
-        yield 'existing database' => [['mysql.ibd', 'ibdata1'], false, true, 'STARTED mysqld'];
-        yield 'existing database, authorisation left over' => [['mysql.ibd'], true, true, 'STARTED mysqld'];
+        yield 'existing database' => [['mysql/', '.dla-init-complete', 'ibdata1', 'library/'], false, true, 'STARTED mariadbd'];
+        yield 'existing database, authorisation left over' => [['mysql/', '.dla-init-complete'], true, true, 'STARTED mariadbd'];
+        yield 'initialisation did not finish' => [['mysql/', 'ibdata1', 'library/'], false, false, 'initialisation did not finish'];
+        yield 'initialisation did not finish, authorised' => [['mysql/', 'ibdata1'], true, false, 'initialisation did not finish'];
+        yield 'MySQL 8 data directory' => [['mysql.ibd', 'mysql/', 'ibdata1', '.dla-init-complete'], false, false, 'MySQL 8 data directory'];
+        yield 'MySQL 8 data directory, authorised' => [['mysql.ibd'], true, false, 'MySQL 8 data directory'];
+        yield 'marker without a database' => [['.dla-init-complete'], true, false, 'has files but no database'];
+        yield 'mysql is a file, not the system schema' => [['mysql', '.dla-init-complete'], false, false, 'has files but no database'];
         yield 'first deployment, authorised' => [[], true, true, 'initialising a NEW database'];
         yield 'empty, not authorised' => [[], false, false, 'refusing to initialise a new, empty database'];
         yield 'files but no database, authorised' => [['ibdata1'], true, false, 'has files but no database'];
@@ -476,8 +487,8 @@ final class PersistentStorageTest extends TestCase
         self::assertStringContainsString("jq -c '[.services[] | .restart] | unique')\" '[\"no\"]'", $ci, 'Compose resolves restart "no" everywhere');
         self::assertStringContainsString('test "$policies" = \'[{"restart":"no","service":"db"},{"restart":"no","service":"nginx"},{"restart":"no","service":"php"}]\'', $ci, 'Docker holds restart "no"');
         self::assertStringContainsString('refuse dc exec -T php touch /var/www/html/storage/backups/ci-write-test', $ci);
-        self::assertStringContainsString('refuse dc exec -T php test -e /var/lib/mysql/mysql.ibd', $ci);
-        self::assertStringContainsString('refuse dc exec -T nginx test -e /var/lib/mysql/mysql.ibd', $ci);
+        self::assertStringContainsString('refuse dc exec -T php test -e /var/lib/mysql/.dla-init-complete', $ci);
+        self::assertStringContainsString('refuse dc exec -T nginx test -e /var/lib/mysql/.dla-init-complete', $ci);
         $steps = BlockYaml::parseFile(self::path('.github/workflows/ci.yml'))['jobs']['production-stack']['steps'];
         $drill = array_values(array_filter($steps, static fn (array $s): bool => ($s['name'] ?? '') === 'Missing or unexpected storage fails closed (no Docker daemon restart)'));
         self::assertCount(1, $drill);
@@ -536,11 +547,13 @@ final class PersistentStorageTest extends TestCase
         $data = self::DATA;
         $installed = self::INSTALLED;
         $first = ['--env-file', 'ENV', '--first-deployment'];
-        $fresh = ["stat:{$data}/mysql/mysql.ibd" => null, "stat:{$data}/mysql/library" => null, "stat:{$data}/mysql-init-guard/allow-empty-init" => 'regular empty file|0|0|644'];
+        $fresh = ["stat:{$data}/mysql/mysql" => null, "stat:{$data}/mysql/.dla-init-complete" => null, "stat:{$data}/mysql/library" => null, "stat:{$data}/mysql-init-guard/allow-empty-init" => 'regular empty file|0|0|644'];
         $env = static fn (string $lines): array => ['env' => $lines];
 
         yield 'existing installation' => [[], [], 0, 'preflight: all storage checks passed.'];
-        yield 'existing: database present' => [[], [], 0, 'ok    existing MySQL database (mysql.ibd present)'];
+        yield 'existing: database present' => [[], [], 0, 'ok    existing MariaDB database (system schema mysql/ present)'];
+        yield 'existing: initialisation completed' => [[], [], 0, 'ok    database initialisation completed (.dla-init-complete present)'];
+        yield 'existing: marker with content' => [["stat:{$data}/mysql/.dla-init-complete" => 'regular file|999|999|600'], [], 0, 'ok    database initialisation completed'];
         yield 'existing: schema present' => [[], [], 0, "ok    application schema 'library' present"];
         yield 'existing: installed copy' => [[], [], 0, "ok    {$installed} is root-owned, mode 755"];
         yield 'existing: checkout copy identical' => [[], [], 0, "ok    the checkout's preflight is identical to the one running"];
@@ -551,14 +564,17 @@ final class PersistentStorageTest extends TestCase
         yield 'existing: working tree' => [[], [], 0, 'ok    /opt/digital-library is the working tree (owner uid 1000, 755)'];
         yield 'existing: data root' => [[], [], 0, 'ok    /opt/digital-library-data 0:0 755'];
         yield 'existing: root-owned env file' => [["stat:{$app}/.env.production" => 'regular file|0|1000|640|2049:20'], [], 0, 'ok    /opt/digital-library/.env.production uid 0, mode 640'];
-        yield 'existing: empty database directory' => [["stat:{$data}/mysql/mysql.ibd" => null], [], 1, 'FAIL  no MySQL database'];
+        yield 'existing: empty database directory' => [["stat:{$data}/mysql/mysql" => null, "stat:{$data}/mysql/.dla-init-complete" => null], [], 1, 'FAIL  no MariaDB database'];
+        yield 'existing: initialisation did not finish' => [["stat:{$data}/mysql/.dla-init-complete" => null], [], 1, "FAIL  {$data}/mysql/.dla-init-complete missing: the first initialisation did not finish"];
+        yield 'existing: marker is a directory' => [["stat:{$data}/mysql/.dla-init-complete" => 'directory|999|999|700'], [], 1, '.dla-init-complete missing'];
+        yield 'existing: MySQL 8 files' => [["stat:{$data}/mysql/mysql.ibd" => 'regular file|999|999|640'], [], 1, "FAIL  {$data}/mysql holds MySQL 8 files (mysql.ibd): MariaDB cannot use them"];
         yield 'existing: another database' => [["stat:{$data}/mysql/library" => null], [], 1, "FAIL  application schema 'library' missing"];
         yield 'existing: authorisation left behind' => [["stat:{$data}/mysql-init-guard/allow-empty-init" => 'regular empty file|0|0|644'], [], 1, 'is still present: remove it'];
         yield 'first deployment' => [$fresh, $first, 0, 'ok    /opt/digital-library-data/mysql is empty: a new database will be initialised'];
         yield 'first deployment: mode shown' => [$fresh, $first, 0, 'note  mode: FIRST DEPLOYMENT'];
         yield 'first deployment: directory not empty' => [$fresh + ['find:' . $data . '/mysql' => $data . '/mysql/ibdata1'], $first, 1, 'is not empty (/opt/digital-library-data/mysql/ibdata1): this is not a first deployment'];
         yield 'first deployment: existing database' => [['find:' . $data . '/mysql' => $data . '/mysql/mysql.ibd'], $first, 1, 'this is not a first deployment'];
-        yield 'first deployment: not authorised' => [["stat:{$data}/mysql/mysql.ibd" => null, "stat:{$data}/mysql/library" => null], $first, 1, 'FAIL  initialisation not authorised'];
+        yield 'first deployment: not authorised' => [["stat:{$data}/mysql/mysql" => null, "stat:{$data}/mysql/.dla-init-complete" => null, "stat:{$data}/mysql/library" => null], $first, 1, 'FAIL  initialisation not authorised'];
         yield 'first deployment: authorisation not root-owned' => [array_merge($fresh, ["stat:{$data}/mysql-init-guard/allow-empty-init" => 'regular empty file|1000|1000|644']), $first, 1, 'FAIL  initialisation not authorised'];
         yield 'usage: no mode' => [[], ['--env-file', 'ENV'], 2, 'usage:'];
         yield 'usage: both modes' => [[], ['--env-file', 'ENV', '--first-deployment', '--existing-installation'], 2, 'usage:'];
@@ -655,7 +671,8 @@ final class PersistentStorageTest extends TestCase
             "{$app}/docker/mysql/my.cnf" => 'regular file|1000|1000|644|2049:9',
             $data => 'directory|0|0|755',
             "{$data}/mysql" => 'directory|999|999|700',
-            "{$data}/mysql/mysql.ibd" => 'regular file|999|999|640',
+            "{$data}/mysql/mysql" => 'directory|999|999|700',
+            "{$data}/mysql/.dla-init-complete" => 'regular empty file|999|999|600',
             "{$data}/mysql/library" => 'directory|999|999|750',
             "{$data}/secrets" => 'directory|0|0|700',
             "{$data}/secrets/db_root_password" => 'regular file|999|999|400',

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Tests\Integration;
 
+use DigitalLibrary\Database\Engine;
 use DigitalLibrary\Backup\BackupCreator;
 use DigitalLibrary\Backup\BackupException;
 use DigitalLibrary\Backup\BackupRestorer;
@@ -418,7 +419,7 @@ final class BackupTest extends IntegrationTestCase
         $tar->addString('manifest.json', (string) json_encode([
             'format' => 'dla-backup', 'format_version' => 1, 'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
             'application' => ['schema_version' => 'x', 'migrations' => []],
-            'database' => ['file' => 'database.sql', 'tables' => []],
+            'database' => ['file' => 'database.sql', 'server_version' => $this->serverVersion ?? (string) $this->pdo()->query('SELECT VERSION()')->fetchColumn(), 'tables' => []],
             'covers' => ['referenced' => 0, 'files' => 0, 'missing' => []],
             'files' => [['path' => 'database.sql', 'size' => strlen($text), 'sha256' => $hash]],
         ]));
@@ -426,6 +427,32 @@ final class BackupTest extends IntegrationTestCase
         unlink($dump);
 
         return $archive;
+    }
+
+    /** server_version written by forgedArchive() (null: this server's). */
+    private ?string $serverVersion = null;
+
+    public function testBackupsFromTheOtherEngineOrWithoutAServerVersionAreRefusedBeforeAnyChange(): void
+    {
+        $before = $this->fingerprint();
+        $target = $this->work . '/engine-covers';
+        mkdir($target);
+        $other = Engine::of($this->pdo()) === Engine::MARIADB ? '8.4.13' : '11.4.13-MariaDB-ubu2404';
+        foreach ([$other => 'cannot be restored here', '' => 'does not record its database server version'] as $version => $message) {
+            $this->serverVersion = $version;
+            $archive = $this->forgedArchive('engine', ['SET NAMES utf8mb4;']);
+            try {
+                $this->restorer($target)->restore($archive, true);
+                self::fail('Restored a backup from: ' . ($version === '' ? 'an unknown server' : $version));
+            } catch (BackupException $e) {
+                self::assertStringContainsString($message, $e->getMessage());
+                self::assertStringContainsString('Nothing was changed', $e->getMessage());
+            }
+            unlink($archive);
+        }
+        // Same-engine archives pass this check: every other restore test, on both engines.
+        $this->serverVersion = null;
+        self::assertSame($before, $this->fingerprint(), 'Nothing was changed by the refused archives');
     }
 
     private function creator(): BackupCreator

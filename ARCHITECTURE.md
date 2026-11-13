@@ -19,7 +19,7 @@
 
 ```
 Browser ──HTTPS──▶ Cloudflare edge ──tunnel──▶ existing cloudflared (systemd, Docker host)
-                   ──HTTP──▶ 127.0.0.1:DLA_HTTP_PORT ───▶ nginx 1.30 (unprivileged, :8080) ──FastCGI──▶ php 8.4-fpm ──▶ mysql 8.4.13
+                   ──HTTP──▶ 127.0.0.1:DLA_HTTP_PORT ───▶ nginx 1.30 (unprivileged, :8080) ──FastCGI──▶ php 8.4-fpm ──▶ mariadb 11.4.13
                                                             serves /assets only                   runs public/index.php    no published port
 ```
 
@@ -35,8 +35,10 @@ published port, bound to `127.0.0.1` (see
   and `disable_functions` for process execution. In development the source
   tree is bind-mounted; the `prod` image target bakes code in, read-only to
   `www-data`, with only `storage/` writable.
-- **db** is MySQL 8.4 LTS. The init script creates two accounts (see
-  [Database access](#database-access)).
+- **db** is MariaDB 11.4 LTS in production and development (the production
+  CPU cannot run MySQL 8.4 images; see "Production database"). MySQL 8.4
+  stays supported and is tested in CI. The init script creates two
+  accounts (see [Database access](#database-access)).
 
 ## Source layout (`src/`, namespace `DigitalLibrary\`)
 
@@ -185,7 +187,7 @@ Controller (HTTP, permissions, audit)  ──▶  Input\* (parse + validate requ
   request data.
 - **Repositories** use prepared statements only. Dynamic SQL
   (`CatalogueSearch`) adds every value through `Database\Params`, which
-  gives each placeholder a unique name, because native MySQL prepares
+  gives each placeholder a unique name, because native MariaDB/MySQL prepares
   can't reuse one. It also escapes LIKE wildcards so `%` and `_` match
   literally. Column and table names are never taken from input.
 - **BookService** wraps each multi-table write (work + authors + categories
@@ -540,7 +542,7 @@ See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the operator's view.
   migration account; covers are placed by temporary file and rename. Row
   counts, **foreign-key integrity** (`foreignKeyViolations()`, as the dump
   loads with checks off) and covers are checked afterwards, and a mid-way
-  failure is reported as partial. A restore is **not atomic** (MySQL DDL
+  failure is reported as partial. A restore is **not atomic** (MariaDB/MySQL DDL
   commits implicitly); the safety backup is the rollback path.
 - **Maintenance and retention.** `MaintenanceMode` is a flag file;
   `Application` answers 503 while it exists, or while a restore into the
@@ -563,7 +565,8 @@ See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the operator's view.
 |---|---|---|
 | `DB_USERNAME` (`library_app`) | `SELECT, INSERT, UPDATE, DELETE` | Web application |
 | `DB_MIGRATION_USERNAME` (`library_migrator`) | the above plus `CREATE, ALTER, DROP, INDEX, REFERENCES` | `bin/console migrate` only |
-| `root` | everything | MySQL container initialisation only |
+| `root` | everything | database container only (`root@localhost`; initialisation, `mariadb-upgrade`) |
+| `healthcheck` (image) | `USAGE` only, `localhost`/`127.0.0.1`/`::1` | created by the MariaDB image; unused by this project |
 
 Connections use native prepared statements (`ATTR_EMULATE_PREPARES=false`),
 exceptions, `utf8mb4`, UTC and a strict `sql_mode`. Connection errors are
@@ -577,6 +580,24 @@ reduced to a SQLSTATE before they can reach any output. Multi-step writes use
   checksum. `migrate:status` reports `MODIFIED` if an applied file has since
   been edited. Never edit an applied migration; add a new one.
 - Runs are serialised with `GET_LOCK`.
+- **Engine-specific variants.** A released migration is never edited.
+  When one cannot run on MariaDB, a file with the **same name** in
+  `database/migrations/mariadb/` replaces it, only on a server whose
+  `VERSION()` positively identifies MariaDB (`Database\Engine`); every
+  other server runs the released file. One variant runs, one
+  `schema_migrations` row is written with the checksum of the file that
+  ran, and `migrate:status` shows the engine and `(MariaDB variant)`. A
+  history holding the other engine's checksum is refused by `migrate`
+  before any change and reported as `OTHER-ENGINE` (never rewritten). An
+  override may differ from its released file only by a `-- ` header and
+  documented replacements, and is frozen once released
+  (`MigrationFilesTest`). The only one:
+  `2026_10_13_155739_create_wishlist_items_table` (`RTRIM(isbn_13)` in the
+  generated `wanted_isbn_13`; MariaDB refuses a stored generated column
+  that returns a `CHAR` column, error 1901. `isbn_13` is exactly 13 digits,
+  so the value, index and uniqueness are identical; `DatabaseEngineTest`
+  checks this on both engines, with and without `PAD_CHAR_TO_FULL_LENGTH`).
+  New migrations must run unchanged on both engines (CI runs both).
 - Phase 3 added `2026_10_10_215610_add_row_versions.sql` (a `row_version`
   column on works, editions and copies; additive, existing rows start at 1).
   It applied cleanly to a database already at the Phase 2 schema.
@@ -584,7 +605,7 @@ reduced to a SQLSTATE before they can reach any output. Multi-step writes use
   (indexes only: author names, edition titles and creation dates, copies
   by edition and owner). It applies cleanly to a database at the Phase 1
   schema, which was verified in the Phase 2 session.
-- MySQL commits DDL implicitly, so a migration can't be rolled back as a
+- MariaDB and MySQL commit DDL implicitly, so a migration can't be rolled back as a
   unit. Keep each file small and focused. If one fails, fix forward with a
   new migration, or repair manually and re-run.
 
@@ -637,40 +658,40 @@ the Docker host with
 | `nginx` | `docker/nginx/Dockerfile`: pinned nginx, `nginx.prod.conf`, `default.conf`, `public/assets` baked in | `nginx` (101), port 8080, published on `127.0.0.1:DLA_HTTP_PORT` only | `frontend`, `edge` | none |
 | `php` | `docker/php/Dockerfile` target `prod` | `www-data` (82) | `frontend`, `backend`, `egress` | runtime DB account (`APP_ROLE=web`) |
 | `ops` | same image, profile `ops`, `run --rm` only | `www-data` (82) | `backend` | runtime + migration accounts (`APP_ROLE=ops`) |
-| `db` | pinned `mysql:8.4.13` | image entrypoint, then `mysql` (999) | `backend` | root (`root@localhost` only) |
+| `db` | pinned `mariadb:11.4.13-noble` | guard, image entrypoint, then `mysql` (999) | `backend` | root (`root@localhost` only) |
 
 - **Only nginx is published**, on `127.0.0.1` only (see
   "Production ingress"). `frontend` (nginx ↔ php) and `backend`
-  (php/ops ↔ MySQL) are `internal` networks with no route outside Docker;
+  (php/ops ↔ MariaDB) are `internal` networks with no route outside Docker;
   `edge` carries only nginx's published port. Only `php` joins `egress`, for ISBN metadata lookups (restrict it on the
   host firewall; drop it with `METADATA_PROVIDERS=none`). All networks
   belong to the Compose project (`digital-library-prod`); none is external
   or attachable.
 - **Least privilege.** `nginx`, `php` and `ops` have a read-only root
   filesystem, drop all capabilities, use `no-new-privileges` and a private
-  `/tmp` tmpfs. `db` uses `no-new-privileges` (the MySQL entrypoint needs
+  `/tmp` tmpfs. `db` uses `no-new-privileges` (the MariaDB entrypoint needs
   its default capabilities to switch to the `mysql` user).
 - **Credential separation** (`APP_ROLE`, enforced by `ConfigValidator`): the
   web container receives only `secrets/db_password` and has the migration
   and root settings explicitly cleared; with `APP_ROLE=web`, any migration
   or root credential is a configuration **error** (refuse to start / 503).
-  `ops` requires the migration account. The MySQL root password exists only
-  in the `db` container, and `MYSQL_ROOT_HOST=localhost` keeps root off the
-  network.
+  `ops` requires the migration account. The database root password exists
+  only in the `db` container, and `MARIADB_ROOT_HOST=localhost` keeps root
+  off the network (the image's default would also create `root@'%'`).
 - **Startup validation.** The PHP image's entrypoint runs
   `bin/console config:check` before PHP-FPM; errors stop the container.
   The nginx entrypoint refuses to start without an explicit client IP
   policy (below). Production still refuses to serve (503) on errors.
 - **Pinned images.** Base images are pinned by version and multi-architecture
   index digest (`php:8.4.27-fpm-alpine3.24`, `composer:2.11.2`,
-  `nginx:1.30.6-alpine3.24`, `mysql:8.4.13`); development uses the same
-  nginx and MySQL pins. Update tag and digest together
+  `nginx:1.30.6-alpine3.24`, `mariadb:11.4.13-noble`); development uses the
+  same nginx and MariaDB pins. Update tag and digest together
   (`docker buildx imagetools inspect <image>:<tag>` on the Docker host),
   then rebuild and rerun the suite.
 - **Health checks** (all `CMD`, no shell): nginx `GET /health` on
-  127.0.0.1:8080 (end to end through PHP to MySQL; `/health` is exempt from
+  127.0.0.1:8080 (end to end through PHP to MariaDB; `/health` is exempt from
   the Host and trusted-proxy checks); php: TCP connect to FPM on 9000; db:
-  `mysqladmin ping` over TCP without credentials (succeeds whenever the
+  `mariadb-admin ping` over TCP without credentials (succeeds whenever the
   server answers, and fails while the image initialises with networking
   off). `nginx` waits for a healthy `php`, `php` and `ops` for a healthy `db`.
 - **Restart and logs:** restart policy `"no"` for every service (Phase 5C).
@@ -680,6 +701,71 @@ the Docker host with
 - **Migrations:** `run --rm ops php bin/console migrate` on each release,
   before the new image takes traffic. Backups, restores, maintenance mode and
   cleanup run the same way (docs/OPERATIONS.md).
+
+### Production database (MariaDB 11.4)
+
+**Why MariaDB.** The production Docker host has an Intel Pentium E5300:
+SSE2, SSE3 and SSSE3, but no SSE4.1, SSE4.2 or POPCNT. The official
+`mysql:8.4` image is built on Oracle Linux 9, whose glibc requires
+x86-64-v2 and aborts at start on that CPU ("Fatal glibc error: CPU does not
+support x86-64-v2"; docker-library/mysql issue 1055). The official
+`mariadb:11.4.13-noble` image (MariaDB Foundation packages on Ubuntu
+24.04) is pinned instead, by index digest
+`sha256:5e73baf8…ab1532` (amd64 manifest `sha256:f6eca938…25e6`). MariaDB
+11.4 is a long-term release; 11.4.5 or later is required (below).
+
+**CPU evidence** (static, on the exact amd64 image; the CPU itself was not
+available):
+- glibc 2.39 and `mariadbd` carry the ELF note "x86 ISA needed:
+  x86-64-baseline". Ubuntu 24.04 targets the x86-64 baseline.
+- `mariadbd`'s SSE4.2/PCLMUL/AVX instructions are only in the CRC-32
+  functions, reached only through `crc32c_x86_available` and
+  `crc32_pclmul_enabled`, which test the `cpuid` bits first; on this CPU
+  the portable code runs. `tzcnt` (used by the compiler) runs as `bsf` on
+  older CPUs; there is no POPCNT. PCRE2's one `lzcnt` is its own JIT
+  feature probe.
+- The PHP-FPM and nginx images (Alpine 3.24, `-O2`, no `-march`): `php-fpm`,
+  `php`, the extensions, musl and `nginx` contain no instruction beyond
+  SSSE3. Libraries with run-time CPU dispatch (OpenSSL, libsodium,
+  liblzma, zstd, libjpeg-turbo, libwebp) contain faster paths behind
+  `cpuid` checks. The nginx configuration loads no dynamic module, so the
+  image's codec modules are never loaded. PHP's AVX detection (`xgetbv`)
+  runs only when `cpuid` reports OSXSAVE and AVX.
+- CI (`production-stack`, "CPU baseline of the production images") repeats
+  the ELF-note and instruction checks on every build. The only proof on the
+  real CPU is the owner's smoke test (docs/DEPLOYMENT.md 5.1).
+
+**Compatibility rules** (`Database\Engine` holds the few differences; write
+portable SQL everywhere else):
+- Collations: the schema keeps MySQL's `utf8mb4_0900_ai_ci` and
+  `utf8mb4_0900_as_ci` names. MariaDB 11.4.5+ maps them to its UCA 14.0.0
+  collations with MySQL's behaviour: case- and accent-insensitive (`ai_ci`),
+  accent-sensitive author/publisher matching (`as_ci`), and NO PAD
+  (trailing spaces significant). `DatabaseEngineTest` checks this on both.
+- No MySQL-only syntax: no `INSERT ... AS alias` row aliases (MariaDB
+  syntax error; `MetadataService` binds the values twice), no optimizer
+  hints (MariaDB ignores `/*+ MAX_EXECUTION_TIME */` as a comment: the
+  audit viewer's 5-second bound uses `Engine::boundedSelect()`, `SET
+  STATEMENT max_statement_time=... FOR` on MariaDB), no JSON operators.
+- Stored generated columns must not return a `CHAR` column (see
+  "Migrations" for the one override).
+- Differences that are only reported differently: CHECK violations are
+  error 4025 on MariaDB, 3819 on MySQL (`Engine::CHECK_VIOLATION_ERRORS`);
+  statement time-outs 1969 / 3024 (`Engine::TIMEOUT_ERRORS`); `JSON` is
+  `LONGTEXT` plus a `json_valid()` CHECK on MariaDB (invalid JSON is
+  refused on both); a foreign key without `ON DELETE` reads `RESTRICT` on
+  MariaDB and `NO ACTION` on MySQL (same InnoDB behaviour); recursive CTE
+  limits are `max_recursive_iterations` / `cte_max_recursion_depth`.
+- Authentication: `mysql_native_password` accounts (PHP's mysqlnd supports
+  it); connections stay on the internal `backend` network.
+- Backups are engine-specific (their `CREATE TABLE` statements):
+  `backup:restore` refuses an archive from the other engine, or one without
+  a recorded server version, before any change.
+- The image's entrypoint differs from MySQL's: only `mariadb*` binaries
+  (no `mysql`, `mysqladmin`), an initialised directory is detected by
+  `mysql/`, `MARIADB_ROOT_HOST` defaults to `%` (set to `localhost`), and
+  `MARIADB_AUTO_UPGRADE` stays off (explicit `mariadb-upgrade`,
+  docs/OPERATIONS.md "Database engine").
 
 ### Production secrets
 
@@ -699,11 +785,12 @@ container sees the host file's numeric owner and mode:
 
 The directory itself is `root:root`, `0700`. The storage preflight checks
 the owners and modes, never the values.
-The MySQL init script (`docker/mysql/init/01-create-users.sh`) reads
+The database init script (`docker/mysql/init/01-create-users.sh`) reads
 `DB_PASSWORD_FILE`/`DB_MIGRATION_PASSWORD_FILE` (refusing both a value and a
 file, or an unreadable/empty file) and runs only when the data volume is
-first initialised (an empty MySQL data directory, after the database guard
-allowed it). Keep copies in the password manager (docs/OPERATIONS.md,
+first initialised (an empty data directory, after the database guard
+allowed it). It uses the `mariadb` client (falling back to `mysql`) and
+writes `.dla-init-complete` last. Keep copies in the password manager (docs/OPERATIONS.md,
 "Secrets to preserve").
 
 ### Persistent storage and permissions
@@ -713,7 +800,7 @@ volumes, never `/mnt/dockerdata`.
 
 | Host path | Owner | Mode | Mounted at | Containers |
 |---|---|---|---|---|
-| SSD `/opt/digital-library-data/mysql/` | `999:999` (image `mysql` user) | `0700` | `/var/lib/mysql` | db |
+| SSD `/opt/digital-library-data/mysql/` | `999:999` (MariaDB image `mysql` user) | `0700` | `/var/lib/mysql` | db |
 | SSD `/opt/digital-library-data/mysql-init-guard/` | `root:root` | `0755` | `/run/dla-db-init` (ro) | db |
 | SSD `/opt/digital-library-data/secrets/<file>` | see "Production secrets" | | `/run/secrets/<file>` | per secret |
 | HDD `…/digital-library/storage/` | `82:82` (`www-data`) | `0750` | `/var/www/html/storage` | php, ops |
@@ -741,7 +828,7 @@ The locations:
 Inside the HDD's `storage/` there are two mountpoint stubs: `covers/`
 (`root:root` 0755) and `backups/` (`root:root` 0000, so the web container
 cannot use it). Owners come from the images: `USER www-data` (uid/gid 82 in
-the Alpine PHP base) and the `mysql` user (999) of the MySQL image. nginx
+the Alpine PHP base) and the `mysql` user (999) of the MariaDB image. nginx
 mounts nothing. php and nginx mount nothing from the SSD.
 
 The repository root is the Compose project directory and build context
@@ -760,11 +847,15 @@ preflight refuses `.git` or any data directory inside the working tree.
   root has a default in Compose.
 - **Database guard.** db's entrypoint is `docker/mysql/db-guard.sh`. It
   runs before the image's own entrypoint, however db is started. It starts
-  MySQL when `mysql.ibd` exists, and lets the image initialise a new
-  database only when the data directory is empty **and** the owner has
-  created `allow-empty-init` in the read-only guard directory (a first
+  MariaDB when the system schema `mysql/` **and** the completion marker
+  `.dla-init-complete` exist (the init script writes it last, after every
+  account and grant), and lets the image initialise a new database only
+  when the data directory is empty **and** the owner has created
+  `allow-empty-init` in the read-only guard directory (a first
   deployment). Otherwise it refuses: an empty directory without
-  authorisation, or files without a database.
+  authorisation, files without a database, an initialisation that did not
+  finish (the image leaves `mysql/` behind when an init script fails), or
+  MySQL 8 files (`mysql.ibd`).
 
 **Boot path.** `docker.service` is not modified: Docker and the owner's other
 workloads, such as Jellyfin, never depend on these disks. Every service has
@@ -781,8 +872,8 @@ boot path:
   (read-only), never the copy in the user-writable working tree: a checkout
   cannot change what root runs at boot. This checks the HDD's exact UUID, mountpoint, type and
   options, both layouts' owners and modes, and the database state:
-  `mysql.ibd` and the application schema present, no initialisation
-  authorisation left.
+  `mysql/`, `.dla-init-complete` and the application schema present, no
+  MySQL 8 files, no initialisation authorisation left.
 - Only then does it run `up -d --no-recreate --no-build --pull never
   --wait`.
 - Any failure stops the stack (`ExecStopPost`). Unmounting the disk through
@@ -813,7 +904,7 @@ tunnel (docs/DEPLOYMENT.md, section 0).
   only on internal networks, so nginx also joins `edge`. This plain bridge
   network belongs to the project and nginx is its only member. Its subnet
   and gateway (`DLA_EDGE_SUBNET`, `DLA_EDGE_GATEWAY`) are fixed and have
-  no default. PHP-FPM and MySQL stay on the internal
+  no default. PHP-FPM and MariaDB stay on the internal
   `frontend`/`backend` networks with no host port.
 - **Trusted peer = the `edge` gateway.** cloudflared connects to loopback,
   and Docker's port proxy or loopback NAT forwards the connection to nginx
@@ -848,8 +939,8 @@ the Docker host before go-live: build both images (`apk` and Composer
 access), `docker compose -f docker-compose.prod.yml config`, start-up with
 read-only root filesystems and dropped capabilities, health checks turning
 healthy, named-volume ownership on first use, secret file permissions as
-seen by uid 82 and 999, `MYSQL_ROOT_HOST=localhost` and the init script with
-`*_FILE` secrets on a fresh volume, the credential-less MySQL health check,
+seen by uid 82 and 999, `MARIADB_ROOT_HOST=localhost` and the init script with
+`*_FILE` secrets on a fresh volume, the credential-less MariaDB health check,
 egress filtering, the full test suite inside the built PHP image
 (`--fail-on-skipped`), and the nginx entrypoint refusing to start until the
 policy is installed. Once it runs, the CI job `production-stack` covers the
@@ -913,7 +1004,7 @@ To configure:
    `docker/nginx/production/client-ip.conf` (the production mount;
    `docker/nginx/client-ip.conf` stays the trust-nothing policy), replace the
    placeholder with `DLA_EDGE_GATEWAY`, and set `DLA_TRUSTED_PROXY=required`.
-4. Never publish PHP-FPM or MySQL; publish nginx only on `127.0.0.1`.
+4. Never publish PHP-FPM or MariaDB; publish nginx only on `127.0.0.1`.
 5. Run `php tests/nginx/run.php` (local nginx + PHP-FPM, unprivileged).
 6. Verify on the deployment: sign in from a known IP, then check
    `SELECT ip_address FROM audit_log ORDER BY id DESC LIMIT 1` and the
@@ -935,18 +1026,20 @@ where the application cannot see the port.
 
 - Unit tests isolate pure logic. Database-backed classes whose SQL is
   portable (the login throttle) also run against SQLite in memory.
-- Integration tests use real MySQL, run the real migrations, use the
+- Integration tests use a real database server (MariaDB 11.4 in the `test`
+  job, MySQL 8.4 in `test-mysql`), run the real migrations, use the
   least-privilege accounts, and drive `Application::handle()` in-process with
   an in-memory session standing in for the browser cookie.
 - Backup and restore tests write only to temporary directories, and restore
   only into the disposable `DB_TEST_DATABASE`. Afterwards they rebuild its
   schema from the migrations.
-- CI (`.github/workflows/ci.yml`; **written and statically tested, never
-  executed yet**) has four jobs:
+- CI (`.github/workflows/ci.yml`) has five jobs:
   - `test` (PHP 8.4): `composer validate --strict`, `composer audit`, lint,
     the full suite with `--fail-on-skipped --fail-on-warning` against the
-    production MySQL image (dedicated test accounts), and
-    `tests/nginx/run.php`;
+    production MariaDB image (dedicated test accounts; the engine is
+    confirmed first), and `tests/nginx/run.php`;
+  - `test-mysql` (PHP 8.4): the full suite against MySQL 8.4, a regression
+    check of the engine-specific code and the released migrations;
   - `unit-php83`: lint and the unit suite on PHP 8.3 (tooling compatibility);
   - `static`: shellcheck on every shell script, `docker build --check` on
     both Dockerfiles, `docker compose config` on both Compose files (the
@@ -959,7 +1052,10 @@ where the application cannot see the port.
     backs up, verifies and runs a restore drill (maintenance mode, web PHP
     stopped). It publishes nginx on the runner's `127.0.0.1:8089` and checks
     health, the `Secure` `__Host-` cookie, HSTS and the Host refusal through
-    that port, and that PHP-FPM and MySQL have no host port. Finally it
+    that port, and that PHP-FPM and MariaDB have no host port. It checks the
+    images' CPU baseline, the database engine, accounts and grants (root
+    only at localhost, USAGE-only healthcheck accounts), and that a missing
+    completion marker is refused. Finally it
     installs the production policy with the `edge` gateway
     (`DLA_TRUSTED_PROXY=required`) and checks, as a local client sending
     `CF-Connecting-IP`, that the logged client is the header's address with
@@ -981,6 +1077,6 @@ where the application cannot see the port.
   the Compose structure (parsed by the strict `Tests\Support\BlockYaml`
   reader), image pins, networks, credential separation per `APP_ROLE`
   against `.env.production.example`, the nginx and PHP entrypoints and the
-  MySQL init script (run with stub binaries), and the discovery script
+  database init script (run with stub binaries), and the discovery script
   (read-only commands only; planted tokens, e-mail addresses, password
   hashes and public client addresses never reach the report).

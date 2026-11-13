@@ -5,7 +5,7 @@
 # there. The stack's containers have restart policy "no", so the Docker
 # daemon never starts them by itself; this unit starts them after the
 # read-only storage preflight in --existing-installation mode (HDD: exact
-# mountpoint, UUID, ext4/rw, owners and modes; SSD: MySQL directory with
+# mountpoint, UUID, ext4/rw, owners and modes; SSD: MariaDB directory with
 # this installation's database, secrets, no initialisation authorisation;
 # the working tree holds no data and nothing writable by others).
 #
@@ -26,7 +26,7 @@
 #     (--no-recreate: exactly what you last deployed; --no-build --pull never:
 #     nothing is built or downloaded at boot) and waits for health checks;
 #   - HDD missing (fstab nofail), wrong or not a mountpoint, or an unexpected
-#     MySQL directory on the SSD: the unit fails (dependency, assertion or
+#     database directory on the SSD: the unit fails (dependency, assertion or
 #     preflight) and no container starts, db included;
 #   - any start failure, or "systemctl stop": the stack is stopped;
 #   - the HDD is unmounted while running (systemd sees the mount unit stop):

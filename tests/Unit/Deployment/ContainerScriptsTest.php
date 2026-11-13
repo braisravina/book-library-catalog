@@ -139,13 +139,18 @@ final class ContainerScriptsTest extends TestCase
         self::assertSame("started php bin/console migrate\n", $out);
     }
 
-    public function testMysqlInitReadsPasswordsFromSecretFiles(): void
+    public function testDatabaseInitReadsPasswordsFromSecretFilesAndMarksCompletion(): void
     {
-        $this->stub('mysql', 'cat > "$FAKE_SQL"; [ -n "${MYSQL_PWD:-}" ] && echo "root password passed" >> "$FAKE_SQL"; exit 0');
+        // MariaDB images ship only the "mariadb" client; it is preferred over "mysql".
+        $this->stub('mariadb', 'cat > "$FAKE_SQL"; [ -n "${MYSQL_PWD:-}" ] && echo "root password passed: $MYSQL_PWD" >> "$FAKE_SQL"; exit "${FAKE_CLIENT_RC:-0}"');
+        $this->stub('mysql', 'echo "mysql client used" >> "$FAKE_SQL"; exit 1');
         $sql = $this->tmp . '/out.sql';
+        $datadir = $this->tmp . '/datadir';
+        mkdir($datadir, 0700);
+        $marker = $datadir . '/.dla-init-complete';
         file_put_contents($this->tmp . '/app', "app'secret\\pw\r\n");
         file_put_contents($this->tmp . '/mig', "migration-secret\n");
-        $base = ['MYSQL_DATABASE' => 'library', 'DB_USERNAME' => 'library_app', 'DB_MIGRATION_USERNAME' => 'library_migrator', 'MYSQL_ROOT_PASSWORD' => 'root-pw', 'FAKE_SQL' => $sql];
+        $base = ['MYSQL_DATABASE' => 'library', 'DB_USERNAME' => 'library_app', 'DB_MIGRATION_USERNAME' => 'library_migrator', 'MARIADB_ROOT_PASSWORD' => 'root-pw', 'FAKE_SQL' => $sql, 'DLA_DB_DATADIR' => $datadir];
         $script = dirname(__DIR__, 3) . '/docker/mysql/init/01-create-users.sh';
 
         [$status, , $err] = $this->exec(['bash', $script], $base + ['DB_PASSWORD_FILE' => $this->tmp . '/app', 'DB_MIGRATION_PASSWORD_FILE' => $this->tmp . '/mig']);
@@ -153,26 +158,43 @@ final class ContainerScriptsTest extends TestCase
         $out = (string) file_get_contents($sql);
         self::assertStringContainsString("CREATE USER IF NOT EXISTS 'library_app'@'%' IDENTIFIED BY 'app''secret\\\\pw';", $out, 'File contents, trailing CR/LF removed, SQL-escaped');
         self::assertStringContainsString("CREATE USER IF NOT EXISTS 'library_migrator'@'%' IDENTIFIED BY 'migration-secret';", $out);
-        self::assertStringContainsString('root password passed', $out);
+        self::assertStringContainsString("GRANT SELECT, INSERT, UPDATE, DELETE ON `library`.* TO 'library_app'@'%';", $out, 'Application account: DML only');
+        self::assertStringContainsString('root password passed: root-pw', $out);
+        self::assertStringNotContainsString('mysql client used', $out);
         self::assertStringNotContainsString($this->tmp, $out, 'Paths are not passwords');
+        self::assertFileExists($marker, 'Completion marker written after every grant');
+        self::assertSame('0600', substr(sprintf('%o', fileperms($marker)), -4));
 
-        // Development: plain variables still work.
+        // Development: plain variables still work; MYSQL_ROOT_PASSWORD is the fallback name.
         unlink($sql);
-        [$status] = $this->exec(['bash', $script], $base + ['DB_PASSWORD' => 'dev-app', 'DB_MIGRATION_PASSWORD' => 'dev-mig']);
+        unlink($marker);
+        $dev = array_diff_key($base, ['MARIADB_ROOT_PASSWORD' => true]) + ['MYSQL_ROOT_PASSWORD' => 'mysql-root', 'DB_PASSWORD' => 'dev-app', 'DB_MIGRATION_PASSWORD' => 'dev-mig'];
+        [$status] = $this->exec(['bash', $script], $dev);
         self::assertSame(0, $status);
         self::assertStringContainsString("IDENTIFIED BY 'dev-app';", (string) file_get_contents($sql));
+        self::assertStringContainsString('root password passed: mysql-root', (string) file_get_contents($sql));
+        self::assertFileExists($marker);
 
         foreach ([
             'both forms' => ['DB_PASSWORD' => 'x', 'DB_PASSWORD_FILE' => $this->tmp . '/app', 'DB_MIGRATION_PASSWORD' => 'y'],
             'unreadable file' => ['DB_PASSWORD_FILE' => $this->tmp . '/missing', 'DB_MIGRATION_PASSWORD' => 'y'],
             'empty file' => ['DB_PASSWORD_FILE' => $this->emptyFile(), 'DB_MIGRATION_PASSWORD' => 'y'],
+            'no root password' => ['DB_PASSWORD' => 'x', 'DB_MIGRATION_PASSWORD' => 'y', 'MARIADB_ROOT_PASSWORD' => ''],
         ] as $name => $env) {
             @unlink($sql);
-            [$status, , $err] = $this->exec(['bash', $script], $base + $env);
+            @unlink($marker);
+            [$status, , $err] = $this->exec(['bash', $script], $env + $base);
             self::assertNotSame(0, $status, $name);
-            self::assertFileDoesNotExist($sql, $name . ': nothing reached MySQL');
+            self::assertFileDoesNotExist($sql, $name . ': nothing reached the database');
+            self::assertFileDoesNotExist($marker, $name . ': no completion marker');
             self::assertStringNotContainsString("app'secret", $err, $name);
         }
+
+        // The client fails part-way: no completion marker, so db-guard.sh refuses the directory.
+        @unlink($marker);
+        [$status] = $this->exec(['bash', $script], $base + ['DB_PASSWORD' => 'x', 'DB_MIGRATION_PASSWORD' => 'y', 'FAKE_CLIENT_RC' => '1']);
+        self::assertNotSame(0, $status);
+        self::assertFileDoesNotExist($marker, 'client failure: no completion marker');
     }
 
     private function emptyFile(): string

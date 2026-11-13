@@ -69,6 +69,10 @@ These rules apply to every commit, in every phase, with no exceptions.
   - ISBN-assisted entry: branch `isbn-assisted-entry` from `main` at the
     merge of Phase 5C, commit `4f36a3b7b2480680a3fc6e6c7c0b1f7656b678aa`
     (tree `b03398e08eaa46dfbfc6396393c132d2d125f011`).
+  - Production database on MariaDB (CPU compatibility): branch
+    `mariadb-production-db` from `main` at the merge of the ISBN-assisted
+    entry, commit `3f66a9e9a5d144857e6a9c4dc1b83a3163a2defc` (tree
+    `240c85fed992d7efe69ace73de60f68f495c5e3c`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -99,6 +103,20 @@ These rules apply to every commit, in every phase, with no exceptions.
   changes go in a **new** migration file
   (`database/migrations/YYYY_MM_DD_HHMMSS_name.sql`); never edit an applied
   migration. The runtime DB account has no DDL rights.
+- **Database engine:** production is MariaDB 11.4 LTS (`mariadb:11.4.x-noble`,
+  never `-ubi`): the production CPU (Pentium E5300, no SSE4.1/SSE4.2/POPCNT)
+  cannot run MySQL 8.4 images (x86-64-v2). MySQL 8.4 stays supported and
+  tested (CI `test-mysql`). Write SQL that runs unchanged on both: no
+  `INSERT ... AS alias`, no optimizer hints, no JSON operators, no stored
+  generated column returning a `CHAR` column. Engine differences live only
+  in `Database\Engine` (positive MariaDB detection, `boundedSelect()`,
+  error codes); tests must hold on both engines, never skip one. If a
+  released migration cannot run on MariaDB, add an override with the same
+  name in `database/migrations/mariadb/` (only a `-- ` header and
+  documented replacements, pinned in `MigrationFilesTest`); never edit the
+  released file and never rewrite `schema_migrations`. Backups restore only
+  into the same engine. Keep the CPU-baseline CI check passing for every
+  image change (ARCHITECTURE.md, "Production database").
 - **Authorization:** every state-changing controller action must check
   permissions server-side, including object-level checks through
   `Security\Authorizer`, not just the route guard.
@@ -169,7 +187,7 @@ These rules apply to every commit, in every phase, with no exceptions.
 - Production stack: `docker-compose.prod.yml` (never the development file).
   Keep its guarantees, which `tests/Unit/Deployment/` enforces: only nginx
   is published (one port, explicit `DLA_HTTP_BIND`/`DLA_HTTP_PORT` with no
-  defaults; never PHP-FPM or MySQL), internal app/database networks,
+  defaults; never PHP-FPM or MariaDB), internal app/database networks,
   non-root read-only containers, image pins with digests, `APP_ROLE=web`
   containers without migration or root credentials. Ingress reuses the
   owner's existing Cloudflare Tunnel (cloudflared systemd service on the
@@ -193,11 +211,13 @@ These rules apply to every commit, in every phase, with no exceptions.
   copy explicit paths only, never `COPY .`). systemd runs only the
   root-owned installed preflight `/usr/local/sbin/digital-library-preflight`,
   never a script from the user-writable working tree. Every data mount is a long-syntax bind with
-  `create_host_path: false`; neither root has a Compose default. MySQL data
-  only in db, backups only in ops. `docker/mysql/db-guard.sh` (db
-  entrypoint) never lets MySQL initialise an empty database without the
-  owner's first-deployment authorisation; the preflight's mode
-  (`--first-deployment` / `--existing-installation`) is always explicit. Owners: 999 (mysql) and 82
+  `create_host_path: false`; neither root has a Compose default. Database
+  data only in db, backups only in ops. `docker/mysql/db-guard.sh` (db
+  entrypoint) never lets MariaDB initialise an empty database without the
+  owner's first-deployment authorisation, and never starts a data directory
+  without `.dla-init-complete` (written last by the init script) or with
+  MySQL 8 files; the preflight's mode
+  (`--first-deployment` / `--existing-installation`) is always explicit. Owners: 999 (MariaDB's mysql) and 82
   (www-data); never `chmod 777` or recursive changes, never change the
   mountpoint's `root:root` 0755. `docker/storage/preflight.sh` stays
   read-only; `tests/Unit/Deployment/PersistentStorageTest.php` enforces it.

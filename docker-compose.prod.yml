@@ -4,7 +4,7 @@
 # cloudflared systemd service on this Docker host, reaches nginx through
 # ONE published loopback port; no cloudflared container, service or tunnel
 # is part of this stack. Cloudflare -> cloudflared (host) ->
-# http://127.0.0.1:<DLA_HTTP_PORT> -> nginx:8080 -> php-fpm -> MySQL.
+# http://127.0.0.1:<DLA_HTTP_PORT> -> nginx:8080 -> php-fpm -> MariaDB.
 # Fail closed: Compose refuses to run until DLA_HTTP_BIND, DLA_HTTP_PORT,
 # DLA_EDGE_SUBNET and DLA_EDGE_GATEWAY are set (no defaults), and nginx
 # refuses to start without the client IP policy. See docs/DEPLOYMENT.md,
@@ -29,9 +29,9 @@
 #   php    web requests (APP_ROLE=web): runtime database account only
 #   ops    one-off CLI work (APP_ROLE=ops; migrate, backups, restore, cleanup):
 #          runtime + migration accounts; started only with "run --rm ops ..."
-#   db     MySQL; the only container with the root password (root@localhost)
+#   db     MariaDB; the only container with the root password (root@localhost)
 # Only nginx publishes a port, on loopback only (the entrypoint refuses any
-# other address). PHP-FPM and MySQL are
+# other address). PHP-FPM and MariaDB are
 # never published: frontend and backend are internal networks (no route
 # outside Docker); only nginx joins edge (the published port) and only php
 # joins egress (ISBN metadata lookups).
@@ -135,7 +135,7 @@ services:
       - db_password
     volumes:
       # Host directories on the storage disk (section "Persistent storage"
-      # below). Never backups or MySQL data in the web container.
+      # below). Never backups or database files in the web container.
       - type: bind
         source: ${DLA_STORAGE_ROOT:?set DLA_STORAGE_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/storage
         target: /var/www/html/storage
@@ -230,13 +230,22 @@ services:
         max-file: "5"
 
   db:
-    image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    # MariaDB 11.4 LTS, official image on Ubuntu 24.04 (noble): its glibc and
+    # mariadbd need only the x86-64 baseline (SSE2), so it runs on the
+    # production CPU (Pentium E5300: SSE3/SSSE3, no SSE4.1/SSE4.2/POPCNT).
+    # mysql:8.4 (Oracle Linux 9, x86-64-v2) cannot start there. Faster CRC-32
+    # code paths are chosen at run time only when the CPU has them. Pinned by
+    # version and index digest; 11.4.5 or later is required (utf8mb4_0900_*
+    # collation names used by the migrations). See ARCHITECTURE.md
+    # "Production database".
+    image: mariadb:11.4.13-noble@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
     security_opt:
       - no-new-privileges:true
     environment:
-      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
-      MYSQL_ROOT_HOST: localhost
-      MYSQL_DATABASE: ${DB_DATABASE:?set DB_DATABASE (run with --env-file .env.production)}
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      # root@localhost only: the image would otherwise also create root@'%'.
+      MARIADB_ROOT_HOST: localhost
+      MARIADB_DATABASE: ${DB_DATABASE:?set DB_DATABASE (run with --env-file .env.production)}
       DB_USERNAME: ${DB_USERNAME:?set DB_USERNAME (run with --env-file .env.production)}
       DB_PASSWORD_FILE: /run/secrets/db_password
       DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME:?set DB_MIGRATION_USERNAME (run with --env-file .env.production)}
@@ -248,16 +257,20 @@ services:
     # The image's entrypoint runs only after docker/mysql/db-guard.sh: with no
     # database in /var/lib/mysql it refuses to initialise a new, empty one
     # unless the owner has authorised a first deployment (an
-    # allow-empty-init file in <data>/mysql-init-guard; section 3).
+    # allow-empty-init file in <data>/mysql-init-guard; section 3); it also
+    # refuses an initialisation that did not finish and a MySQL 8 directory.
+    # MARIADB_AUTO_UPGRADE is deliberately unset: after an image update the
+    # owner runs mariadb-upgrade explicitly (docs/OPERATIONS.md).
     entrypoint:
       - /usr/local/bin/dla-db-guard
     command:
-      - mysqld
+      - mariadbd
     volumes:
-      # MySQL data on the system SSD, in the data root outside the working
-      # tree, so outside Git and every build context. Never a named volume,
-      # never created on demand: a missing directory stops db instead of
-      # starting an empty database.
+      # Database files on the system SSD, in the data root outside the
+      # working tree, so outside Git and every build context. Never a named
+      # volume, never created on demand: a missing directory stops db instead
+      # of starting an empty database. The directory keeps its name "mysql"
+      # (MariaDB also uses /var/lib/mysql).
       - type: bind
         source: ${DLA_DATA_ROOT:?set DLA_DATA_ROOT in .env.production (see docs/DEPLOYMENT.md, section 3)}/mysql
         target: /var/lib/mysql
@@ -275,12 +288,12 @@ services:
     networks:
       - backend
     healthcheck:
-      # Liveness without credentials: mysqladmin ping succeeds whenever the
-      # server answers, even with "access denied". 127.0.0.1 (TCP) stays
+      # Liveness without credentials: mariadb-admin ping succeeds whenever
+      # the server answers, even with "access denied". 127.0.0.1 (TCP) stays
       # unreachable while the image initialises with networking disabled.
       test:
         - CMD
-        - mysqladmin
+        - mariadb-admin
         - ping
         - -h
         - 127.0.0.1
@@ -304,7 +317,7 @@ networks:
   # nginx <-> php-fpm. Internal: no route to or from outside Docker.
   frontend:
     internal: true
-  # php/ops <-> MySQL. Internal.
+  # php/ops <-> MariaDB. Internal.
   backend:
     internal: true
   # The published port only (nginx alone; Docker cannot publish a port of a
@@ -335,7 +348,7 @@ networks:
 #   No production data there.
 #   System SSD, data: DLA_DATA_ROOT (/opt/digital-library-data, root:root
 #   0755), outside the working tree:
-#     mysql/     999:999 0700  db only (/var/lib/mysql)
+#     mysql/     999:999 0700  db only (/var/lib/mysql; MariaDB's "mysql" user)
 #     secrets/   root:root 0700; files as in ARCHITECTURE.md "Production secrets"
 #     mysql-init-guard/  root:root 0755, db only, read-only: holds
 #                allow-empty-init only during a first deployment
@@ -349,7 +362,7 @@ networks:
 # these containers; digital-library.service (systemd, not a change to
 # docker.service) starts them only after the read-only preflight has
 # verified both disks, so no container can bypass it. Owners come from the
-# images (mysql 999, www-data 82). Initialisation, preflight and the boot
+# images (MariaDB's mysql 999, www-data 82). Initialisation, preflight and the boot
 # unit: docs/DEPLOYMENT.md, section 3.
 
 # Docker secrets read from files in the data root on the SSD, outside the

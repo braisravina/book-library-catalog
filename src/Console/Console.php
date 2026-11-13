@@ -157,12 +157,25 @@ final class Console
     private function migrateStatus(): int
     {
         $exit = 0;
-        foreach ($this->migrator()->status() as $row) {
-            $state = $row['applied'] ? ($row['modified'] ? 'MODIFIED' : 'applied') : 'pending';
-            if ($row['modified']) {
+        $migrator = $this->migrator();
+        $this->line('Database engine: ' . ($migrator->engine() === Migrator::ENGINE_MARIADB ? 'MariaDB' : 'MySQL'));
+        $otherEngine = false;
+        foreach ($migrator->status() as $row) {
+            $state = match (true) {
+                !$row['applied'] => 'pending',
+                $row['other_engine'] => 'OTHER-ENGINE',
+                $row['modified'] => 'MODIFIED',
+                default => 'applied',
+            };
+            if ($row['modified'] || $row['other_engine']) {
                 $exit = 1;
             }
-            $this->line(sprintf('%-9s %s', $state, $row['version']));
+            $otherEngine = $otherEngine || $row['other_engine'];
+            $variant = $row['variant'] === Migrator::ENGINE_MARIADB ? ' (MariaDB variant)' : '';
+            $this->line(sprintf('%-12s %s%s', $state, $row['version'], $variant));
+        }
+        if ($otherEngine) {
+            $this->line('OTHER-ENGINE: the history was written by the other database engine; migrate refuses to run (docs/OPERATIONS.md, "Database engine").');
         }
 
         return $exit;

@@ -1,5 +1,7 @@
 #!/bin/bash
-# Runs once, when the MySQL data volume is first initialised.
+# Runs once, when the database's data directory is first initialised (the
+# MariaDB image's docker-entrypoint.sh runs it with a temporary server on the
+# local socket, as the image's "mysql" user).
 # Creates two least-privilege accounts instead of using MYSQL_USER (which
 # would receive ALL PRIVILEGES on the database):
 #   - application account: data manipulation only (no DDL)
@@ -11,7 +13,12 @@
 #
 # Passwords may be given directly (development: DB_PASSWORD, ...) or as
 # files (production Docker secrets: DB_PASSWORD_FILE, ...), never both.
-# MYSQL_ROOT_PASSWORD(_FILE) is resolved by the MySQL image's own entrypoint.
+# The root password (MARIADB_ROOT_PASSWORD(_FILE), or the MYSQL_ names the
+# image also accepts) is resolved by the image's own entrypoint.
+#
+# Last of all, after every account and grant exists, it writes the marker
+# <datadir>/.dla-init-complete: docker/mysql/db-guard.sh refuses to start a
+# data directory without it (an initialisation that stopped half-way).
 set -euo pipefail
 
 # dla_file_env VAR: set VAR from VAR_FILE when given (trailing CR/LF removed, as
@@ -42,6 +49,14 @@ done
 : "${DB_PASSWORD:?DB_PASSWORD must be set}"
 : "${DB_MIGRATION_USERNAME:?DB_MIGRATION_USERNAME must be set}"
 : "${DB_MIGRATION_PASSWORD:?DB_MIGRATION_PASSWORD must be set}"
+
+ROOT_PW="${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"
+: "${ROOT_PW:?MARIADB_ROOT_PASSWORD (or MYSQL_ROOT_PASSWORD) must be set by the image entrypoint}"
+# MariaDB images ship only the mariadb client; keep the mysql name as a fallback.
+CLIENT="$(command -v mariadb || command -v mysql || true)"
+[[ -n "$CLIENT" ]] || { echo "No mariadb or mysql client in the image." >&2; exit 1; }
+DATADIR="${DLA_DB_DATADIR:-/var/lib/mysql}"
+[[ -d "$DATADIR" && -w "$DATADIR" ]] || { echo "$DATADIR is not a writable directory." >&2; exit 1; }
 
 sql_escape() { printf '%s' "$1" | sed "s/\\\\/\\\\\\\\/g; s/'/''/g"; }
 ident_ok() { [[ "$1" =~ ^[A-Za-z0-9_]+$ ]] || { echo "Invalid identifier: $1" >&2; exit 1; }; }
@@ -85,6 +100,10 @@ grant_pair() {
         grant_pair "$DB_TEST_DATABASE" "$DB_USERNAME" "$DB_MIGRATION_USERNAME"
     fi
     echo "FLUSH PRIVILEGES;"
-} | MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=socket -uroot --database=mysql
+} | MYSQL_PWD="${ROOT_PW}" "$CLIENT" --protocol=socket -uroot --database=mysql
+
+# Only reached when every statement above succeeded (set -e, pipefail).
+: > "$DATADIR/.dla-init-complete"
+chmod 0600 "$DATADIR/.dla-init-complete"
 
 echo "Created least-privilege accounts for: ${MYSQL_DATABASE}${DB_TEST_DATABASE:+ ${DB_TEST_DATABASE}}$([[ $DEDICATED == 1 ]] && echo ' (dedicated test accounts)')"

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Tests\Integration;
 
+use DigitalLibrary\Database\Engine;
 use DigitalLibrary\Core\Services;
 use DigitalLibrary\Database\ConnectionFactory;
 use DigitalLibrary\Http\Response;
@@ -221,7 +222,7 @@ final class InvitationTest extends IntegrationTestCase
             $insert(1, 'a@example.org', str_repeat('a', 64));
             self::fail('Administrator invitation accepted by the database');
         } catch (PDOException $e) {
-            self::assertSame(3819, $e->errorInfo[1]);
+            self::assertContains($e->errorInfo[1], Engine::CHECK_VIOLATION_ERRORS);
         }
         $insert(2, 'b@example.org', str_repeat('b', 64));
         try {
