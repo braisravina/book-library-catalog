@@ -1,0 +1,12 @@
+{
+  "key": "/books/OL62721526M",
+  "type": {"key": "/type/edition"},
+  "title": "The Earn2Trade Discount Code",
+  "subtitle": "Save on your trading evaluation",
+  "publishers": ["The Earn2Trade Discount Code"],
+  "publish_date": "2026",
+  "isbn_13": ["9780132350884"],
+  "works": [{"key": "/works/OL46188220W"}],
+  "description": {"type": "/type/text", "value": "Synthetic promotional text: use this discount code to get 20% off your first evaluation."},
+  "created": {"type": "/type/datetime", "value": "2026-11-10T03:47:52.625258"}
+}

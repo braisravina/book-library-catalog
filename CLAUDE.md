@@ -73,6 +73,12 @@ These rules apply to every commit, in every phase, with no exceptions.
     `mariadb-production-db` from `main` at the merge of the ISBN-assisted
     entry, commit `3f66a9e9a5d144857e6a9c4dc1b83a3163a2defc` (tree
     `240c85fed992d7efe69ace73de60f68f495c5e3c`).
+  - Open Library metadata and contributions: branch
+    `openlibrary-metadata-integration` from `main` at the merge of the
+    MariaDB production database, commit
+    `a1011219b94da04f18d75bc4093294107bc6739e` (tree
+    `356e95b264f7e9025efef8a6d6671cb24e720ffe`). It supersedes the first
+    delivery on `openlibrary-metadata` (based on `3f66a9e`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -159,6 +165,21 @@ These rules apply to every commit, in every phase, with no exceptions.
   Provider backoff only through `Backoff\ProviderBackoff` (429 and
   500/502/503/504, bounded, never sleeps in a request); tests use
   `Tests\Support\InMemoryBackoffStore`.
+- Online metadata is untrusted (`MetadataChecks`, ARCHITECTURE.md
+  "Untrusted metadata"):
+  - Questionable records never pre-fill, link or supply covers.
+  - Rules must be explainable; never reject unusual books on a single
+    trait; no scores or AI classifiers.
+  - Open Library is one provider: one cache row, backoff and pace, at most
+    three requests, and edition data only if the edition lists the ISBN.
+  - Never call the legacy Books API again.
+  - Requests go through `Backoff\FileRequestPacer`; tests use
+    `Tests\Support\RecordingPacer` and `Tests\Support\OpenLibraryFake`.
+  - Report each provider's outcome precisely.
+  - Open Library contributions stay manual: nothing is sent from the
+    server, no credentials, only allowlisted bibliographic fields the user
+    selects, never private data.
+  - Only the owner may set `METADATA_CONTACT`.
 - Administrative account changes go through `Auth\UserAdministration`
   (lock-out safeguards).
 - Loans change `copies.status` only through `Loans\LoanService` (copy lock,

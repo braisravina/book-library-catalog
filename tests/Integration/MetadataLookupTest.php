@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Tests\Integration;
 
+use DigitalLibrary\Tests\Support\OpenLibraryFake;
 use DigitalLibrary\Metadata\Http\HttpException;
 use DigitalLibrary\Metadata\Http\HttpResponse;
 use DigitalLibrary\Security\Role;
@@ -15,7 +16,9 @@ use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 final class MetadataLookupTest extends IntegrationTestCase
 {
     private const ISBN = '9788437604947';
-    private const OL = 'https://openlibrary.org/api/books?bibkeys=ISBN:9788437604947&format=json&jscmd=data';
+    /** Open Library's first request: the edition by ISBN. */
+    private const OL = 'https://openlibrary.org/isbn/9788437604947.json';
+    private const COVER = 'https://covers.openlibrary.org/b/id/1-L.jpg?default=false';
     private const GB = 'https://www.googleapis.com/books/v1/volumes?q=isbn:9788437604947';
     private const FIXTURES = __DIR__ . '/../Fixtures/metadata/';
 
@@ -29,7 +32,7 @@ final class MetadataLookupTest extends IntegrationTestCase
 
     private function bothProvidersRespond(): void
     {
-        self::$http->on(self::OL, new HttpResponse(200, (string) file_get_contents(self::FIXTURES . 'openlibrary_9788437604947.json')));
+        OpenLibraryFake::cienAnos(self::$http);
         self::$http->onPrefix(self::GB, new HttpResponse(200, (string) file_get_contents(self::FIXTURES . 'googlebooks_9788437604947.json')));
     }
 
@@ -59,7 +62,7 @@ final class MetadataLookupTest extends IntegrationTestCase
     public function testSavingLinksTheRecordAndImportsTheCoverThroughTheImagePipeline(): void
     {
         $this->bothProvidersRespond();
-        self::$http->on('https://covers.openlibrary.org/b/id/1-L.jpg', new HttpResponse(200, $this->pngBytes(300, 450), 'image/png'));
+        self::$http->on(self::COVER, new HttpResponse(200, $this->pngBytes(300, 450), 'image/png'));
         [$browser, $token] = $this->signedIn('member@example.org');
         $this->request($browser, 'GET', '/books/new?isbn=' . self::ISBN);
         $recordId = $this->countRows("SELECT id FROM metadata_records WHERE provider = 'open_library'");
@@ -93,7 +96,7 @@ final class MetadataLookupTest extends IntegrationTestCase
         self::assertSame(303, $response->status());
         self::assertNull($this->pdo()->query('SELECT metadata_record_id FROM editions')->fetchColumn());
         self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM covers'));
-        self::assertNotContains('https://covers.openlibrary.org/b/id/1-L.jpg', self::$http->requested, 'No download was attempted');
+        self::assertNotContains(self::COVER, self::$http->requested, 'No download was attempted');
     }
 
     public function testProviderFailureFallsBackToManualEntry(): void
@@ -125,7 +128,7 @@ final class MetadataLookupTest extends IntegrationTestCase
 
     public function testNotFoundIsCachedBriefly(): void
     {
-        self::$http->on(self::OL, new HttpResponse(200, '{}'));
+        OpenLibraryFake::missing(self::$http, self::ISBN);
         self::$http->onPrefix(self::GB, new HttpResponse(200, '{"kind":"books#volumes","totalItems":0}'));
         [$browser] = $this->signedIn('member@example.org');
 
@@ -141,35 +144,42 @@ final class MetadataLookupTest extends IntegrationTestCase
 
     public function testHostileProviderDataIsEscapedAndCannotSteerTheServer(): void
     {
-        $payload = ['ISBN:' . self::ISBN => [
-            'title' => '<img src=x onerror=alert(1)>"Title',
-            'authors' => [['name' => '<script>alert(2)</script>']],
-            'publishers' => [['name' => 'Evil "Press"']],
-            // A provider (or an attacker controlling its response) points the cover at an internal address.
-            'cover' => ['large' => 'http://169.254.169.254/latest/meta-data/'],
-        ]];
-        self::$http->on(self::OL, new HttpResponse(200, (string) json_encode($payload)));
+        $edition = [
+            'key' => '/books/OL7M', 'title' => '<img src=x onerror=alert(1)>"Title', 'publishers' => ['Evil "Press"'],
+            'isbn_13' => [self::ISBN], 'works' => [['key' => '/works/OL7W']],
+            // A provider (or an attacker controlling its response) tries to point the cover elsewhere:
+            // covers are cover IDs, so non-integers and negative IDs are ignored.
+            'covers' => ['http://169.254.169.254/latest/meta-data/', -1],
+            'description' => ['type' => '/type/text', 'value' => '<script>alert(3)</script>'],
+        ];
+        self::$http->on(self::OL, new HttpResponse(200, (string) json_encode($edition), 'application/json'));
+        \DigitalLibrary\Tests\Support\OpenLibraryFake::search(self::$http, \DigitalLibrary\Catalogue\Isbn::tryParse(self::ISBN), [
+            OpenLibraryFake::doc('OL7W', 'x', ['<script>alert(2)</script>'], [['key' => '/books/OL7M', 'isbn' => [self::ISBN]]]),
+        ]);
         self::$http->onPrefix(self::GB, new HttpResponse(200, '{"totalItems":0}'));
         [$browser, $token] = $this->signedIn('member@example.org');
 
         $html = $this->request($browser, 'GET', '/books/new?isbn=' . self::ISBN)->body();
         self::assertStringNotContainsString('<img src=x', $html);
         self::assertStringNotContainsString('<script>alert(2)', $html);
+        self::assertStringNotContainsString('<script>alert(3)', $html);
         self::assertStringContainsString('&lt;img src=x onerror=alert(1)&gt;&quot;Title', $html);
+        self::assertStringNotContainsString('name="import_cover"', $html, 'No cover is offered from a non-ID cover value');
 
         $recordId = $this->countRows("SELECT id FROM metadata_records WHERE provider = 'open_library'");
         $response = $this->request($browser, 'POST', '/books', ['_csrf' => $token, 'title' => 'Reviewed title', 'isbn' => self::ISBN, 'metadata_record_id' => (string) $recordId, 'import_cover' => '1']);
         self::assertSame(303, $response->status(), 'The book is still saved');
         self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM covers'));
-        self::assertNotContains('http://169.254.169.254/latest/meta-data/', self::$http->requested, 'The internal URL was never requested');
-        self::assertStringContainsString('the cover image could not be imported', $this->request($browser, 'GET', (string) $response->header('Location'))->body());
+        foreach (self::$http->requested as $url) {
+            self::assertStringNotContainsString('169.254.169.254', $url, 'The internal address was never requested');
+        }
     }
 
     #[RequiresPhpExtension('gd')]
     public function testNonImageCoverBytesAreRejected(): void
     {
         $this->bothProvidersRespond();
-        self::$http->on('https://covers.openlibrary.org/b/id/1-L.jpg', new HttpResponse(200, '<?php system($_GET["c"]); ?>', 'image/jpeg'));
+        self::$http->on(self::COVER, new HttpResponse(200, '<?php system($_GET["c"]); ?>', 'image/jpeg'));
         [$browser, $token] = $this->signedIn('member@example.org');
         $this->request($browser, 'GET', '/books/new?isbn=' . self::ISBN);
         $recordId = $this->countRows("SELECT id FROM metadata_records WHERE provider = 'open_library'");

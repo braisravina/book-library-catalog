@@ -7,10 +7,12 @@ namespace DigitalLibrary\Http\Controllers\Catalogue;
 use DigitalLibrary\Catalogue\DuplicateIsbnException;
 use DigitalLibrary\Catalogue\EditConflictException;
 use DigitalLibrary\Catalogue\Input\EditionInput;
+use DigitalLibrary\Catalogue\Isbn;
 use DigitalLibrary\Catalogue\Tree;
 use DigitalLibrary\Database\Transaction;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Http\Response;
+use DigitalLibrary\Metadata\OpenLibraryContribution;
 use DigitalLibrary\Security\Permission;
 use DigitalLibrary\Validation\Validator;
 
@@ -62,7 +64,56 @@ final class EditionController extends CatalogueBaseController
             'addable_collections' => $this->can($user, Permission::CollectionManageOwn) ? $this->services->collections()->addableFor($id, $user->id) : [],
             'can_wishlist' => $canWishlist,
             'wishlist_entry' => $canWishlist ? $this->services->wishlist()->wantedForEdition($user->id, $id, $edition['isbn_13']) : null,
+            'open_library' => $this->contribution($edition),
         ]);
+    }
+
+    /**
+     * Optional, human-reviewed contribution to Open Library. Read-only: it
+     * uses the catalogued edition and the CACHED lookup (no outbound
+     * request), prepares text only for the fields the user selected, and
+     * links to Open Library, where the user logs in and submits it. No
+     * Open Library credentials are involved, and no private data
+     * (copies, owners, locations, prices, notes) is used.
+     *
+     * @param array<string, string> $params
+     */
+    public function openLibrary(Request $request, array $params): Response
+    {
+        $edition = $this->found($this->services->editions()->find($this->id($params)));
+        $plan = $this->contribution($edition);
+        if ($plan === null) {
+            return Response::redirect('/editions/' . (int) $edition['id']);
+        }
+        $prepared = $request->query('prepared') === '1';
+        $fields = $plan->selection($prepared ? $request->queryList('fields') : null);
+        $text = $prepared && $fields !== [] ? $plan->text($fields) : null;
+
+        return $this->render('catalogue/edition_open_library', [
+            'page_title' => 'openlibrary.title',
+            'edition' => $edition,
+            'plan' => $plan,
+            'fields' => $fields,
+            'text' => $text,
+            'links' => $plan->links($text ?? $plan->text($fields)),
+        ]);
+    }
+
+    /**
+     * @param array<string, mixed> $edition
+     */
+    private function contribution(array $edition): ?OpenLibraryContribution
+    {
+        $isbn = Isbn::tryParse((string) ($edition['isbn_13'] ?? ''));
+        if ($isbn === null) {
+            return null;
+        }
+        $metadata = $this->services->metadata();
+        $cached = $metadata->enabled() ? $metadata->lookup($isbn, null, network: false) : null;
+        $authors = array_map(static fn (array $a): array => ['name' => (string) $a['name'], 'role' => (string) $a['role']], $this->services->works()->authors((int) $edition['work_id']));
+        $contributors = array_map(static fn (array $c): array => ['name' => (string) $c['name'], 'role' => (string) $c['role']], $this->services->editions()->contributors((int) $edition['id']));
+
+        return OpenLibraryContribution::plan($edition, $authors, $contributors, $cached);
     }
 
     /**

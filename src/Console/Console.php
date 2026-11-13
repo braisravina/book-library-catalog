@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Console;
 
+use DigitalLibrary\Catalogue\Isbn;
 use DigitalLibrary\Core\Config;
 use DigitalLibrary\Core\ConfigValidator;
 use DigitalLibrary\Core\Services;
@@ -26,7 +27,7 @@ final class Console
      * create accounts: only the ops role may run them in production, and
      * never a container with APP_ROLE=web (in any environment).
      */
-    public const OPS_COMMANDS = ['migrate', 'user:create', 'backup:create', 'backup:restore', 'maintenance:on', 'maintenance:off', 'cleanup'];
+    public const OPS_COMMANDS = ['migrate', 'user:create', 'backup:create', 'backup:restore', 'maintenance:on', 'maintenance:off', 'cleanup', 'metadata:refresh'];
     /** Commands that must not overlap (OperationLock). */
     public const EXCLUSIVE_COMMANDS = ['migrate', 'backup:create', 'backup:restore', 'maintenance:off', 'cleanup'];
 
@@ -70,6 +71,7 @@ final class Console
                 'config:check' => $this->configCheck($options),
                 'migrate:status' => $this->migrateStatus(),
                 'user:create' => $this->createUser($options),
+                'metadata:refresh' => $this->metadataRefresh($options),
                 'backup:create' => $this->operations()->backupCreate($options),
                 'backup:verify' => $this->operations()->backupVerify($options),
                 'backup:restore' => $this->operations()->backupRestore($options),
@@ -182,6 +184,29 @@ final class Console
     }
 
     /**
+     * Selective cache invalidation (e.g. a wrong record that the provider
+     * has since corrected). Nothing is deleted and nothing is fetched here.
+     *
+     * @param array<string, string|true> $options
+     */
+    private function metadataRefresh(array $options): int
+    {
+        $isbn = Isbn::tryParse(is_string($options['isbn'] ?? null) ? $options['isbn'] : null);
+        if ($isbn === null) {
+            return $this->fail('metadata:refresh needs a valid --isbn=ISBN.');
+        }
+        $provider = is_string($options['provider'] ?? null) ? $options['provider'] : null;
+        try {
+            $count = $this->services->metadata()->invalidate($isbn, $provider);
+        } catch (\InvalidArgumentException $e) {
+            return $this->fail($e->getMessage());
+        }
+        $this->line(sprintf('Marked %d cached lookup(s) for %s as stale.', $count, $isbn->isbn13));
+
+        return 0;
+    }
+
+    /**
      * @param array<string, string|true> $options
      */
     private function createUser(array $options): int
@@ -279,8 +304,13 @@ final class Console
                                 [--covers-dir=DIR] [--skip-maintenance-check] [--allow-production]
                                 [--no-safety-backup]  skip the automatic backup of a non-empty target
 
-            Production: migrate, user:create, backup:create, backup:restore, maintenance:on|off
-            and cleanup run only with APP_ROLE=ops (the ops container), never with APP_ROLE=web.
+            Metadata:
+              metadata:refresh  Mark the cached online lookup of one ISBN as stale, so the next
+                                lookup asks the providers again (rows are kept)
+                                --isbn=ISBN [--provider=open_library|google_books]
+
+            Production: migrate, user:create, backup:create, backup:restore, maintenance:on|off,
+            cleanup and metadata:refresh run only with APP_ROLE=ops (the ops container), never with APP_ROLE=web.
             Operations that must not overlap take a lock and refuse to start while another runs.
 
             Maintenance:

@@ -115,6 +115,7 @@ final class ConfigValidatorTest extends TestCase
         yield 'no migration account' => [['DB_MIGRATION_USERNAME' => null, 'DB_MIGRATION_PASSWORD' => null], 'DB_MIGRATION_USERNAME'];
         yield 'root password visible' => [['DB_ROOT_PASSWORD' => 'Kx7mP2qL9vR4tN8wB3cY6hF1'], 'DB_ROOT_PASSWORD'];
         yield 'test settings present' => [['DB_TEST_DATABASE' => 'library_test'], 'DB_TEST_DATABASE'];
+        yield 'unusable metadata contact' => [['METADATA_CONTACT' => 'not a contact'], 'METADATA_CONTACT'];
         yield 'not an integer' => [['SESSION_IDLE_TIMEOUT' => '30m'], 'SESSION_IDLE_TIMEOUT'];
         yield 'out of range' => [['INVITATION_MAX_DAYS' => '365'], 'INVITATION_MAX_DAYS'];
         yield 'weak Argon2' => [['ARGON2_MEMORY_KIB' => '8192'], 'ARGON2_MEMORY_KIB'];

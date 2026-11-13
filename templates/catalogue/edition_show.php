@@ -8,6 +8,7 @@
  * @var bool $can_delete  @var bool $can_add_copy  @var int $max_upload_bytes
  * @var bool $can_wishlist  @var array<string, mixed>|null $wishlist_entry
  * @var list<array<string, mixed>> $in_collections  @var list<array<string, mixed>> $addable_collections
+ * @var \DigitalLibrary\Metadata\OpenLibraryContribution|null $open_library
  */
 $primary = $covers[0] ?? null;
 $authorNames = implode(', ', array_column(array_filter($authors, static fn (array $a): bool => $a['role'] === 'author'), 'name'));
@@ -198,6 +199,15 @@ $details = [
                     <span class="muted"><?= $view->e(implode(' · ', array_filter([(string) ($other['publisher_name'] ?? ''), (string) ($other['publication_year'] ?? ''), (string) ($other['isbn_13'] ?? '')]))) ?></span></li>
             <?php endforeach; ?>
         </ul>
+    </section>
+<?php endif; ?>
+
+<?php if (($open_library ?? null) !== null && $open_library->relevant()): ?>
+    <section class="open-library-hint" aria-labelledby="open-library-heading">
+        <h2 id="open-library-heading"><?= $view->t('openlibrary.heading') ?></h2>
+        <p><?= $view->t('openlibrary.hint.' . $open_library->situation) ?></p>
+        <p><a class="button" href="/editions/<?= (int) $edition['id'] ?>/open-library"><?= $view->t($open_library->situation === 'report' ? 'openlibrary.action.report' : 'openlibrary.action.contribute') ?></a></p>
+        <p class="hint"><?= $view->t('openlibrary.optional') ?></p>
     </section>
 <?php endif; ?>
 

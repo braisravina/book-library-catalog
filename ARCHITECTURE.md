@@ -62,7 +62,7 @@ published port, bound to `127.0.0.1` (see
 | `Export` | `CatalogueExport`, `PersonalExport` (keyset-batched sources), `Dataset`, `CsvWriter`, `JsonWriter` |
 | `Backup` | `BackupCreator`, `BackupVerifier`, `BackupRestorer`, `DatabaseDumper`, `DumpReader`, `Manifest`, strict `TarWriter`/`TarReader`/`TarPath` |
 | `Maintenance` | `Cleanup` (retention and housekeeping) |
-| `Metadata` | `MetadataService`, providers (`Provider\OpenLibraryProvider`, `Provider\GoogleBooksProvider`), `BookMetadata`, `MetadataPrefill`, `MetadataReview`, `CoverImporter`, provider backoff (`Backoff\ProviderBackoff`, `Backoff\FileBackoffStore`), hardened HTTP (`Http\CurlHttpClient`, `Http\OutboundPolicy`) |
+| `Metadata` | `MetadataService`, providers (`Provider\OpenLibraryProvider`, `Provider\GoogleBooksProvider`), `ProviderRecord`, `MetadataChecks`, `BookMetadata`, `MetadataPrefill`, `MetadataReview`, `OpenLibraryContribution`, `CoverImporter`, provider backoff and pacing (`Backoff\ProviderBackoff`, `Backoff\FileBackoffStore`, `Backoff\FileRequestPacer`), hardened HTTP (`Http\CurlHttpClient`, `Http\OutboundPolicy`) |
 | `Console` | `bin/console` commands (`Console`; backups, restore, maintenance and cleanup in `Operations`) |
 
 ## Request lifecycle
@@ -330,32 +330,95 @@ POST /books ──▶ cachedRecord(id, ISBN) must match ──▶ editions.metad
 
 - **Providers,** in priority order from `METADATA_PROVIDERS` (default
   `open_library,google_books`):
-  - Open Library Books API (`/api/books?bibkeys=ISBN:…&jscmd=data`);
+  - Open Library: one provider (one cache row, one backoff, one pace) over
+    at most three paced requests:
+    1. `/isbn/{isbn}.json`, the exact edition (Open Library answers 302 to
+       `/books/OL…M.json`, or 404). It is used only if the edition itself
+       lists the requested ISBN.
+    2. `/search.json?isbn=…&fields=…&limit=5`, a minimal field list. It
+       gives author names, the edition's work, and every other record that
+       claims the ISBN. It is also the fallback without an edition record,
+       and is used only when exactly one work lists the ISBN; the first
+       result is never assumed to be right.
+    3. `/works/{id}.json`, only when the edition has no description. It is
+       labelled "work record" and never replaces edition data.
+  - The legacy Books API (`/api/books`, "may be phased out") is no longer
+    called. Its cached payloads are still readable (linked editions) but
+    are refreshed on the next lookup and never used as a fallback.
   - Google Books (`/books/v1/volumes?q=isbn:…`). Its results are accepted
-    only if the volume lists the requested ISBN.
-  Fields are merged so the first provider wins and later ones fill gaps.
-- **Cache:** raw payloads live in `metadata_records`, positive results for
-  `METADATA_CACHE_DAYS` (30) and "not found" for one day. Transport failures
-  are not cached. Later steps (linking, cover import) use the cache, never
-  a new request from the browser.
+    only if the volume lists the requested ISBN. A 429 that names a daily
+    quota (no `Retry-After`) asks for the longest bounded pause.
+  Fields are merged so the first provider wins and later ones fill gaps,
+  from **usable** records only (see "Untrusted metadata").
+- **Cache:** raw payloads live in `metadata_records`, one row per provider
+  and ISBN, in the provider's current format (Open Library: `v: 2` with
+  the edition, search and work parts, trimmed and bounded). Lifetimes:
+  - positive results: `METADATA_CACHE_DAYS` (30);
+  - "not found" and partial results: one day;
+  - failures: never cached.
+  Validation status is derived from the stored payload on every read, so
+  rule changes apply to old entries. Corrupt or older-format entries are
+  ignored and replaced. Each write is one atomic upsert (portable: no row
+  alias), so concurrent lookups leave one complete row. `metadata:refresh
+  --isbn=… [--provider=…]` makes chosen entries stale without deleting
+  them (editions reference them). Later steps (linking, cover import) use
+  the cache, never a new request from the browser.
+- **Untrusted metadata** (`MetadataChecks`, `ProviderRecord`): HTTP 200,
+  and even a record that contains the ISBN, prove nothing.
+  - Warnings: no author; created in the last 30 days with no source
+    record; other books claim the ISBN; a year before ISBNs existed;
+    partial data.
+  - Questionable: shown for review, never pre-filled, never a cover or a
+    linked record. Only on strong, explainable signals: promotional
+    wording, the title also being the publisher **and** no author, or a
+    future year.
+  - Unusual but legitimate books (anonymous, self-published, odd titles,
+    one provider only) are never set aside. There is no score and no
+    statistical or AI classifier.
+  - Regression: ISBN 9780132350884 is attached on Open Library both to the
+    genuine edition and to a promotional edition, which the legacy API
+    returned.
+- **Outcomes** (`LookupResult::$outcomes`): one per provider:
+  - found, questionable, ambiguous, not found;
+  - cooling down, rate-limited (with minutes);
+  - server error, unavailable, network, DNS, timeout, TLS, invalid
+    response, blocked redirect, paced.
+  The page shows each one (`catalogue/_lookup_status`): "no record" is
+  never described as "busy", nor "could not be checked" as "no record".
+- **Pacing** (`Backoff\FileRequestPacer`): Open Library allows 1 request/s
+  without a contact in the User-Agent (3/s with one;
+  https://openlibrary.org/developers/api). Every Open Library request
+  reserves a slot one second apart, shared across PHP workers
+  (`storage/cache/metadata-pace-open_library.json`, `flock`, `0600`). A
+  required request waits at most 1.5 s; an optional one only takes a free
+  slot. Nothing ever retries. The User-Agent names the application and
+  adds a contact only if `METADATA_CONTACT` is set (unset by default).
 - **Review before saving:** provider data only pre-fills the form; it passes
   the same validation as manual input. Values are cleaned first (control
   characters removed, HTML stripped, lengths capped, years and page counts
   range-checked, languages mapped to the catalogue vocabulary).
 - **Outbound HTTP:** see SECURITY.md › Outbound requests. Tests use
   `tests/Support/FakeHttpClient`, which enforces the same `OutboundPolicy`.
-- **Cover import:** the server takes the cover URL from its cached record,
-  never from form input, and only for the same ISBN. It downloads the image
+- **Cover import:** the server takes the cover URL from its cached,
+  usable record, never from form input, and only for the same ISBN.
+  Open Library covers are built from numeric cover IDs
+  (`covers.openlibrary.org/b/id/{id}-L.jpg?default=false`: not rate
+  limited, 404 instead of a blank image); a response that is not an image
+  type is refused before the bytes are even validated. It downloads the image
   through the hardened client and stores it through
   `CoverImageProcessor::storeDownloaded()`: the same validation and
   re-encoding as uploads, without the HTTP-upload origin check, which can't
   apply to a server-side file.
 - **Review panel** (`MetadataReview`, `catalogue/_lookup_review`): built
-  from each provider's own normalised data (`LookupResult::$byProvider`):
-  the provider that supplied each pre-filled value, the fields no provider
-  supplied, and differing values from other providers (case, spacing,
-  trailing punctuation and author order are not differences). It reports;
-  it never invents or combines values. Cover URLs are never shown. After a
+  from every provider record, questionable ones included. It shows:
+  - the source of each value, with its origin (edition, work record,
+    search result);
+  - a status with a legend: corroborated (two **independent** providers
+    agree; Open Library's endpoints count as one), one source, sources
+    disagree, unreliable source only (not filled in), entered by you;
+  - the alternatives, the plausibility warnings, other records claiming
+    the ISBN, and missing fields.
+  It reports; it never invents or combines values. Cover URLs are never shown. After a
   validation error on `POST /books` the panel is rebuilt from the cache only
   (`lookup(..., network: false)`): no outbound request on POST.
 - **Existing works** (`WorkRepository::similar()`): same title or original
@@ -373,11 +436,32 @@ POST /books ──▶ cachedRecord(id, ISBN) must match ──▶ editions.metad
   request. State: `storage/cache/metadata-backoff-<provider>.json`
   (`FileBackoffStore`, `flock`ed, `0600`); if it cannot be written, there is
   simply no backoff. No schema change.
-- **Verification status:** in the development sandbox, Open Library is
-  blocked by egress policy and Google Books answers HTTP 429 without an API
-  key. Live transport and error handling were exercised, but a successful
-  live parse wasn't. Provider parsing is tested against fixtures in the
-  documented response formats.
+- **Open Library contributions** (optional, manual;
+  `OpenLibraryContribution`, `GET /editions/{id}/open-library`, same
+  permission as the edition page):
+  - **The situation** comes from the cached lookup only:
+    - report a questionable record or other claimants (instead of a
+      duplicate);
+    - improve an existing edition (fields missing there);
+    - add (search for the work first; a new edition or a new book);
+    - check (no saved lookup).
+  - **Field list:** the user selects the fields from an allowlist (ISBNs,
+    title, subtitle, authors, contributors, publisher, year, language,
+    pages, edition, format; legal deposit and description off by default).
+    The page shows which providers support each value.
+  - **What you get:** plain text to copy (English labels), and links to
+    Open Library and to its e-mail and librarians' tracker. You log in and
+    submit there.
+  - **Never:** a request to Open Library, credentials, cookies, tokens,
+    automation; private data (copies, owners, locations, prices,
+    acquisition data, notes, collections, wishlists, internal IDs, covers);
+    or a claim that a contribution was made.
+- **Verification status:** live, read-only requests on 2026-11-13 (see
+  the delivery report): Open Library's `/isbn/` endpoint gave the genuine
+  9780132350884 edition, and search also listed the promotional record.
+  9788409779550 had no Open Library record. Google Books answered 429
+  (anonymous daily quota). Provider parsing is tested against fixtures in
+  the documented response shapes.
 
 ## Library management (Phase 4A)
 

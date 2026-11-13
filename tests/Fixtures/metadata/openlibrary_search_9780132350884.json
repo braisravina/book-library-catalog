@@ -1,0 +1,11 @@
+{
+  "numFound": 2, "start": 0, "numFoundExact": true,
+  "docs": [
+    {"key": "/works/OL17618370W", "title": "Clean Code", "author_name": ["Robert C. Martin"], "first_publish_year": 2008,
+     "editions": {"numFound": 1, "start": 0, "numFoundExact": true, "docs": [
+       {"key": "/books/OL26222911M", "title": "Clean Code", "language": ["eng"], "publisher": ["Prentice Hall"], "publish_date": ["July 2008"], "isbn": ["9780132350884", "0132350882"]}]}},
+    {"key": "/works/OL46188220W", "title": "The Earn2Trade Discount Code", "first_publish_year": 2026,
+     "editions": {"numFound": 1, "start": 0, "numFoundExact": true, "docs": [
+       {"key": "/books/OL62721526M", "title": "The Earn2Trade Discount Code", "publisher": ["The Earn2Trade Discount Code"], "publish_date": ["2026"], "isbn": ["9780132350884", "0132350882"]}]}}
+  ]
+}

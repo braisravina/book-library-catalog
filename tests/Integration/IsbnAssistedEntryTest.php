@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace DigitalLibrary\Tests\Integration;
 
 use DigitalLibrary\Catalogue\Isbn;
+use DigitalLibrary\Metadata\Provider\OpenLibraryProvider;
+use DigitalLibrary\Tests\Support\OpenLibraryFake;
 use DigitalLibrary\Metadata\Http\HttpResponse;
 use DigitalLibrary\Security\Role;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -27,9 +29,10 @@ final class IsbnAssistedEntryTest extends IntegrationTestCase
         $this->memberId = $this->createUser('member@example.org', Role::Member);
     }
 
+    /** Open Library's first request for an ISBN: the edition endpoint. */
     private static function ol(string $isbn): string
     {
-        return 'https://openlibrary.org/api/books?bibkeys=ISBN:' . $isbn . '&format=json&jscmd=data';
+        return OpenLibraryProvider::editionUrl(Isbn::tryParse($isbn) ?? throw new \InvalidArgumentException($isbn));
     }
 
     private static function gb(string $isbn): string
@@ -38,11 +41,22 @@ final class IsbnAssistedEntryTest extends IntegrationTestCase
     }
 
     /**
-     * @param array<string, mixed> $record
+     * An Open Library edition (edition, search and work endpoints) described
+     * in the old Books API shape these tests were written with.
+     *
+     * @param array<string, mixed> $record title, subtitle, authors[{name}], publishers[{name}], publish_date, number_of_pages, cover
      */
-    private static function olSays(string $isbn, array $record, int $status = 200): void
+    private static function olSays(string $isbn, array $record): void
     {
-        self::$http->on(self::ol($isbn), new HttpResponse($status, (string) json_encode(['ISBN:' . $isbn => $record])));
+        $names = static fn (array $list): array => array_values(array_map(static fn (array $x): string => (string) $x['name'], $list));
+        OpenLibraryFake::book(self::$http, $isbn, array_filter([
+            'title' => $record['title'] ?? null,
+            'subtitle' => $record['subtitle'] ?? null,
+            'publishers' => isset($record['publishers']) ? $names($record['publishers']) : null,
+            'publish_date' => $record['publish_date'] ?? null,
+            'number_of_pages' => $record['number_of_pages'] ?? null,
+            'covers' => isset($record['cover']) ? [1] : null,
+        ], static fn (mixed $v): bool => $v !== null), $names($record['authors'] ?? []));
     }
 
     /**
@@ -196,8 +210,11 @@ final class IsbnAssistedEntryTest extends IntegrationTestCase
 
         self::assertStringContainsString('<h2 id="lookup-review-title">Online lookup results</h2>', $html);
         self::assertStringContainsString('<dt><a href="#title">Title</a></dt>', $html);
-        self::assertMatchesRegularExpression('#<a href="\#title">Title</a></dt>\s*<dd>\s*<span class="lookup-value">Cien años de soledad</span>\s*<span class="lookup-source">from Open Library</span>\s*</dd>#', $html, 'Case differences are not a conflict');
-        self::assertMatchesRegularExpression('#<a href="\#language">Language</a></dt>\s*<dd>\s*<span class="lookup-value">Spanish</span>\s*<span class="lookup-source">from Google Books</span>#', $html);
+        // Two independent providers give the same title (case aside): corroborated, not a conflict.
+        self::assertMatchesRegularExpression('#<a href="\#title">Title</a></dt>\s*<dd>\s*<span class="lookup-badge">Corroborated</span>\s*<span class="lookup-value">Cien años de soledad</span>\s*<span class="lookup-source">from Open Library</span>\s*</dd>#', $html, 'Case differences are not a conflict');
+        self::assertMatchesRegularExpression('#<a href="\#language">Language</a></dt>\s*<dd>\s*<span class="lookup-badge">One source</span>\s*<span class="lookup-value">Spanish</span>\s*<span class="lookup-source">from Google Books</span>#', $html);
+        self::assertMatchesRegularExpression('#<a href="\#publisher">Publisher</a></dt>\s*<dd>\s*<span class="lookup-badge">Sources disagree</span>#', $html);
+        self::assertStringContainsString('<dt>Corroborated</dt>', $html, 'The legend explains each label shown');
         self::assertStringContainsString('The sources disagree on some details.', $html);
         self::assertStringContainsString('<span class="lookup-alt-label">Other value found (Google Books):</span>', $html);
         self::assertStringContainsString('<button type="button" class="button button-small" hidden data-fill-target="publisher" data-fill-value="Ediciones Cátedra">Use this value', $html);

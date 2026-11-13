@@ -25,36 +25,25 @@ final class ProviderTest extends TestCase
         $this->isbn = Isbn::tryParse('978-84-376-0494-7') ?? throw new \LogicException();
     }
 
-    public function testOpenLibraryParsesBooksApiPayload(): void
+    /**
+     * Payloads the legacy Books API wrote before format 2 are still read
+     * (existing cache rows, linked editions), and marked for refresh.
+     */
+    public function testLegacyCachedOpenLibraryPayloadIsReadableButNotCurrent(): void
     {
-        $http = (new FakeHttpClient())->on(OpenLibraryProvider::url($this->isbn), new HttpResponse(200, (string) file_get_contents(self::FIXTURES . 'openlibrary_9788437604947.json')));
-        $provider = new OpenLibraryProvider($http);
-
-        $payload = $provider->fetch($this->isbn);
-        self::assertNotNull($payload);
-        $m = $provider->normalize($payload, $this->isbn);
+        $provider = new OpenLibraryProvider(new FakeHttpClient());
+        $legacy = json_decode((string) file_get_contents(self::FIXTURES . 'openlibrary_9788437604947.json'), true)['ISBN:9788437604947'];
+        self::assertFalse($provider->isCurrent($legacy));
+        $record = $provider->describe($legacy, $this->isbn);
+        $m = $record->metadata;
         self::assertSame('Cien años de soledad', $m->title);
         self::assertSame(['Gabriel García Márquez'], $m->authors);
         self::assertSame('Cátedra', $m->publisher);
         self::assertSame(2007, $m->publicationYear);
         self::assertSame(471, $m->pageCount);
         self::assertSame('https://covers.openlibrary.org/b/id/1-L.jpg', $m->coverUrl);
-        self::assertSame(['https://openlibrary.org/api/books?bibkeys=ISBN:9788437604947&format=json&jscmd=data'], $http->requested);
-    }
-
-    public function testOpenLibraryNotFoundAndErrors(): void
-    {
-        $url = OpenLibraryProvider::url($this->isbn);
-        self::assertNull((new OpenLibraryProvider((new FakeHttpClient())->on($url, new HttpResponse(200, '{}'))))->fetch($this->isbn));
-
-        foreach ([new HttpResponse(503, ''), new HttpResponse(200, 'not json')] as $response) {
-            try {
-                (new OpenLibraryProvider((new FakeHttpClient())->on($url, $response)))->fetch($this->isbn);
-                self::fail('Expected HttpException');
-            } catch (HttpException) {
-                $this->addToAssertionCount(1);
-            }
-        }
+        self::assertSame(['ol_edition' => 'OL0000000M'], $record->identifiers);
+        self::assertSame([], $record->warnings);
     }
 
     public function testGoogleBooksOnlyAcceptsVolumesListingTheIsbn(): void
@@ -121,7 +110,7 @@ final class ProviderTest extends TestCase
     public function testStatusFailuresCarryTheStatusAndRetryAfter(): void
     {
         $http = (new FakeHttpClient())
-            ->on(OpenLibraryProvider::url($this->isbn), new HttpResponse(503, 'down', 'text/plain', ['retry-after' => '120']))
+            ->on(OpenLibraryProvider::editionUrl($this->isbn), new HttpResponse(503, 'down', 'text/plain', ['retry-after' => '120']))
             ->onPrefix('https://www.googleapis.com/books/v1/volumes', new HttpResponse(429, '{"error":{"message":"secret detail"}}'));
 
         try {

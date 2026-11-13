@@ -90,6 +90,20 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
   the server downloads it, then validates and re-encodes it like an upload.
   Failures fall back to manual entry. Set `METADATA_PROVIDERS=none` to turn
   lookups off.
+- **Reliable online metadata and Open Library contributions.**
+  - Open Library is read through its exact-edition, search and work
+    endpoints (paced to its published limit; the legacy Books API is no
+    longer used).
+  - Records that look unreliable, such as the promotional record attached
+    to the Clean Code ISBN, are shown but never fill in the form.
+  - Each field says where it came from and whether independent sources
+    agree.
+  - Each source's outcome is explained separately: no record, rate
+    limited, unreachable, and so on.
+  - From a book's page you can optionally prepare its bibliographic
+    details for Open Library and add, improve or report the record there
+    yourself. Nothing is sent from the catalogue, and no Open Library
+    account is needed here.
 - **ISBN-assisted entry.** The ISBN step checks the number as it is typed
   and explains what is wrong (characters, length, 978/979 prefix or check
   digit); the server applies the same rules. Nothing is looked up until
@@ -238,7 +252,21 @@ The database has no published port. Only the `php` service can reach it.
     browser copy kept in step), manual entry, the review panel (sources,
     conflicts, missing fields, escaping), existing-work suggestions and the
     pre-filled new edition, per-provider backoff on 429/5xx and recovery,
-    translations, and static checks of the CSP-safe script and phone CSS.
+    translations, and static checks of the CSP-safe script and phone CSS;
+  - Open Library and untrusted metadata:
+    - the exact edition, the search fallback (never just the first
+      result), multiple editions and claimants, and work enrichment;
+    - the promotional record attached to 9780132350884 (set aside, Google
+      Books fills the form, report flow);
+    - the plausibility rules, including legitimate unusual books;
+    - corroboration statuses;
+    - per-provider outcomes (no record vs 429, server errors, DNS, TLS,
+      malformed JSON) and the shared Open Library cooldown and pacing;
+    - corrupt and legacy cache entries, selective invalidation and
+      concurrent cache writes;
+    - the contribution page: situations, allowlisted fields only, no
+      private data, no outbound request, permissions, escaping, copy
+      announcement and translations.
   Tests never touch the network.
 - **Phase 4A tests** cover:
   - loans: lending, return, history, duplicate active loans (service and

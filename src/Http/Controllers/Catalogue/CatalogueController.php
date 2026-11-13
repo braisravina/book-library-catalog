@@ -130,7 +130,7 @@ final class CatalogueController extends CatalogueBaseController
             // Re-display the review from the cache only: no outbound request on POST.
             $cached = $this->services->metadata()->lookup($edition->parsedIsbn(), $user->id, network: false);
             $lookup = ['record_id' => $recordId, 'cover_available' => $providerData->coverUrl !== '', 'import_cover' => $importCover]
-                + $this->lookupView($cached, false);
+                + $this->lookupView($cached, false, self::currentValues($work, $edition));
         }
 
         // Books without an ISBN: warn about same-title records unless the
@@ -199,20 +199,43 @@ final class CatalogueController extends CatalogueBaseController
      * What the template needs from a lookup. A record is only linked
      * (metadata_record_id, cover import) when the lookup found something.
      *
+     * @param array<string, string> $current the submitted values (re-display after an error)
+     *
      * @return array<string, mixed>
      */
-    private function lookupView(LookupResult $result, bool $importCover): array
+    private function lookupView(LookupResult $result, bool $importCover, array $current = []): array
     {
         return [
             'found' => $result->found(),
             'sources' => $result->sources,
             'failures' => $result->failures,
             'throttled' => $result->throttled,
+            'outcomes' => $result->outcomes,
             'record_id' => $result->found() ? $result->primaryRecordId : null,
             'cover_available' => $result->metadata->coverUrl !== '',
             'import_cover' => $importCover,
-            'review' => $result->found() ? MetadataReview::fromProviders($result->byProvider) : null,
+            // Shown whenever any provider answered with data, questionable ones included.
+            'review' => $result->records !== [] ? MetadataReview::fromRecords($result->records, $current) : null,
         ];
+    }
+
+    /**
+     * The values the user submitted, by review field (to mark edited fields).
+     *
+     * @return array<string, string>
+     */
+    private static function currentValues(WorkInput $work, EditionInput $edition): array
+    {
+        return array_filter([
+            'title' => $work->title,
+            'subtitle' => $work->subtitle,
+            'authors' => implode('; ', array_map(static fn (array $a): string => (string) $a['name'], $work->authors)),
+            'publisher' => $edition->publisher,
+            'publication_year' => $edition->publicationYear,
+            'page_count' => $edition->pageCount,
+            'language' => $edition->language,
+            'description' => $work->description,
+        ], static fn (string $v): bool => $v !== '');
     }
 
     /**

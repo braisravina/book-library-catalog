@@ -45,7 +45,9 @@ final class CoverImporter
         }
         try {
             $response = $this->http->get($metadata->coverUrl, $this->maxBytes);
-            if ($response->status !== 200 || $response->body === '') {
+            // Only an image answer is considered (Open Library's ?default=false
+            // gives 404 for a missing cover); the bytes are validated anyway.
+            if ($response->status !== 200 || $response->body === '' || preg_match('#^image/(jpeg|png|webp|gif)\b#i', $response->contentType) !== 1) {
                 return null;
             }
             file_put_contents($tmp, $response->body);

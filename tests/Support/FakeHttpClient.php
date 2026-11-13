@@ -43,7 +43,7 @@ final class FakeHttpClient implements HttpClient
     public function get(string $url, int $maxBytes): HttpResponse
     {
         if (!$this->policy->allows($url)) {
-            throw new HttpException('URL refused by outbound policy');
+            throw new HttpException('URL refused by outbound policy', null, null, HttpException::POLICY);
         }
         $this->requested[] = $url;
         $response = $this->routes[$url] ?? null;
@@ -56,13 +56,13 @@ final class FakeHttpClient implements HttpClient
             }
         }
         if ($response === null) {
-            throw new HttpException('offline: ' . $url);
+            throw new HttpException('offline: ' . $url, null, null, HttpException::NETWORK);
         }
         if ($response instanceof \Throwable) {
             throw $response;
         }
         if (strlen($response->body) > $maxBytes) {
-            throw new HttpException('Response exceeds size limit');
+            throw new HttpException('Response exceeds size limit', null, null, HttpException::TOO_LARGE);
         }
 
         return $response;

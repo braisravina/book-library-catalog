@@ -8,6 +8,8 @@ use DigitalLibrary\Catalogue\Isbn;
 use DigitalLibrary\Metadata\BookMetadata;
 use DigitalLibrary\Metadata\Http\HttpClient;
 use DigitalLibrary\Metadata\Http\HttpException;
+use DigitalLibrary\Metadata\MetadataChecks;
+use DigitalLibrary\Metadata\ProviderRecord;
 
 /**
  * Google Books API v1 (volumes search by ISBN). Results are only accepted
@@ -40,11 +42,14 @@ final class GoogleBooksProvider implements MetadataProvider
     {
         $response = $this->http->get($this->url($isbn), self::MAX_BYTES);
         if ($response->status !== 200) {
-            throw HttpException::forStatus('Google Books', $response);
+            // A daily quota (no Retry-After header) will not reset in seconds:
+            // ask for the longest bounded pause instead of the 30 s default.
+            $daily = $response->status === 429 && preg_match('/per\s+day/i', substr($response->body, 0, 4096)) === 1;
+            throw HttpException::forStatus('Google Books', $response, $daily && $response->header('retry-after') === null ? '86400' : null);
         }
-        $data = json_decode($response->body, true);
-        if (!is_array($data)) {
-            throw new HttpException('Google Books returned invalid JSON');
+        $data = json_decode($response->body, true, 64);
+        if (!is_array($data) || (isset($data['items']) && !is_array($data['items']))) {
+            throw HttpException::invalid('Google Books', 'invalid JSON');
         }
         foreach ((array) ($data['items'] ?? []) as $item) {
             $info = is_array($item) ? ($item['volumeInfo'] ?? null) : null;
@@ -54,6 +59,24 @@ final class GoogleBooksProvider implements MetadataProvider
         }
 
         return null;
+    }
+
+    public function isCurrent(array $payload): bool
+    {
+        return true; // the cached payload is the volume's volumeInfo, unchanged
+    }
+
+    public function describe(array $payload, Isbn $isbn): ProviderRecord
+    {
+        $metadata = $this->normalize($payload, $isbn);
+
+        return new ProviderRecord(
+            $this->name(),
+            $metadata,
+            $metadata->isEmpty() ? [] : array_fill_keys(['title', 'subtitle', 'authors', 'publisher', 'publication_year', 'page_count', 'language', 'description', 'cover'], 'volume'),
+            [],
+            MetadataChecks::inspect($metadata, $isbn),
+        );
     }
 
     public function normalize(array $payload, Isbn $isbn): BookMetadata
