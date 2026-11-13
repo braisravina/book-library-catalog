@@ -56,7 +56,12 @@ final class HouseholdAccessMatrixTest extends TestCase
     public function testEntriesAreWellFormed(): void
     {
         foreach (self::matrix() as $name => $entry) {
-            self::assertSame(['kind', 'phase', 'rule'], array_keys($entry), $name);
+            self::assertSame(['kind', 'phase', 'rule'], array_slice(array_keys($entry), 0, 3), $name);
+            self::assertContains(array_slice(array_keys($entry), 3), [[], ['read']], $name);
+            if (isset($entry['read'])) {
+                self::assertSame('H2', $entry['read'], $name);
+                self::assertNotSame('H2', $entry['phase'], $name . ': an H2 route needs no separate read phase');
+            }
             self::assertContains($entry['kind'], self::KINDS, $name);
             self::assertContains($entry['phase'], self::PHASES, $name);
             self::assertGreaterThan(15, strlen($entry['rule']), $name . ': the rule is stated');
@@ -84,6 +89,35 @@ final class HouseholdAccessMatrixTest extends TestCase
         self::assertSame('H2', $matrix['home']['phase'], 'The dashboard shows catalogue statistics');
         self::assertSame('H2', $matrix['covers.show']['phase']);
         self::assertSame('H2', $matrix['collections.show']['phase'], 'Collection items are filtered per viewer');
+    }
+
+    /**
+     * Phase H2: every route that returns record data on GET is
+     * read-enforced, and so is every route that looks a record up by id
+     * (its 404 comes before any form, error page or write).
+     */
+    public function testEveryRecordReadIsEnforcedFromPhaseTwo(): void
+    {
+        $matrix = self::matrix();
+        $recordKinds = ['bibliographic', 'inventory', 'loan', 'collection', 'wishlist', 'export'];
+        $get = 0;
+        foreach (self::routes() as $name => [$method, $path]) {
+            $entry = $matrix[$name];
+            if (!in_array($entry['kind'], $recordKinds, true)) {
+                continue;
+            }
+            $readPhase = $entry['read'] ?? $entry['phase'];
+            if ($method === 'GET') {
+                $get++;
+                self::assertSame('H2', $readPhase, "GET {$path} ({$name}) returns record data and must be read-enforced");
+            }
+            if (preg_match('#^/(works|editions|copies|loans|covers)/\{id#', $path) === 1) {
+                self::assertSame('H2', $readPhase, "{$method} {$path} ({$name}) looks a record up by id");
+            }
+        }
+        self::assertGreaterThanOrEqual(30, $get);
+        self::assertSame('H3', $matrix['works.update']['phase'], 'Write rules for shared records are still phase H3');
+        self::assertSame('H3', $matrix['invite.accept.submit']['phase']);
     }
 
     /**

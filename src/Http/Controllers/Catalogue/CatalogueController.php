@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Http\Controllers\Catalogue;
 
-use DigitalLibrary\Auth\User;
 use DigitalLibrary\Catalogue\DuplicateIsbnException;
 use DigitalLibrary\Catalogue\Input\CopyInput;
 use DigitalLibrary\Catalogue\Input\EditionInput;
@@ -35,17 +34,21 @@ final class CatalogueController extends CatalogueBaseController
 {
     public function index(Request $request): Response
     {
+        $visibility = $this->visibility();
         $criteria = SearchCriteria::fromRequest($request);
-        $result = $this->services->search()->search($criteria);
+        $result = $this->services->search()->search($criteria, $visibility);
 
         return $this->render('catalogue/index', [
             'page_title' => 'catalogue.title',
             'criteria' => $criteria,
             'result' => $result,
             'category_tree' => $this->services->categories()->tree(),
-            'location_tree' => $this->services->locations()->tree(),
-            'owners' => array_values(array_filter($this->services->users()->all(), static fn (User $u): bool => $u->isActive)),
-            'languages' => array_values(array_intersect(Vocabulary::LANGUAGES, $this->services->editions()->languagesInUse())),
+            // Filters offer only what the user can already see: locations of
+            // their households, people sharing a household with them, and
+            // languages of visible editions.
+            'location_tree' => $this->services->locations()->visibleTree($visibility),
+            'owners' => $this->services->users()->activeKnownTo($visibility),
+            'languages' => array_values(array_intersect(Vocabulary::LANGUAGES, $this->services->editions()->languagesInUse($visibility))),
         ]);
     }
 
@@ -150,7 +153,7 @@ final class CatalogueController extends CatalogueBaseController
         // user has confirmed this is a different book.
         $titleMatches = [];
         if ($edition->parsedIsbn() === null && $edition->isbn === '' && $request->input('confirm_new') !== '1' && !$validator->fails()) {
-            $titleMatches = $this->services->editions()->titleMatches($work->title);
+            $titleMatches = $this->services->editions()->titleMatches($work->title, $this->visibility());
         }
         if ($validator->fails() || $titleMatches !== []) {
             $similar = $edition->parsedIsbn() !== null ? $this->similarWorks($work) : [];
@@ -182,16 +185,27 @@ final class CatalogueController extends CatalogueBaseController
         return Response::redirect('/editions/' . $ids['edition_id']);
     }
 
+    /**
+     * The ISBN is already catalogued. ISBN-13 is unique across the shared
+     * catalogue, so this must be said whoever holds the book, but it never
+     * says more than that: when the edition is outside the user's view
+     * only its bibliographic description is shown, with no copy count,
+     * owner, household or location and no link to the record.
+     */
     private function duplicate(Request $request, int $editionId, int $status): Response
     {
-        $edition = $this->found($this->services->editions()->find($editionId));
+        $visibility = $this->visibility();
+        $edition = $this->services->editions()->find($editionId, $visibility);
+        $visible = $edition !== null;
+        $edition ??= $this->found($this->services->editions()->bibliographic($editionId));
 
         return $this->render('catalogue/duplicate', [
             'page_title' => 'catalogue.duplicate.title',
             'edition' => $edition,
+            'visible' => $visible,
             'authors' => $this->services->works()->authors((int) $edition['work_id']),
-            'copy_count' => $this->services->editions()->copyCount($editionId),
-            'can_add_copy' => $this->can($this->user($request), Permission::CopyManageOwn),
+            'copy_count' => $visible ? $this->services->editions()->visibleCopyCount($editionId, $visibility) : 0,
+            'can_add_copy' => $visible && $this->can($this->user($request), Permission::CopyManageOwn),
         ], $status);
     }
 
@@ -265,6 +279,7 @@ final class CatalogueController extends CatalogueBaseController
         return $this->services->works()->similar(
             $work->title,
             array_values(array_map(static fn (array $a): string => (string) $a['name'], $work->authors)),
+            $this->visibility(),
         );
     }
 

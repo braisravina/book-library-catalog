@@ -155,7 +155,7 @@ final class HouseholdAdminTest extends IntegrationTestCase
         $index = $this->request($admin, 'GET', '/admin/households');
         self::assertSame(200, $index->status());
         self::assertStringContainsString('Default household', $index->body());
-        self::assertStringContainsString('does not restrict what users can see yet', $index->body(), 'The page says the boundary is not enforced');
+        self::assertStringContainsString('must not be used in production', $index->body(), 'The page says the feature is incomplete');
 
         $response = $this->request($admin, 'POST', '/admin/households', ['_csrf' => $token, 'name' => '  Casa <b>Ravina</b> ', 'description' => 'Main house']);
         self::assertSame(303, $response->status());
@@ -205,7 +205,8 @@ final class HouseholdAdminTest extends IntegrationTestCase
         $this->enable();
         $household = $this->createHousehold('Casa');
         $inactiveId = $this->createUser('gone@example.org', Role::Member, self::PASSWORD, false);
-        $book = $this->makeBook($this->adminId, 'A book');
+        // Catalogued by the member, so the edition is in their view without any household.
+        $book = $this->makeBook($this->memberId, 'A book');
         [$member] = $this->signedIn('member@example.org');
         [$admin, $token] = $this->signedIn('admin@example.org');
 

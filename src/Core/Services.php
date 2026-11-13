@@ -17,6 +17,7 @@ use DigitalLibrary\Catalogue\Repository\CoverRepository;
 use DigitalLibrary\Catalogue\Repository\EditionRepository;
 use DigitalLibrary\Catalogue\Repository\LocationRepository;
 use DigitalLibrary\Catalogue\Repository\PublisherRepository;
+use DigitalLibrary\Catalogue\Repository\StatsRepository;
 use DigitalLibrary\Catalogue\Repository\WorkRepository;
 use DigitalLibrary\Database\ConnectionFactory;
 use DigitalLibrary\Households\CopyHousehold;
@@ -55,6 +56,7 @@ use DigitalLibrary\Security\LoginThrottle;
 use DigitalLibrary\Security\PasswordHasher;
 use DigitalLibrary\Security\PasswordPolicy;
 use DigitalLibrary\Security\Session;
+use DigitalLibrary\Security\Visibility;
 use DigitalLibrary\Upload\CoverImageProcessor;
 use DigitalLibrary\View\View;
 use PDO;
@@ -375,11 +377,12 @@ final class Services
     }
 
     /**
-     * Whether the household feature (administration pages and explicit
-     * household choice for copies) is switched on. Phase H1 is
-     * development-only: the feature is incomplete until the read and write
-     * paths are scoped (phases H2/H3), so it can never be on in production,
-     * whatever HOUSEHOLDS_ENABLED says (ConfigValidator also refuses it).
+     * Whether the household feature (administration pages, explicit
+     * household choice for copies, and household-scoped reads) is switched
+     * on. It is development-only: reads are scoped since phase H2, but the
+     * feature is incomplete until the write paths are too (phase H3), so
+     * it can never be on in production, whatever HOUSEHOLDS_ENABLED says
+     * (ConfigValidator also refuses it).
      */
     public function householdsEnabled(): bool
     {
@@ -408,6 +411,28 @@ final class Services
     public function householdScope(?\DigitalLibrary\Auth\User $user): HouseholdScope
     {
         return HouseholdScope::forUser($user, fn (int $userId): array => $this->households()->idsForUser($userId));
+    }
+
+    /** @var array<int, Visibility> */
+    private array $visibilities = [];
+
+    /**
+     * What the user may see (phase H2). Unrestricted for everyone while
+     * the household feature is disabled, so nothing changes until it is
+     * switched on; otherwise built from the user's household scope, read
+     * from the database once per request (a Services instance lives for one
+     * request) and never from the session.
+     */
+    public function visibility(?\DigitalLibrary\Auth\User $user): Visibility
+    {
+        if ($user === null) {
+            return Visibility::nobody();
+        }
+        if (!$this->householdsEnabled()) {
+            return Visibility::unrestricted();
+        }
+
+        return $this->visibilities[$user->id] ??= Visibility::forUser($user, $this->householdScope($user));
     }
 
     public function authorizer(): Authorizer
@@ -451,6 +476,11 @@ final class Services
     public function coverRecords(): CoverRepository
     {
         return $this->once(CoverRepository::class, fn (): CoverRepository => new CoverRepository($this->pdo()));
+    }
+
+    public function stats(): StatsRepository
+    {
+        return $this->once(StatsRepository::class, fn (): StatsRepository => new StatsRepository($this->pdo()));
     }
 
     public function categories(): CategoryRepository

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DigitalLibrary\Catalogue\Repository;
 
 use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
 
 final class WorkRepository extends Repository
 {
@@ -13,9 +14,14 @@ final class WorkRepository extends Repository
     /**
      * @return array<string, mixed>|null
      */
-    public function find(int $id): ?array
+    public function find(int $id, Visibility $visibility): ?array
     {
-        return $this->one('SELECT * FROM works WHERE id = :id', ['id' => $id]);
+        $params = new Params();
+
+        return $this->one(
+            'SELECT w.* FROM works w WHERE w.id = ' . $params->add($id) . ' AND ' . $visibility->work('w', $params),
+            $params->all(),
+        );
     }
 
     /**
@@ -56,13 +62,14 @@ final class WorkRepository extends Repository
      * consider adding a new edition to. Matches: the same title or original
      * title (ignoring case and accents: column collation), also without a
      * subtitle part, or a title containing it by one of the same authors.
-     * Suggestions only: nothing is ever merged automatically.
+     * Suggestions only: nothing is ever merged automatically. Only works
+     * the viewer may see are suggested, counting their visible editions.
      *
      * @param list<string> $authorNames
      *
      * @return list<array{id: int, title: string, subtitle: string, authors: string, edition_count: int, author_match: bool}>
      */
-    public function similar(string $title, array $authorNames, int $limit = 5): array
+    public function similar(string $title, array $authorNames, Visibility $visibility, int $limit = 5): array
     {
         $titles = self::titleVariants($title);
         if ($titles === []) {
@@ -79,11 +86,12 @@ final class WorkRepository extends Repository
             ? '0'
             : 'EXISTS (SELECT 1 FROM work_authors wa JOIN authors a ON a.id = wa.author_id WHERE wa.work_id = w.id AND a.name IN (' . $params->in($names) . '))';
         $sql = 'SELECT w.id, w.title, w.subtitle, ' . $titleMatch() . ' AS title_match, ' . $authorMatch() . ' AS author_match,
-                       (SELECT COUNT(*) FROM editions e WHERE e.work_id = w.id) AS edition_count,
+                       (SELECT COUNT(*) FROM editions e WHERE e.work_id = w.id AND ' . $visibility->edition('e', $params) . ') AS edition_count,
                        (SELECT GROUP_CONCAT(a.name ORDER BY wa.position, a.sort_name SEPARATOR \'; \')
                           FROM work_authors wa JOIN authors a ON a.id = wa.author_id WHERE wa.work_id = w.id) AS author_names
                 FROM works w
-                WHERE ' . $titleMatch() . ' OR (' . $authorMatch() . ' AND w.title LIKE ' . $params->add(Params::likeContains($titles[count($titles) - 1])) . ')
+                WHERE (' . $titleMatch() . ' OR (' . $authorMatch() . ' AND w.title LIKE ' . $params->add(Params::likeContains($titles[count($titles) - 1])) . '))
+                  AND ' . $visibility->work('w', $params) . '
                 ORDER BY title_match DESC, author_match DESC, w.id
                 LIMIT ' . $params->add(max(1, min(20, $limit)));
 
@@ -170,21 +178,29 @@ final class WorkRepository extends Repository
     }
 
     /**
+     * The work's editions the viewer may see, counting only visible copies.
+     *
      * @return list<array<string, mixed>>
      */
-    public function editions(int $workId): array
+    public function editions(int $workId, Visibility $visibility): array
     {
+        $params = new Params();
+
         return $this->many(
             'SELECT e.id, e.title, e.subtitle, e.publication_year, e.language, e.format, e.isbn_13, e.edition_statement,
                     p.name AS publisher_name,
-                    (SELECT COUNT(*) FROM copies c WHERE c.edition_id = e.id) AS copy_count,
+                    (SELECT COUNT(*) FROM copies c WHERE c.edition_id = e.id AND ' . $visibility->copy('c', $params) . ') AS copy_count,
                     (SELECT cv.id FROM covers cv WHERE cv.edition_id = e.id AND cv.is_primary = 1) AS cover_id
              FROM editions e LEFT JOIN publishers p ON p.id = e.publisher_id
-             WHERE e.work_id = :id ORDER BY e.publication_year IS NULL, e.publication_year, e.id',
-            ['id' => $workId],
+             WHERE e.work_id = ' . $params->add($workId) . ' AND ' . $visibility->edition('e', $params) . '
+             ORDER BY e.publication_year IS NULL, e.publication_year, e.id',
+            $params->all(),
         );
     }
 
+    /**
+     * Every edition of the work, whoever holds it (deletion guard only).
+     */
     public function editionCount(int $workId): int
     {
         return (int) $this->scalar('SELECT COUNT(*) FROM editions WHERE work_id = :id', ['id' => $workId]);

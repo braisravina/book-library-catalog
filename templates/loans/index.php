@@ -39,8 +39,9 @@
             <tbody>
             <?php foreach ($rows as $loan): ?>
                 <tr>
-                    <td><a href="/copies/<?= (int) $loan['copy_id'] ?>"><?= $view->e($loan['edition_title']) ?></a></td>
-                    <?php if ($scope !== 'lent'): ?><td><?= $view->e($loan['owner_name']) ?></td><?php endif; ?>
+                    <?php // A borrowed copy that left the user's households: title and dates only, no link. ?>
+                    <td><?php if ((int) $loan['copy_visible'] === 1): ?><a href="/copies/<?= (int) $loan['copy_id'] ?>"><?= $view->e($loan['edition_title']) ?></a><?php else: ?><?= $view->e($loan['edition_title']) ?><?php endif; ?></td>
+                    <?php if ($scope !== 'lent'): ?><td><?= $view->e($loan['owner_name'] ?? '') ?></td><?php endif; ?>
                     <?php if ($scope !== 'borrowed'): ?><td><?= $view->e($loan['borrower_display_name'] ?? $loan['borrower_name'] ?? '') ?></td><?php endif; ?>
                     <td><?= $view->e($loan['loaned_on']) ?></td>
                     <td><?= $view->e($loan['due_on'] ?? '') ?><?php if ((int) $loan['is_overdue'] === 1): ?> <span class="badge badge-warning"><?= $view->t('loans.overdue') ?></span><?php endif; ?></td>

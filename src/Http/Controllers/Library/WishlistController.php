@@ -31,7 +31,7 @@ final class WishlistController extends Controller
         $status = (string) $request->query('status', 'wanted');
         $status = in_array($status, self::FILTERS, true) ? $status : 'wanted';
         $page = max(1, min(10_000, (int) ($request->query('page') ?? '1')));
-        $result = $this->services->wishlist()->forUser($user->id, $status, $page);
+        $result = $this->services->wishlist()->forUser($user->id, $status, $page, $this->visibility());
 
         return $this->render('wishlist/index', [
             'page_title' => 'wishlist.title',
@@ -153,7 +153,7 @@ final class WishlistController extends Controller
      */
     private function ownItem(Request $request, array $params): array
     {
-        $item = $this->services->wishlist()->find($this->id($params));
+        $item = $this->services->wishlist()->find($this->id($params), $this->visibility());
         if ($item === null || !$this->services->authorizer()->canManageWishlistItem($this->user($request), (int) $item['user_id'])) {
             throw HttpException::notFound();
         }
@@ -176,7 +176,8 @@ final class WishlistController extends Controller
             throw HttpException::notFound();
         }
 
-        return $this->found($this->services->editions()->find((int) $raw));
+        // 404 unless the user may see the edition: its id alone opens nothing.
+        return $this->found($this->services->editions()->find((int) $raw, $this->visibility()));
     }
 
     /**

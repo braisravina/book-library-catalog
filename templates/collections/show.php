@@ -13,7 +13,7 @@ $moves = ['top' => '⇈', 'up' => '↑', 'down' => '↓', 'bottom' => '⇊'];
 </div>
 <p class="muted">
     <span class="badge"><?= $view->t('collections.visibility.' . $collection['visibility']) ?></span>
-    <?= $is_owner ? $view->t('collections.owned_by_you') : $view->t('collections.owned_by', ['name' => (string) $collection['owner_name']]) ?>
+    <?= $is_owner ? $view->t('collections.owned_by_you') : ($collection['owner_name'] !== null ? $view->t('collections.owned_by', ['name' => (string) $collection['owner_name']]) : $view->t('collections.owned_by_other')) ?>
     · <?= $view->t('collections.count', ['count' => $total]) ?>
 </p>
 <?php if ($collection['description'] !== null): ?>

@@ -32,7 +32,7 @@
                 <tr>
                     <td><a href="/collections/<?= (int) $c['id'] ?>"><?= $view->e($c['name']) ?></a>
                         <?php if ($c['description'] !== null): ?><br><span class="muted small"><?= $view->e(mb_strimwidth((string) $c['description'], 0, 140, '…')) ?></span><?php endif; ?></td>
-                    <td><?= (int) $c['owner_user_id'] === $user_id ? $view->t('collections.you') : $view->e($c['owner_name']) ?></td>
+                    <td><?= (int) $c['owner_user_id'] === $user_id ? $view->t('collections.you') : ($c['owner_name'] !== null ? $view->e($c['owner_name']) : $view->t('collections.owner_other')) ?></td>
                     <td><span class="badge"><?= $view->t('collections.visibility.' . $c['visibility']) ?></span></td>
                     <td><?= (int) $c['item_count'] ?></td>
                 </tr>

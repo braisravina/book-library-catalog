@@ -29,7 +29,9 @@ final class HouseholdCopyAssignmentTest extends IntegrationTestCase
         $this->bobId = $this->createUser('bob@example.org', Role::Member);
         $this->casa = $this->createHousehold('Casa', [$this->aliceId]);
         $this->piso = $this->createHousehold('Piso', [$this->bobId]);
-        $this->editionId = $this->makeBook($this->adminId, 'Shared title', '9788437604947')['edition_id'];
+        // Catalogued by Alice: an edition is in view for its creator (phase H2),
+        // so she can add copies to it whatever her memberships are.
+        $this->editionId = $this->makeBook($this->aliceId, 'Shared title', '9788437604947')['edition_id'];
     }
 
     private function enable(): void
@@ -184,7 +186,16 @@ final class HouseholdCopyAssignmentTest extends IntegrationTestCase
         [$alice, $token] = $this->signedIn('alice@example.org');
         $payload = ['_csrf' => $token, 'owner_user_id' => (string) $this->aliceId, 'status' => 'available', 'household_id' => (string) $this->casa];
 
+        // A location of a household Alice does not belong to is refused like one that does not exist.
         $response = $this->request($alice, 'POST', "/editions/{$this->editionId}/copies", $payload + ['location_id' => (string) $pisoShelf]);
+        self::assertSame(422, $response->status());
+        self::assertStringNotContainsString('This location belongs to another household', $response->body(), 'No hint that the location exists elsewhere');
+        self::assertStringNotContainsString('Piso shelf', $response->body());
+        self::assertSame(422, $this->request($alice, 'POST', "/editions/{$this->editionId}/copies", $payload + ['location_id' => '999999'])->status());
+
+        // Someone who reaches both households is told why the combination is refused.
+        [$admin, $adminToken] = $this->signedIn('admin@example.org');
+        $response = $this->request($admin, 'POST', "/editions/{$this->editionId}/copies", ['_csrf' => $adminToken, 'owner_user_id' => (string) $this->aliceId, 'status' => 'available', 'household_id' => (string) $this->casa, 'location_id' => (string) $pisoShelf]);
         self::assertSame(422, $response->status());
         self::assertStringContainsString('This location belongs to another household', $response->body());
         self::assertSame(303, $this->request($alice, 'POST', "/editions/{$this->editionId}/copies", $payload + ['location_id' => (string) $casaShelf])->status());
@@ -232,13 +243,15 @@ final class HouseholdCopyAssignmentTest extends IntegrationTestCase
         self::assertSame(403, $this->request($bob, 'POST', "/copies/{$copyId}", ['_csrf' => $bobToken, 'row_version' => $this->rowVersion('copies', $copyId), 'owner_user_id' => (string) $this->bobId, 'status' => 'lost', 'household_id' => (string) $this->piso])->status());
         self::assertSame(403, $this->request($bob, 'POST', "/copies/{$copyId}/delete", ['_csrf' => $bobToken])->status());
 
-        // The owner keeps editing their copy after leaving the household, but cannot move it back in.
+        // The copy stays in the household its owner left (phase H1) and, from
+        // phase H2, leaves the owner's view with it: on the next request it
+        // is answered like a copy that does not exist, and nothing changes.
         $this->pdo()->exec("DELETE FROM household_members WHERE user_id = {$this->aliceId} AND household_id = {$this->piso}");
-        self::assertSame(303, $update(['status' => 'lost'])->status());
+        self::assertSame(404, $update(['status' => 'lost'])->status());
+        self::assertSame(404, $update(['household_id' => (string) $this->casa])->status());
+        self::assertSame(404, $this->request($alice, 'GET', "/copies/{$copyId}/edit")->status());
         self::assertSame($this->piso, $this->household($copyId));
-        self::assertSame(303, $update(['household_id' => (string) $this->casa])->status());
-        self::assertSame(422, $update(['household_id' => (string) $this->piso])->status());
-        self::assertSame($this->casa, $this->household($copyId));
+        self::assertSame('available', $this->pdo()->query("SELECT status FROM copies WHERE id = {$copyId}")->fetchColumn());
 
         // Administrators move any copy, as long as the owner can reach the household.
         [$admin, $adminToken] = $this->signedIn('admin@example.org');
@@ -261,7 +274,7 @@ final class HouseholdCopyAssignmentTest extends IntegrationTestCase
         self::assertSame($this->piso, $this->household($copyId));
         self::assertFalse($copies->update($copyId, $record + ['household_id' => $this->casa], $this->aliceId, 2), 'Stale version');
         self::assertSame($this->piso, $this->household($copyId));
-        self::assertSame('Piso', $copies->find($copyId)['household_name']);
+        self::assertSame('Piso', $copies->find($copyId, \DigitalLibrary\Security\Visibility::unrestricted())['household_name']);
     }
 
     public function testViewersCannotAddCopiesToTheirHousehold(): void

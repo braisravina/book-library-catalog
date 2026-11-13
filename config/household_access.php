@@ -47,17 +47,32 @@ declare(strict_types=1);
  *
  * Phases
  *   none  no household rule applies to the route
- *   H1    enforced now (phase H1)
- *   H2    read enforcement (planned, not implemented)
+ *   H1    enforced since phase H1
+ *   H2    read enforcement: enforced since phase H2 (Security\Visibility)
  *   H3    write enforcement (planned, not implemented)
  * H2 and H3 ship together: no household functionality is enabled in
  * production before both are complete.
+ *
+ * 'read' => 'H2' on a route of another phase means its record lookup is
+ * already scoped: the route loads its work, edition, copy, loan or cover
+ * through Security\Visibility, for GET and POST alike, so a record outside
+ * the user's view is answered with 404 before anything is shown,
+ * validated or written. No form, error page or re-displayed submission of
+ * such a route can show another household's data. What remains for H3 on
+ * those routes is the write rule stated after "H3 adds".
+ *
+ * Every GET route of a record kind (bibliographic, inventory, loan,
+ * collection, wishlist, export) must be read-enforced, and
+ * tests/Integration/HouseholdReadIsolationTest.php must request it:
+ * both are checked.
  */
 
 $none = static fn (string $kind, string $rule): array => ['kind' => $kind, 'phase' => 'none', 'rule' => $rule];
 $h1 = static fn (string $kind, string $rule): array => ['kind' => $kind, 'phase' => 'H1', 'rule' => $rule];
 $h2 = static fn (string $kind, string $rule): array => ['kind' => $kind, 'phase' => 'H2', 'rule' => $rule];
 $h3 = static fn (string $kind, string $rule): array => ['kind' => $kind, 'phase' => 'H3', 'rule' => $rule];
+// A route whose record lookup is read-enforced since H2 (see 'read' above).
+$read = static fn (array $entry): array => $entry + ['read' => 'H2'];
 
 $householdAdmin = 'household.manage (administrators) and the household feature enabled, else 404; re-checked in HouseholdService.';
 $adminOnly = 'Administrators only (route permission); unrestricted scope.';
@@ -80,62 +95,62 @@ return [
     'account.password.update' => $none('account', 'Own account only.'),
 
     // --- Catalogue: browse, search, add ------------------------------------------
-    'books.index' => $h2('bibliographic', 'Search lists visible editions only; totals, pages and copy counts count visible copies only. The owner filter offers only users sharing a household with the viewer; the location filter offers only locations of households in scope; the language filter lists languages of visible editions.'),
-    'books.create' => $h2('bibliographic', 'ISBN step: an ISBN that exists but is not visible is NOT reported as a duplicate with holdings; the user is offered to add their own copy to the shared record and sees bibliographic fields only (no copy count, owner, household or location). Similar-work suggestions list visible works only.'),
-    'books.store' => $h3('bibliographic', 'Same-title and duplicate-ISBN outcomes reveal visible records only (an invisible duplicate becomes "add your copy" without holdings). The first copy\'s household comes from Households\\CopyHousehold (phase H1) and its location must belong to that household.'),
+    'books.index' => $h2('bibliographic', 'Search lists visible editions only; totals, pages and copy counts count visible copies only. The owner filter offers only users sharing a household with the viewer and matches on visible copies; the location filter offers only locations of households in scope; the language filter lists languages of visible editions.'),
+    'books.create' => $h2('bibliographic', 'ISBN step: an ISBN that exists but is not visible is NOT reported as a duplicate with holdings; the user sees the shared bibliographic description only (no copy count, owner, household, location or link). Similar-work suggestions, and the author and publisher names offered while typing, come from visible records only. H3 adds the "add your copy" action for such an ISBN.'),
+    'books.store' => $read($h3('bibliographic', 'Same-title warnings, similar-work suggestions and the duplicate-ISBN answer reveal visible records only (an invisible duplicate shows the shared description without holdings); a location of another household is refused like one that does not exist. The first copy\'s household comes from Households\\CopyHousehold (phase H1). H3 adds: adopting an invisible duplicate ("add your copy").')),
 
     // --- Works and editions (shared bibliographic records) ------------------------
     'works.show' => $h2('bibliographic', '404 unless the work is visible. Lists visible editions only; copy counts count visible copies.'),
-    'works.edit' => $h3('bibliographic', '404 unless visible. Editing shared metadata: administrators, or the creator while the work is exclusive to the user\'s scope; a work also held by another household is edited by administrators only.'),
-    'works.update' => $h3('bibliographic', 'As works.edit, re-checked on submit (with the optimistic lock).'),
+    'works.edit' => $read($h3('bibliographic', '404 unless the work is visible; then administrators or the creator (unchanged). H3 adds: a work also held by another household is edited by administrators only.')),
+    'works.update' => $read($h3('bibliographic', 'As works.edit, re-checked on submit (with the optimistic lock).')),
     'works.delete' => $none('admin', $adminOnly . ' Still refused while editions exist.'),
-    'editions.create' => $h3('bibliographic', '404 unless the work is visible. The cached-lookup prefill never shows another household\'s data.'),
-    'editions.store' => $h3('bibliographic', '404 unless the work is visible. A duplicate ISBN held by an invisible edition gives the generic "ISBN already used" error without a link to it.'),
+    'editions.create' => $read($h3('bibliographic', '404 unless the work is visible. The cached-lookup prefill uses provider data only, never another household\'s records. H3 adds nothing to the form.')),
+    'editions.store' => $read($h3('bibliographic', '404 unless the work is visible. A duplicate ISBN held by an invisible edition gives the generic "ISBN already used" error without a link to it. H3 adds the write rule for shared works.')),
     'editions.show' => $h2('bibliographic', '404 unless the edition is visible. Copies, owners, locations, loan status and borrowers are shown for visible copies only; "other editions" lists visible editions; collections listed are those the viewer may see.'),
     'editions.open_library' => $h2('bibliographic', '404 unless the edition is visible (the page uses bibliographic fields only, never inventory).'),
-    'editions.edit' => $h3('bibliographic', '404 unless visible. Administrators, or the creator while the edition is exclusive to the user\'s scope.'),
-    'editions.update' => $h3('bibliographic', 'As editions.edit, re-checked on submit. An ISBN taken by an invisible edition gives the generic error without a link.'),
+    'editions.edit' => $read($h3('bibliographic', '404 unless the edition is visible; then administrators or the creator (unchanged). H3 adds: an edition also held by another household is edited by administrators only.')),
+    'editions.update' => $read($h3('bibliographic', 'As editions.edit, re-checked on submit. An ISBN taken by an invisible edition gives the generic error without a link.')),
     'editions.delete' => $none('admin', $adminOnly . ' Still refused while copies exist (any household).'),
 
     // --- Physical copies (household inventory) -----------------------------------
-    'copies.create' => $h3('inventory', '404 unless the edition is visible, or reached through the "add your copy" step of an existing ISBN. The household choice is limited to the user\'s households (phase H1); locations offered belong to the chosen household.'),
-    'copies.store' => $h1('inventory', 'Household decided by Households\\CopyHousehold: the default household while the feature is disabled; with it enabled, administrators any household, others only their own households; the owner must be an administrator or a member of the household; the location must belong to it. H3 adds: 404 unless the edition is visible or being adopted.'),
-    'copies.edit' => $h3('inventory', '404 unless the copy is visible; then owner-only for members (copy.manage_own) or administrators. Household membership alone gives no right to edit.'),
-    'copies.update' => $h1('inventory', 'Owner or administrator (unchanged). A household change goes through Households\\CopyHousehold (same rules as copies.store) and is audited. H3 adds: 404 unless the copy is visible, and the membership check is repeated under the row lock.'),
-    'copies.delete' => $h3('inventory', '404 unless the copy is visible; then owner or administrator. Copies with loan history are withdrawn, not deleted (unchanged).'),
+    'copies.create' => $read($h3('inventory', '404 unless the edition is visible. The household choice is limited to the user\'s households (phase H1) and the locations offered to those households. H3 adds: reaching the form through the "add your copy" step of an ISBN held elsewhere, and locations narrowed to the chosen household.')),
+    'copies.store' => $read($h1('inventory', '404 unless the edition is visible. Household decided by Households\\CopyHousehold: the default household while the feature is disabled; with it enabled, administrators any household, others only their own households; the owner must be an administrator or a member of the household; the location must belong to it and be one the user can see. H3 adds: adopting an edition held elsewhere.')),
+    'copies.edit' => $read($h3('inventory', '404 unless the copy is visible; then owner-only for members (copy.manage_own) or administrators. Household membership alone gives no right to edit. A copy left in a household its owner no longer belongs to is out of the owner\'s view.')),
+    'copies.update' => $read($h1('inventory', '404 unless the copy is visible; then owner or administrator (unchanged). A household change goes through Households\\CopyHousehold (same rules as copies.store) and is audited. H3 adds: the membership check is repeated under the row lock.')),
+    'copies.delete' => $read($h3('inventory', '404 unless the copy is visible; then owner or administrator. Copies with loan history are withdrawn, not deleted (unchanged). H3 adds the check under the row lock.')),
     'copies.show' => $h2('inventory', '404 unless the copy is visible. Location path, notes and price belong to the copy\'s household; borrower identity stays with whoever may manage the loan and the borrower.'),
 
     // --- Loans -------------------------------------------------------------------
-    'loans.create' => $h3('loan', '404 unless the copy is visible; then the copy\'s owner or an administrator. Borrowers offered: users sharing a household with the copy, plus the free-text name. Users of other households are never listed.'),
-    'loans.store' => $h3('loan', 'As loans.create; a borrower user must share a household with the copy (administrators may lend to any active user). LoanService repeats the household check under the copy lock.'),
+    'loans.create' => $read($h3('loan', '404 unless the copy is visible; then the copy\'s owner or an administrator. Borrowers offered: for an unrestricted viewer every active user; otherwise the active members of the copy\'s household, plus the free-text name. Users of other households are never listed.')),
+    'loans.store' => $read($h3('loan', 'As loans.create; a borrower account must be one the form offers (anything else is refused like an account that does not exist). H3 adds: LoanService repeats the household check under the copy lock.')),
     'loans.index' => $h2('loan', '"Lent": loans of the user\'s own copies in households in scope. "Borrowed": the user\'s own loans, always (their own data), showing the title but no inventory details of a household they no longer reach. "All": administrators.'),
-    'loans.return' => $h3('loan', '404 unless the loan\'s copy is visible; then the copy\'s owner or an administrator.'),
-    'loans.return.store' => $h3('loan', 'As loans.return, re-checked under the row locks.'),
+    'loans.return' => $read($h3('loan', '404 unless the loan\'s copy is visible; then the copy\'s owner or an administrator.')),
+    'loans.return.store' => $read($h3('loan', 'As loans.return. H3 adds the re-check under the row locks.')),
 
     // --- Wishlists (owner-only, unchanged) ----------------------------------------
     'wishlist.index' => $h2('wishlist', 'Own items only (unchanged). The "you own a copy" marker and links to editions apply to visible editions only.'),
     'wishlist.create' => $h2('wishlist', 'Pre-filling from an edition requires the edition to be visible (404 otherwise).'),
-    'wishlist.store' => $h3('wishlist', 'Linking to an existing edition by id or ISBN happens only when that edition is visible; otherwise the item is stored unlinked.'),
-    'wishlist.edit' => $none('wishlist', 'Own items only (unchanged); others get 404.'),
-    'wishlist.update' => $h3('wishlist', 'Own items only; ISBN auto-linking only to visible editions.'),
+    'wishlist.store' => $read($h3('wishlist', 'Starting an entry from an edition requires the edition to be visible (404 otherwise). H3 adds: linking by ISBN only to a visible edition (today the link may be stored but is never shown or exported while the edition is out of view).')),
+    'wishlist.edit' => $h2('wishlist', 'Own items only (unchanged); others get 404. Shows the user\'s own entry, never catalogue data.'),
+    'wishlist.update' => $h3('wishlist', 'Own items only; H3 adds ISBN auto-linking only to visible editions (the link is never shown or exported while the edition is out of view).'),
     'wishlist.status' => $none('wishlist', 'Own items only (unchanged).'),
 
     // --- Collections (curated lists, not permission boundaries) -------------------
-    'collections.index' => $h2('collection', 'Private/shared visibility is unchanged and independent of households. Item counts count editions visible to the viewer.'),
-    'collections.create' => $none('collection', 'Own collection (unchanged).'),
+    'collections.index' => $h2('collection', 'Private/shared visibility is unchanged and independent of households. Item counts count editions visible to the viewer; the owner of a collection is named only when the viewer shares a household with them.'),
+    'collections.create' => $h2('collection', 'Own collection (unchanged); an empty form with no catalogue data.'),
     'collections.store' => $none('collection', 'Own collection (unchanged).'),
-    'collections.show' => $h2('collection', 'Collection visibility unchanged (owner, shared, administrator). Items are filtered per viewer: an edition the viewer cannot see is not listed and not counted, even in a shared collection.'),
-    'collections.edit' => $none('collection', 'Owner or administrator (unchanged).'),
+    'collections.show' => $h2('collection', 'Collection visibility unchanged (owner, shared, administrator). Items are filtered per viewer: an edition the viewer cannot see is not listed and not counted, even in a shared collection. The owner is named only to household co-members.'),
+    'collections.edit' => $h2('collection', 'Owner or administrator (unchanged). The item count shown counts editions visible to the viewer.'),
     'collections.update' => $none('collection', 'Owner or administrator (unchanged).'),
     'collections.delete' => $none('collection', 'Owner or administrator (unchanged).'),
-    'collections.items.add' => $h3('collection', 'The edition must be visible to the user adding it (404 otherwise): a collection cannot be used to probe edition ids.'),
-    'collections.items.add_from_edition' => $h3('collection', 'As collections.items.add.'),
+    'collections.items.add' => $read($h3('collection', 'The edition must be visible to the user adding it (404 otherwise): a collection cannot be used to probe edition ids.')),
+    'collections.items.add_from_edition' => $read($h3('collection', 'As collections.items.add.')),
     'collections.items.remove' => $none('collection', 'Owner or administrator (unchanged); removing needs no visibility.'),
     'collections.items.move' => $h3('collection', 'Ordering works on the items visible to the manager.'),
 
     // --- Export ------------------------------------------------------------------
-    'export.index' => $none('export', 'Lists dataset names only.'),
-    'export.personal.json' => $h2('export', 'Own data only (no user parameter, unchanged). Copies: the user\'s copies in households in scope. Loans: own loans; inventory details only for visible copies. Collection items: visible editions only.'),
+    'export.index' => $h2('export', 'Lists dataset names only; no record data.'),
+    'export.personal.json' => $h2('export', 'Own data only (no user parameter, unchanged). Copies: the user\'s copies in households in scope, with locations of those households. Loans: of own visible copies, and every loan where the user is the borrower (title and dates only when the copy is out of view). Collection items: visible editions only. Wishlist links to catalogue records only for visible ones.'),
     'export.personal.csv' => $h2('export', 'As export.personal.json.'),
     'export.catalogue.json' => $h3('admin', $adminOnly . ' Gains household columns for copies and locations; memberships are not exported.'),
     'export.catalogue.csv' => $h3('admin', 'As export.catalogue.json.'),
@@ -145,9 +160,9 @@ return [
     'admin.audit.show' => $none('admin', $adminOnly),
 
     // --- Covers ------------------------------------------------------------------
-    'covers.store' => $h3('bibliographic', 'As editions.update: administrators, or the creator while the edition is exclusive to the user\'s scope.'),
-    'covers.show' => $h2('bibliographic', '404 unless the cover\'s edition is visible. Served with "Cache-Control: private, no-cache" and an ETag, so a removed membership takes effect on the next request instead of after the cache lifetime.'),
-    'covers.delete' => $h3('bibliographic', 'As covers.store.'),
+    'covers.store' => $read($h3('bibliographic', '404 unless the edition is visible; then administrators or the creator (unchanged). H3 adds: administrators only when another household also holds the edition.')),
+    'covers.show' => $h2('bibliographic', '404 unless the cover\'s edition is visible, checked before the ETag is compared. With households enabled it is served with "Cache-Control: private, no-cache" and an ETag, so a removed membership takes effect on the next request instead of after the cache lifetime.'),
+    'covers.delete' => $read($h3('bibliographic', 'As covers.store.')),
 
     // --- Authors and publishers (shared vocabulary) --------------------------------
     'authors.index' => $h2('bibliographic', 'Lists authors credited on visible works or editions; work counts count visible works.'),

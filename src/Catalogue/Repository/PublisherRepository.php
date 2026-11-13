@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Catalogue\Repository;
 
+use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
+
 final class PublisherRepository extends Repository
 {
     public function findOrCreate(string $name): int
@@ -27,40 +30,63 @@ final class PublisherRepository extends Repository
     }
 
     /**
+     * The publisher, when it publishes an edition the viewer may see.
+     *
      * @return array<string, mixed>|null
      */
-    public function find(int $id): ?array
+    public function find(int $id, Visibility $visibility): ?array
     {
-        return $this->one('SELECT * FROM publishers WHERE id = :id', ['id' => $id]);
-    }
+        $params = new Params();
 
-    /**
-     * @return list<array<string, mixed>>
-     */
-    public function allWithCounts(): array
-    {
-        return $this->many(
-            'SELECT p.id, p.name, (SELECT COUNT(*) FROM editions e WHERE e.publisher_id = p.id) AS edition_count
-             FROM publishers p ORDER BY p.name, p.id'
+        return $this->one(
+            'SELECT p.* FROM publishers p WHERE p.id = ' . $params->add($id) . ' AND ' . $visibility->publisher('p', $params),
+            $params->all(),
         );
     }
 
     /**
+     * Publishers of visible editions; counts count visible editions.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function allWithCounts(Visibility $visibility): array
+    {
+        $params = new Params();
+
+        return $this->many(
+            'SELECT p.id, p.name,
+                    (SELECT COUNT(*) FROM editions e WHERE e.publisher_id = p.id AND ' . $visibility->edition('e', $params) . ') AS edition_count
+             FROM publishers p WHERE ' . $visibility->publisher('p', $params) . ' ORDER BY p.name, p.id',
+            $params->all(),
+        );
+    }
+
+    /**
+     * Names offered while typing in the book forms: visible publishers only.
+     *
      * @return list<string>
      */
-    public function names(): array
+    public function names(Visibility $visibility): array
     {
-        return array_column($this->many('SELECT name FROM publishers ORDER BY name LIMIT 1000'), 'name');
+        $params = new Params();
+
+        return array_column($this->many(
+            'SELECT p.name FROM publishers p WHERE ' . $visibility->publisher('p', $params) . ' ORDER BY p.name LIMIT 1000',
+            $params->all(),
+        ), 'name');
     }
 
     /**
      * @return list<array<string, mixed>>
      */
-    public function editions(int $id): array
+    public function editions(int $id, Visibility $visibility): array
     {
+        $params = new Params();
+
         return $this->many(
-            'SELECT e.id, e.title, e.publication_year FROM editions e WHERE e.publisher_id = :id ORDER BY e.title, e.id',
-            ['id' => $id],
+            'SELECT e.id, e.title, e.publication_year FROM editions e
+             WHERE e.publisher_id = ' . $params->add($id) . ' AND ' . $visibility->edition('e', $params) . ' ORDER BY e.title, e.id',
+            $params->all(),
         );
     }
 

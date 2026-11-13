@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace DigitalLibrary\Http\Controllers\Library;
 
 use DigitalLibrary\Auth\User;
-use DigitalLibrary\Catalogue\Tree;
 use DigitalLibrary\Http\Controllers\Controller;
 use DigitalLibrary\Http\HttpException;
 use DigitalLibrary\Http\Request;
@@ -43,6 +42,7 @@ final class LoanController extends Controller
             $scope === 'borrowed' ? $user->id : null,
             $status,
             $page,
+            $this->visibility(),
         );
 
         return $this->render('loans/index', [
@@ -68,12 +68,12 @@ final class LoanController extends Controller
     public function copy(Request $request, array $params): Response
     {
         $user = $this->user($request);
-        $copy = $this->found($this->services->copies()->find($this->id($params)));
+        $copy = $this->found($this->services->copies()->find($this->id($params), $this->visibility()));
         $copyId = (int) $copy['id'];
         $ownerId = (int) $copy['owner_user_id'];
         $canManage = $this->services->authorizer()->canManageLoans($user, $ownerId);
         $active = $this->services->loans()->activeForCopy($copyId);
-        $paths = Tree::paths($this->services->locations()->all());
+        $paths = $this->services->locations()->visiblePaths($this->visibility());
 
         return $this->render('loans/copy', [
             'page_title' => null,
@@ -110,8 +110,11 @@ final class LoanController extends Controller
         $validator = Validator::make([], []);
         $input->validate($validator, LoanService::today(), (int) $copy['owner_user_id']);
         if ($input->borrowerUserId() !== null && !isset($validator->errors()['borrower_user_id'])) {
-            $borrower = $this->services->users()->findById($input->borrowerUserId());
-            if ($borrower === null || !$borrower->isActive) {
+            // Only someone offered in the form: a user of another household
+            // is refused exactly like an account that does not exist, so
+            // lending cannot be used to learn who else has an account.
+            $offered = array_map(static fn (User $u): int => $u->id, $this->borrowers($copy));
+            if (!in_array($input->borrowerUserId(), $offered, true)) {
                 $validator->addError('borrower_user_id', 'validation.in');
             }
         }
@@ -189,7 +192,8 @@ final class LoanController extends Controller
      */
     private function manageableCopy(Request $request, array $params): array
     {
-        $copy = $this->found($this->services->copies()->find($this->id($params)));
+        // 404 before 403: a copy outside the user's households does not exist for them.
+        $copy = $this->found($this->services->copies()->find($this->id($params), $this->visibility()));
         $this->authorize($this->services->authorizer()->canManageLoans($this->user($request), (int) $copy['owner_user_id']));
 
         return $copy;
@@ -202,10 +206,34 @@ final class LoanController extends Controller
      */
     private function manageableLoan(Request $request, array $params): array
     {
-        $loan = $this->found($this->services->loans()->find($this->id($params)));
+        $loan = $this->found($this->services->loans()->find($this->id($params), $this->visibility()));
         $this->authorize($this->services->authorizer()->canManageLoans($this->user($request), (int) $loan['owner_user_id']));
 
         return $loan;
+    }
+
+    /**
+     * Accounts the copy may be lent to (besides a free-text name): every
+     * active user for an unrestricted viewer (administrators, and everyone
+     * while the household feature is disabled); otherwise only the active
+     * members of the copy's household. Users of other households are never
+     * offered or accepted.
+     *
+     * @param array<string, mixed> $copy
+     *
+     * @return list<User>
+     */
+    private function borrowers(array $copy): array
+    {
+        $ownerId = (int) $copy['owner_user_id'];
+        $visibility = $this->visibility();
+        if ($visibility->isUnrestricted()) {
+            $users = $this->services->users()->activeKnownTo($visibility);
+        } else {
+            $users = $copy['household_id'] === null ? [] : $this->services->users()->activeMembersOf((int) $copy['household_id']);
+        }
+
+        return array_values(array_filter($users, static fn (User $u): bool => $u->id !== $ownerId));
     }
 
     /**
@@ -214,19 +242,13 @@ final class LoanController extends Controller
      */
     private function form(Request $request, array $copy, LoanInput $input, array $errors, int $status = 200, ?string $refusal = null): Response
     {
-        $ownerId = (int) $copy['owner_user_id'];
-        $borrowers = array_values(array_filter(
-            $this->services->users()->all(),
-            static fn (User $u): bool => $u->isActive && $u->id !== $ownerId,
-        ));
-
         return $this->render('loans/lend', [
             'page_title' => 'loans.lend.title',
             'copy' => $copy,
             'input' => $input,
             'errors' => $errors,
             'refusal' => $refusal,
-            'borrowers' => $borrowers,
+            'borrowers' => $this->borrowers($copy),
             'available' => $copy['status'] === 'available' && $this->services->loans()->activeForCopy((int) $copy['id']) === null,
             'today' => LoanService::today(),
         ], $status);

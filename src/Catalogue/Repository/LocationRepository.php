@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Catalogue\Repository;
 
+use DigitalLibrary\Catalogue\Tree;
+use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
+
 final class LocationRepository extends TreeRepository
 {
     protected function table(): string
@@ -33,6 +37,38 @@ final class LocationRepository extends TreeRepository
             'UPDATE locations SET parent_id = :p, name = :n, kind = :k, description = :d, updated_at = UTC_TIMESTAMP() WHERE id = :id',
             ['p' => $parentId, 'n' => $name, 'k' => $kind, 'd' => $description, 'id' => $id],
         );
+    }
+
+    /**
+     * Locations of households in the viewer's view (every location for
+     * administrators, including ones without a household).
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function visible(Visibility $visibility): array
+    {
+        $params = new Params();
+
+        return $this->many(
+            'SELECT l.* FROM locations l WHERE ' . $visibility->location('l', $params) . ' ORDER BY l.name, l.id',
+            $params->all(),
+        );
+    }
+
+    /**
+     * @return list<array<string, mixed>> depth-first, with depth and path
+     */
+    public function visibleTree(Visibility $visibility): array
+    {
+        return Tree::flatten($this->visible($visibility));
+    }
+
+    /**
+     * @return array<int, string> id => breadcrumb path, visible locations only
+     */
+    public function visiblePaths(Visibility $visibility): array
+    {
+        return Tree::paths($this->visible($visibility));
     }
 
     public function householdId(int $id): ?int

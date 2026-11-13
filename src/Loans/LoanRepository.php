@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace DigitalLibrary\Loans;
 
 use DigitalLibrary\Catalogue\Repository\Repository;
+use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
 
 final class LoanRepository extends Repository
 {
@@ -42,11 +44,18 @@ final class LoanRepository extends Repository
     }
 
     /**
+     * The loan, when its copy is in the viewer's view.
+     *
      * @return array<string, mixed>|null
      */
-    public function find(int $id): ?array
+    public function find(int $id, Visibility $visibility): ?array
     {
-        return $this->one(self::SELECT . ' WHERE l.id = :id', ['id' => $id]);
+        $params = new Params();
+
+        return $this->one(
+            self::SELECT . ' WHERE l.id = ' . $params->add($id) . ' AND ' . $visibility->copy('c', $params),
+            $params->all(),
+        );
     }
 
     /**
@@ -123,52 +132,82 @@ final class LoanRepository extends Repository
     /**
      * Paginated loan list.
      *
+     * With an owner (or neither owner nor borrower: every loan), only
+     * loans of copies in the viewer's view are listed. A borrower's own
+     * loans are always listed, since they are that user's data, but when
+     * the copy is no longer in view only the title and the dates remain:
+     * the owner, the inventory code and the notes are withheld, and
+     * copy_visible tells the page not to link to the copy.
+     *
      * @param ?int   $ownerId    restrict to copies owned by this user (null: any owner)
      * @param ?int   $borrowerId restrict to loans to this user
      * @param string $status     active | overdue | returned | all
      *
      * @return array{rows: list<array<string, mixed>>, total: int}
      */
-    public function search(?int $ownerId, ?int $borrowerId, string $status, int $page): array
+    public function search(?int $ownerId, ?int $borrowerId, string $status, int $page, Visibility $visibility): array
     {
-        $where = [];
-        $params = [];
-        if ($ownerId !== null) {
-            $where[] = 'c.owner_user_id = :owner';
-            $params['owner'] = $ownerId;
-        }
-        if ($borrowerId !== null) {
-            $where[] = 'l.borrower_user_id = :borrower';
-            $params['borrower'] = $borrowerId;
-        }
-        $where[] = match ($status) {
-            'overdue' => 'l.returned_on IS NULL AND l.due_on IS NOT NULL AND l.due_on < UTC_DATE()',
-            'returned' => 'l.returned_on IS NOT NULL',
-            'all' => '1 = 1',
-            default => 'l.returned_on IS NULL',
+        $where = function (Params $params) use ($ownerId, $borrowerId, $status, $visibility): string {
+            $where = [];
+            if ($ownerId !== null) {
+                $where[] = 'c.owner_user_id = ' . $params->add($ownerId);
+            }
+            if ($borrowerId !== null) {
+                $where[] = 'l.borrower_user_id = ' . $params->add($borrowerId);
+            } else {
+                $where[] = $visibility->copy('c', $params);
+            }
+            $where[] = match ($status) {
+                'overdue' => 'l.returned_on IS NULL AND l.due_on IS NOT NULL AND l.due_on < UTC_DATE()',
+                'returned' => 'l.returned_on IS NOT NULL',
+                'all' => '1 = 1',
+                default => 'l.returned_on IS NULL',
+            };
+
+            return ' WHERE ' . implode(' AND ', $where);
         };
-        $whereSql = ' WHERE ' . implode(' AND ', $where);
         $order = $status === 'returned' || $status === 'all'
             ? ' ORDER BY l.loaned_on DESC, l.id DESC'
             : ' ORDER BY l.due_on IS NULL, l.due_on, l.loaned_on, l.id';
-        $total = (int) $this->scalar(
-            'SELECT COUNT(*) FROM loans l JOIN copies c ON c.id = l.copy_id' . $whereSql,
-            $params,
-        );
+
+        $count = new Params();
+        $total = (int) $this->scalar('SELECT COUNT(*) FROM loans l JOIN copies c ON c.id = l.copy_id' . $where($count), $count->all());
+
+        $params = new Params();
+        $visible = fn (): string => $visibility->copy('c', $params);
         $rows = $this->many(
-            self::SELECT . $whereSql . $order . ' LIMIT :limit OFFSET :offset',
-            $params + ['limit' => self::PER_PAGE, 'offset' => (max(1, $page) - 1) * self::PER_PAGE],
+            'SELECT l.id, l.copy_id, l.borrower_user_id, l.borrower_name, l.loaned_on, l.due_on, l.returned_on, l.created_at,
+                    c.owner_user_id, c.edition_id, e.title AS edition_title, bu.display_name AS borrower_display_name,
+                    CASE WHEN ' . $visible() . ' THEN l.notes END AS notes,
+                    CASE WHEN ' . $visible() . ' THEN c.inventory_code END AS inventory_code,
+                    CASE WHEN ' . $visible() . ' THEN ou.display_name END AS owner_name,
+                    (' . $visible() . ') AS copy_visible,
+                    (l.returned_on IS NULL AND l.due_on IS NOT NULL AND l.due_on < UTC_DATE()) AS is_overdue
+             FROM loans l
+             JOIN copies c ON c.id = l.copy_id
+             JOIN editions e ON e.id = c.edition_id
+             JOIN users ou ON ou.id = c.owner_user_id
+             LEFT JOIN users bu ON bu.id = l.borrower_user_id'
+            . $where($params) . $order
+            . ' LIMIT ' . $params->add(self::PER_PAGE) . ' OFFSET ' . $params->add((max(1, $page) - 1) * self::PER_PAGE),
+            $params->all(),
         );
 
         return ['rows' => $rows, 'total' => $total];
     }
 
-    public function countOverdueForOwner(int $ownerId): int
+    /**
+     * Overdue loans of the owner's copies that are in the viewer's view.
+     */
+    public function countOverdueForOwner(int $ownerId, Visibility $visibility): int
     {
+        $params = new Params();
+
         return (int) $this->scalar(
             'SELECT COUNT(*) FROM loans l JOIN copies c ON c.id = l.copy_id
-             WHERE c.owner_user_id = :o AND l.returned_on IS NULL AND l.due_on IS NOT NULL AND l.due_on < UTC_DATE()',
-            ['o' => $ownerId],
+             WHERE c.owner_user_id = ' . $params->add($ownerId) . ' AND ' . $visibility->copy('c', $params) . '
+               AND l.returned_on IS NULL AND l.due_on IS NOT NULL AND l.due_on < UTC_DATE()',
+            $params->all(),
         );
     }
 }

@@ -34,7 +34,7 @@ final class CollectionController extends Controller
         $scope = (string) $request->query('scope', $scopes[0]);
         $scope = in_array($scope, $scopes, true) ? $scope : $scopes[0];
         $page = max(1, min(10_000, (int) ($request->query('page') ?? '1')));
-        $result = $this->services->collections()->list($scope, $user->id, $page);
+        $result = $this->services->collections()->list($scope, $user->id, $page, $this->visibility());
 
         return $this->render('collections/index', [
             'page_title' => 'collections.title',
@@ -56,7 +56,7 @@ final class CollectionController extends Controller
     {
         $collection = $this->visible($request, $params);
         $page = max(1, min(10_000, (int) ($request->query('page') ?? '1')));
-        $items = $this->services->collections()->items((int) $collection['id'], $page);
+        $items = $this->services->collections()->items((int) $collection['id'], $page, $this->visibility());
 
         return $this->render('collections/show', [
             'page_title' => null,
@@ -151,6 +151,9 @@ final class CollectionController extends Controller
 
             return Response::redirect('/collections/' . (int) $collection['id'] . '/edit');
         }
+        // Counted before deleting, and in full: the audit record is about
+        // the collection, not about what this user could see in it.
+        $itemCount = $this->services->collections()->countItems((int) $collection['id']);
         try {
             $this->services->collectionService()->delete($this->user($request), (int) $collection['id']);
         } catch (CollectionException $e) {
@@ -159,7 +162,7 @@ final class CollectionController extends Controller
         }
         $this->audit($request, 'collection.deleted', 'collection', (int) $collection['id'], [
             'owner_user_id' => (int) $collection['owner_user_id'],
-            'items' => (int) $collection['item_count'],
+            'items' => $itemCount,
         ]);
         $this->flash('success', 'collections.deleted');
 
@@ -173,7 +176,9 @@ final class CollectionController extends Controller
     {
         $collection = $this->manageable($request, $params);
         $raw = (string) $request->input('edition_id', '');
-        $edition = preg_match('/^[1-9]\d{0,9}$/', $raw) === 1 ? $this->services->editions()->find((int) $raw) : null;
+        // An edition outside the user's view is 404, like one that does not
+        // exist: a collection cannot be used to probe edition ids.
+        $edition = preg_match('/^[1-9]\d{0,9}$/', $raw) === 1 ? $this->services->editions()->find((int) $raw, $this->visibility()) : null;
         if ($edition === null) {
             throw HttpException::notFound();
         }
@@ -258,7 +263,7 @@ final class CollectionController extends Controller
      */
     private function visible(Request $request, array $params): array
     {
-        $collection = $this->services->collections()->find($this->id($params));
+        $collection = $this->services->collections()->find($this->id($params), $this->visibility());
         if ($collection === null || !$this->services->authorizer()->canViewCollection($this->user($request), (int) $collection['owner_user_id'], (string) $collection['visibility'])) {
             throw HttpException::notFound();
         }

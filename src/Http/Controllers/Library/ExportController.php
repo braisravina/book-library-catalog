@@ -39,7 +39,7 @@ final class ExportController extends Controller
     public function personalJson(Request $request): Response
     {
         $user = $this->user($request);
-        $export = new PersonalExport($this->services->pdo(), $user->id);
+        $export = new PersonalExport($this->services->pdo(), $user->id, $this->visibility());
         $this->audit($request, 'export.personal', 'user', $user->id, ['format' => 'json', 'dataset' => 'all']);
 
         return $this->json('personal', ['scope' => 'personal', 'user_id' => $user->id], array_values($export->datasets()), 'library-personal');
@@ -51,7 +51,7 @@ final class ExportController extends Controller
     public function personalCsv(Request $request, array $params): Response
     {
         $user = $this->user($request);
-        $dataset = (new PersonalExport($this->services->pdo(), $user->id))->datasets()[$params['dataset'] ?? ''] ?? throw HttpException::notFound();
+        $dataset = (new PersonalExport($this->services->pdo(), $user->id, $this->visibility()))->datasets()[$params['dataset'] ?? ''] ?? throw HttpException::notFound();
         $this->audit($request, 'export.personal', 'user', $user->id, ['format' => 'csv', 'dataset' => $dataset->name]);
 
         return $this->csv($dataset, 'library-personal-' . $dataset->name);

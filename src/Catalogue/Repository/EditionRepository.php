@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Catalogue\Repository;
 
+use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
+
 final class EditionRepository extends Repository
 {
     public const FIELDS = ['title', 'subtitle', 'publisher_id', 'publication_year', 'edition_statement', 'language',
@@ -12,21 +15,57 @@ final class EditionRepository extends Repository
     public const CONTRIBUTOR_ROLES = ['translator', 'illustrator', 'editor', 'introduction', 'other'];
 
     /**
-     * The edition joined with its work and publisher.
+     * The edition joined with its work and publisher, when the viewer may
+     * see it. The creator's name is given only for a user the viewer knows
+     * (themself or a household co-member).
      *
      * @return array<string, mixed>|null
      */
-    public function find(int $id): ?array
+    public function find(int $id, Visibility $visibility): ?array
     {
+        $params = new Params();
+
         return $this->one(
             'SELECT e.*, p.name AS publisher_name,
                     w.title AS work_title, w.subtitle AS work_subtitle, w.original_title, w.original_language,
                     w.first_published_year, w.description AS work_description, w.created_by AS work_created_by,
-                    cu.display_name AS created_by_name
+                    CASE WHEN ' . $visibility->user('cu', $params) . ' THEN cu.display_name END AS created_by_name
              FROM editions e
              JOIN works w ON w.id = e.work_id
              LEFT JOIN publishers p ON p.id = e.publisher_id
              LEFT JOIN users cu ON cu.id = e.created_by
+             WHERE e.id = ' . $params->add($id) . ' AND ' . $visibility->edition('e', $params),
+            $params->all(),
+        );
+    }
+
+    /**
+     * Whether the viewer may see the edition (for links to a record found
+     * by other means, such as a duplicate ISBN).
+     */
+    public function isVisible(int $id, Visibility $visibility): bool
+    {
+        $params = new Params();
+
+        return $this->scalar(
+            'SELECT 1 FROM editions e WHERE e.id = ' . $params->add($id) . ' AND ' . $visibility->edition('e', $params),
+            $params->all(),
+        ) !== null;
+    }
+
+    /**
+     * Bibliographic fields of an edition for the duplicate-ISBN notice,
+     * whoever holds it: the shared description of the book and nothing
+     * about copies, owners, households, locations or who catalogued it.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function bibliographic(int $id): ?array
+    {
+        return $this->one(
+            'SELECT e.id, e.work_id, e.title, e.subtitle, e.publication_year, e.edition_statement, e.language, e.format,
+                    e.isbn_13, e.isbn_10, p.name AS publisher_name, w.title AS work_title
+             FROM editions e JOIN works w ON w.id = e.work_id LEFT JOIN publishers p ON p.id = e.publisher_id
              WHERE e.id = :id',
             ['id' => $id],
         );
@@ -44,19 +83,22 @@ final class EditionRepository extends Repository
 
     /**
      * Possible duplicates for books entered without ISBN: same title on the
-     * edition or the work, compared case- and accent-insensitively.
+     * edition or the work, compared case- and accent-insensitively. Only
+     * editions the viewer may see, counting their visible copies.
      *
      * @return list<array<string, mixed>>
      */
-    public function titleMatches(string $title, int $limit = 10): array
+    public function titleMatches(string $title, Visibility $visibility, int $limit = 10): array
     {
+        $params = new Params();
+
         return $this->many(
             'SELECT e.id, e.title, e.publication_year, e.isbn_13, p.name AS publisher_name,
-                    (SELECT COUNT(*) FROM copies c WHERE c.edition_id = e.id) AS copy_count
+                    (SELECT COUNT(*) FROM copies c WHERE c.edition_id = e.id AND ' . $visibility->copy('c', $params) . ') AS copy_count
              FROM editions e JOIN works w ON w.id = e.work_id LEFT JOIN publishers p ON p.id = e.publisher_id
-             WHERE e.title = :t1 OR w.title = :t2
-             ORDER BY e.id LIMIT :l',
-            ['t1' => $title, 't2' => $title, 'l' => $limit],
+             WHERE (e.title = ' . $params->add($title) . ' OR w.title = ' . $params->add($title) . ') AND ' . $visibility->edition('e', $params) . '
+             ORDER BY e.id LIMIT ' . $params->add($limit),
+            $params->all(),
         );
     }
 
@@ -136,9 +178,26 @@ final class EditionRepository extends Repository
         $this->run('UPDATE editions SET metadata_record_id = :r WHERE id = :e', ['r' => $recordId, 'e' => $editionId]);
     }
 
+    /**
+     * Every copy of the edition, whoever holds it (deletion guard only:
+     * never shown to a user).
+     */
     public function copyCount(int $id): int
     {
         return (int) $this->scalar('SELECT COUNT(*) FROM copies WHERE edition_id = :id', ['id' => $id]);
+    }
+
+    /**
+     * Copies of the edition the viewer may see.
+     */
+    public function visibleCopyCount(int $id, Visibility $visibility): int
+    {
+        $params = new Params();
+
+        return (int) $this->scalar(
+            'SELECT COUNT(*) FROM copies c WHERE c.edition_id = ' . $params->add($id) . ' AND ' . $visibility->copy('c', $params),
+            $params->all(),
+        );
     }
 
     public function delete(int $id): void
@@ -149,25 +208,33 @@ final class EditionRepository extends Repository
     /**
      * @return list<array<string, mixed>>
      */
-    public function recent(int $limit): array
+    public function recent(int $limit, Visibility $visibility): array
     {
+        $params = new Params();
+
         return $this->many(
             'SELECT e.id, e.title, e.publication_year,
                     (SELECT cv.id FROM covers cv WHERE cv.edition_id = e.id AND cv.is_primary = 1) AS cover_id,
                     (SELECT GROUP_CONCAT(a.name ORDER BY wa.position SEPARATOR \', \')
                        FROM work_authors wa JOIN authors a ON a.id = wa.author_id
                       WHERE wa.work_id = e.work_id AND wa.role = \'author\') AS authors
-             FROM editions e ORDER BY e.created_at DESC, e.id DESC LIMIT :l',
-            ['l' => $limit],
+             FROM editions e WHERE ' . $visibility->edition('e', $params) . '
+             ORDER BY e.created_at DESC, e.id DESC LIMIT ' . $params->add($limit),
+            $params->all(),
         );
     }
 
     /**
      * @return list<string>
      */
-    public function languagesInUse(): array
+    public function languagesInUse(Visibility $visibility): array
     {
-        return array_column($this->many('SELECT DISTINCT language FROM editions WHERE language IS NOT NULL ORDER BY language'), 'language');
+        $params = new Params();
+
+        return array_column($this->many(
+            'SELECT DISTINCT e.language FROM editions e WHERE e.language IS NOT NULL AND ' . $visibility->edition('e', $params) . ' ORDER BY e.language',
+            $params->all(),
+        ), 'language');
     }
 
     /**

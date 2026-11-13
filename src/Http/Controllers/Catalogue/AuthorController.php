@@ -23,7 +23,7 @@ final class AuthorController extends CatalogueBaseController
     {
         $query = mb_substr(trim((string) $request->query('q', '')), 0, 100);
         $page = max(1, min(10_000, (int) ($request->query('page') ?? '1')));
-        $result = $this->services->authors()->paginate($query, $page, self::PER_PAGE);
+        $result = $this->services->authors()->paginate($query, $page, self::PER_PAGE, $this->visibility());
 
         return $this->render('catalogue/authors_index', [
             'page_title' => 'catalogue.authors.title',
@@ -40,14 +40,14 @@ final class AuthorController extends CatalogueBaseController
      */
     public function show(Request $request, array $params): Response
     {
-        $author = $this->found($this->services->authors()->find($this->id($params)));
+        $author = $this->found($this->services->authors()->find($this->id($params), $this->visibility()));
 
         return $this->render('catalogue/author_show', [
             'page_title' => null,
             'title' => $author['name'],
             'author' => $author,
-            'works' => $this->services->authors()->works((int) $author['id']),
-            'contributions' => $this->services->authors()->contributions((int) $author['id']),
+            'works' => $this->services->authors()->works((int) $author['id'], $this->visibility()),
+            'contributions' => $this->services->authors()->contributions((int) $author['id'], $this->visibility()),
             'can_edit' => $this->can($this->user($request), Permission::CatalogueEditAny),
         ]);
     }
@@ -57,7 +57,7 @@ final class AuthorController extends CatalogueBaseController
      */
     public function edit(Request $request, array $params): Response
     {
-        $author = $this->found($this->services->authors()->find($this->id($params)));
+        $author = $this->found($this->services->authors()->find($this->id($params), $this->visibility()));
         $old = array_map(static fn ($v): string => $v === null ? '' : (string) $v, $author);
 
         return $this->form($author, $old, []);
@@ -68,7 +68,7 @@ final class AuthorController extends CatalogueBaseController
      */
     public function update(Request $request, array $params): Response
     {
-        $author = $this->found($this->services->authors()->find($this->id($params)));
+        $author = $this->found($this->services->authors()->find($this->id($params), $this->visibility()));
         $old = [];
         foreach (['name', 'sort_name', 'birth_year', 'death_year', 'notes'] as $field) {
             $old[$field] = trim((string) $request->input($field, ''));
@@ -105,10 +105,10 @@ final class AuthorController extends CatalogueBaseController
      */
     public function merge(Request $request, array $params): Response
     {
-        $author = $this->found($this->services->authors()->find($this->id($params)));
+        $author = $this->found($this->services->authors()->find($this->id($params), $this->visibility()));
         $repo = $this->services->authors();
 
-        return $this->mergeRecord($request, $author, 'author', '/authors', $repo->find(...), $repo->mergeInto(...));
+        return $this->mergeRecord($request, $author, 'author', '/authors', fn (int $id): ?array => $repo->find($id, $this->visibility()), $repo->mergeInto(...));
     }
 
     /**
@@ -118,7 +118,7 @@ final class AuthorController extends CatalogueBaseController
      */
     public function destroy(Request $request, array $params): Response
     {
-        $author = $this->found($this->services->authors()->find($this->id($params)));
+        $author = $this->found($this->services->authors()->find($this->id($params), $this->visibility()));
         $repo = $this->services->authors();
 
         return $this->deleteUnused($request, $author, 'author', '/authors', $repo->usage((int) $author['id']), $repo->delete(...));

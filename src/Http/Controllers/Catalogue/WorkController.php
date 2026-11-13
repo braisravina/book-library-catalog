@@ -23,7 +23,7 @@ final class WorkController extends CatalogueBaseController
     public function show(Request $request, array $params): Response
     {
         $user = $this->user($request);
-        $work = $this->found($this->services->works()->find($this->id($params)));
+        $work = $this->visibleWork($params);
         $id = (int) $work['id'];
 
         return $this->render('catalogue/work_show', [
@@ -32,7 +32,7 @@ final class WorkController extends CatalogueBaseController
             'work' => $work,
             'authors' => $this->services->works()->authors($id),
             'categories' => $this->services->categories()->forWork($id),
-            'editions' => $this->services->works()->editions($id),
+            'editions' => $this->services->works()->editions($id, $this->visibility()),
             'can_edit' => $this->services->authorizer()->canEditRecord($user, $work['created_by'] === null ? null : (int) $work['created_by']),
             'can_add_edition' => $this->can($user, Permission::CatalogueCreate),
             'can_delete' => $this->can($user, Permission::CatalogueDelete),
@@ -80,7 +80,7 @@ final class WorkController extends CatalogueBaseController
      */
     public function createEdition(Request $request, array $params): Response
     {
-        $work = $this->found($this->services->works()->find($this->id($params)));
+        $work = $this->visibleWork($params);
         $input = EditionInput::blank('', (string) $work['title']);
         $prefilled = false;
         // "Add as a new edition" from the add-a-book review: carry the ISBN
@@ -110,7 +110,7 @@ final class WorkController extends CatalogueBaseController
      */
     public function storeEdition(Request $request, array $params): Response
     {
-        $work = $this->found($this->services->works()->find($this->id($params)));
+        $work = $this->visibleWork($params);
         $input = EditionInput::fromRequest($request);
         $validator = Validator::make([], []);
         $input->validate($validator);
@@ -122,7 +122,7 @@ final class WorkController extends CatalogueBaseController
         } catch (DuplicateIsbnException $e) {
             $validator->addError('isbn', 'validation.isbn_taken');
 
-            return $this->editionForm($work, $input, $validator->errors(), 409, $e->existingEditionId);
+            return $this->editionForm($work, $input, $validator->errors(), 409, $this->linkable($e->existingEditionId));
         }
         $this->audit($request, 'edition.created', 'edition', $editionId, ['work_id' => (int) $work['id'], 'isbn_13' => $input->parsedIsbn()?->isbn13]);
         $this->flash('success', 'catalogue.add.created');
@@ -137,7 +137,7 @@ final class WorkController extends CatalogueBaseController
      */
     public function destroy(Request $request, array $params): Response
     {
-        $work = $this->found($this->services->works()->find($this->id($params)));
+        $work = $this->visibleWork($params);
         $id = (int) $work['id'];
         if ($this->services->works()->editionCount($id) > 0) {
             $this->flash('error', 'catalogue.work.delete_has_editions');
@@ -152,13 +152,25 @@ final class WorkController extends CatalogueBaseController
     }
 
     /**
+     * The work, or 404 when it does not exist or is outside the user's view.
+     *
+     * @param array<string, string> $params
+     *
+     * @return array<string, mixed>
+     */
+    private function visibleWork(array $params): array
+    {
+        return $this->found($this->services->works()->find($this->id($params), $this->visibility()));
+    }
+
+    /**
      * @param array<string, string> $params
      *
      * @return array<string, mixed>
      */
     private function editableWork(Request $request, array $params): array
     {
-        $work = $this->found($this->services->works()->find($this->id($params)));
+        $work = $this->visibleWork($params);
         $this->authorize($this->services->authorizer()->canEditRecord(
             $this->user($request),
             $work['created_by'] === null ? null : (int) $work['created_by'],

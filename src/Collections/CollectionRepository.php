@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace DigitalLibrary\Collections;
 
 use DigitalLibrary\Catalogue\Repository\Repository;
+use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
 
 /**
  * SQL for collections and their (edition-level) items. Visibility filtering
@@ -16,18 +18,29 @@ final class CollectionRepository extends Repository
     public const ITEMS_PER_PAGE = 50;
     public const MAX_ITEMS = 2000;
 
-    private const SELECT = 'SELECT c.id, c.owner_user_id, c.name, c.description, c.visibility, c.created_at, c.updated_at,
-            u.display_name AS owner_name,
-            (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id) AS item_count
-        FROM collections c
-        JOIN users u ON u.id = c.owner_user_id';
+    /**
+     * Collection columns for one viewer: item_count counts the editions
+     * that viewer may see, and the owner's name is given only for a user
+     * they know (themself or a household co-member).
+     */
+    private static function select(Visibility $visibility, Params $params): string
+    {
+        return 'SELECT c.id, c.owner_user_id, c.name, c.description, c.visibility, c.created_at, c.updated_at,
+                CASE WHEN ' . $visibility->user('u', $params) . ' THEN u.display_name END AS owner_name,
+                (SELECT COUNT(*) FROM collection_items ci JOIN editions ie ON ie.id = ci.edition_id
+                  WHERE ci.collection_id = c.id AND ' . $visibility->edition('ie', $params) . ') AS item_count
+            FROM collections c
+            JOIN users u ON u.id = c.owner_user_id';
+    }
 
     /**
      * @return array<string, mixed>|null
      */
-    public function find(int $id): ?array
+    public function find(int $id, Visibility $visibility): ?array
     {
-        return $this->one(self::SELECT . ' WHERE c.id = :id', ['id' => $id]);
+        $params = new Params();
+
+        return $this->one(self::select($visibility, $params) . ' WHERE c.id = ' . $params->add($id), $params->all());
     }
 
     /**
@@ -45,18 +58,24 @@ final class CollectionRepository extends Repository
      *
      * @return array{rows: list<array<string, mixed>>, total: int}
      */
-    public function list(string $scope, int $userId, int $page): array
+    public function list(string $scope, int $userId, int $page, Visibility $visibility): array
     {
-        [$where, $params] = match ($scope) {
-            'mine' => [' WHERE c.owner_user_id = :user', ['user' => $userId]],
-            'all' => ['', []],
-            default => [" WHERE c.visibility = 'shared' AND c.owner_user_id <> :user", ['user' => $userId]],
+        $where = static fn (Params $params): string => match ($scope) {
+            'mine' => ' WHERE c.owner_user_id = ' . $params->add($userId),
+            'all' => '',
+            default => " WHERE c.visibility = 'shared' AND c.owner_user_id <> " . $params->add($userId),
         };
+        $params = new Params();
+        $rows = $this->many(
+            self::select($visibility, $params) . $where($params) . ' ORDER BY c.name, c.id LIMIT ' . $params->add(self::PER_PAGE)
+                . ' OFFSET ' . $params->add((max(1, $page) - 1) * self::PER_PAGE),
+            $params->all(),
+        );
+        $count = new Params();
 
         return [
-            'rows' => $this->many(self::SELECT . $where . ' ORDER BY c.name, c.id LIMIT :limit OFFSET :offset',
-                $params + ['limit' => self::PER_PAGE, 'offset' => (max(1, $page) - 1) * self::PER_PAGE]),
-            'total' => (int) $this->scalar('SELECT COUNT(*) FROM collections c' . $where, $params),
+            'rows' => $rows,
+            'total' => (int) $this->scalar('SELECT COUNT(*) FROM collections c' . $where($count), $count->all()),
         ];
     }
 
@@ -96,28 +115,42 @@ final class CollectionRepository extends Repository
     }
 
     /**
+     * The collection's items the viewer may see (an edition out of their
+     * view is neither listed nor counted, even in a shared collection).
+     *
      * @return array{rows: list<array<string, mixed>>, total: int}
      */
-    public function items(int $collectionId, int $page): array
+    public function items(int $collectionId, int $page, Visibility $visibility): array
     {
+        $params = new Params();
+        $rows = $this->many(
+            "SELECT ci.edition_id, ci.position, ci.added_at, e.title, e.subtitle, e.publication_year,
+                    (SELECT cv.id FROM covers cv WHERE cv.edition_id = e.id AND cv.is_primary = 1) AS cover_id,
+                    (SELECT GROUP_CONCAT(a.name ORDER BY wa.position SEPARATOR ', ')
+                       FROM work_authors wa JOIN authors a ON a.id = wa.author_id
+                      WHERE wa.work_id = e.work_id AND wa.role = 'author') AS authors
+             FROM collection_items ci
+             JOIN editions e ON e.id = ci.edition_id
+             WHERE ci.collection_id = " . $params->add($collectionId) . ' AND ' . $visibility->edition('e', $params) . '
+             ORDER BY ci.position, ci.edition_id
+             LIMIT ' . $params->add(self::ITEMS_PER_PAGE) . ' OFFSET ' . $params->add((max(1, $page) - 1) * self::ITEMS_PER_PAGE),
+            $params->all(),
+        );
+        $count = new Params();
+
         return [
-            'rows' => $this->many(
-                "SELECT ci.edition_id, ci.position, ci.added_at, e.title, e.subtitle, e.publication_year,
-                        (SELECT cv.id FROM covers cv WHERE cv.edition_id = e.id AND cv.is_primary = 1) AS cover_id,
-                        (SELECT GROUP_CONCAT(a.name ORDER BY wa.position SEPARATOR ', ')
-                           FROM work_authors wa JOIN authors a ON a.id = wa.author_id
-                          WHERE wa.work_id = e.work_id AND wa.role = 'author') AS authors
-                 FROM collection_items ci
-                 JOIN editions e ON e.id = ci.edition_id
-                 WHERE ci.collection_id = :c
-                 ORDER BY ci.position, ci.edition_id
-                 LIMIT :limit OFFSET :offset",
-                ['c' => $collectionId, 'limit' => self::ITEMS_PER_PAGE, 'offset' => (max(1, $page) - 1) * self::ITEMS_PER_PAGE],
+            'rows' => $rows,
+            'total' => (int) $this->scalar(
+                'SELECT COUNT(*) FROM collection_items ci JOIN editions e ON e.id = ci.edition_id
+                 WHERE ci.collection_id = ' . $count->add($collectionId) . ' AND ' . $visibility->edition('e', $count),
+                $count->all(),
             ),
-            'total' => $this->countItems($collectionId),
         ];
     }
 
+    /**
+     * Every item, whoever may see it (the size limit and the audit record).
+     */
     public function countItems(int $collectionId): int
     {
         return (int) $this->scalar('SELECT COUNT(*) FROM collection_items WHERE collection_id = :c', ['c' => $collectionId]);

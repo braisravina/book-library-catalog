@@ -4,34 +4,46 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Catalogue\Repository;
 
+use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
+
 final class CopyRepository extends Repository
 {
     public const FIELDS = ['owner_user_id', 'household_id', 'location_id', 'inventory_code', 'copy_condition', 'status', 'is_signed',
         'acquired_on', 'acquisition_source', 'purchase_price_cents', 'currency', 'notes'];
 
     /**
+     * The copy, when its household is in the viewer's view.
+     *
      * @return array<string, mixed>|null
      */
-    public function find(int $id): ?array
+    public function find(int $id, Visibility $visibility): ?array
     {
+        $params = new Params();
+
         return $this->one(
             'SELECT c.*, u.display_name AS owner_name, e.title AS edition_title, h.name AS household_name
              FROM copies c JOIN users u ON u.id = c.owner_user_id JOIN editions e ON e.id = c.edition_id
              LEFT JOIN households h ON h.id = c.household_id
-             WHERE c.id = :id',
-            ['id' => $id],
+             WHERE c.id = ' . $params->add($id) . ' AND ' . $visibility->copy('c', $params),
+            $params->all(),
         );
     }
 
     /**
+     * The edition's copies the viewer may see.
+     *
      * @return list<array<string, mixed>>
      */
-    public function forEdition(int $editionId): array
+    public function forEdition(int $editionId, Visibility $visibility): array
     {
+        $params = new Params();
+
         return $this->many(
             'SELECT c.*, u.display_name AS owner_name FROM copies c JOIN users u ON u.id = c.owner_user_id
-             WHERE c.edition_id = :id ORDER BY u.display_name, c.id',
-            ['id' => $editionId],
+             WHERE c.edition_id = ' . $params->add($editionId) . ' AND ' . $visibility->copy('c', $params) . '
+             ORDER BY u.display_name, c.id',
+            $params->all(),
         );
     }
 

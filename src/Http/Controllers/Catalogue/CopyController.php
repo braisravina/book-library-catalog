@@ -28,7 +28,7 @@ final class CopyController extends CatalogueBaseController
      */
     public function create(Request $request, array $params): Response
     {
-        $edition = $this->found($this->services->editions()->find($this->id($params)));
+        $edition = $this->visibleEdition($this->id($params));
 
         return $this->form($request, $edition, null, CopyInput::blank($this->user($request)->id), []);
     }
@@ -39,7 +39,7 @@ final class CopyController extends CatalogueBaseController
     public function store(Request $request, array $params): Response
     {
         $user = $this->user($request);
-        $edition = $this->found($this->services->editions()->find($this->id($params)));
+        $edition = $this->visibleEdition($this->id($params));
         $input = CopyInput::fromRequest($request);
         $this->authorizeOwner($user, $input);
 
@@ -61,7 +61,7 @@ final class CopyController extends CatalogueBaseController
     public function edit(Request $request, array $params): Response
     {
         $copy = $this->manageableCopy($request, $params);
-        $edition = $this->found($this->services->editions()->find((int) $copy['edition_id']));
+        $edition = $this->visibleEdition((int) $copy['edition_id']);
 
         return $this->form($request, $edition, $copy, CopyInput::fromRecord($copy), []);
     }
@@ -73,7 +73,7 @@ final class CopyController extends CatalogueBaseController
     {
         $user = $this->user($request);
         $copy = $this->manageableCopy($request, $params);
-        $edition = $this->found($this->services->editions()->find((int) $copy['edition_id']));
+        $edition = $this->visibleEdition((int) $copy['edition_id']);
         $input = CopyInput::fromRequest($request);
         $this->authorizeOwner($user, $input);
 
@@ -129,10 +129,21 @@ final class CopyController extends CatalogueBaseController
      */
     private function manageableCopy(Request $request, array $params): array
     {
-        $copy = $this->found($this->services->copies()->find($this->id($params)));
+        // 404 before 403: a copy outside the user's households does not exist for them.
+        $copy = $this->found($this->services->copies()->find($this->id($params), $this->visibility()));
         $this->authorize($this->services->authorizer()->canManageCopy($this->user($request), (int) $copy['owner_user_id']));
 
         return $copy;
+    }
+
+    /**
+     * The edition a copy belongs to, or 404 when it is outside the user's view.
+     *
+     * @return array<string, mixed>
+     */
+    private function visibleEdition(int $id): array
+    {
+        return $this->found($this->services->editions()->find($id, $this->visibility()));
     }
 
     /**
@@ -188,7 +199,7 @@ final class CopyController extends CatalogueBaseController
 
     private function currentStatus(int $copyId): ?string
     {
-        $copy = $this->services->copies()->find($copyId);
+        $copy = $this->services->copies()->find($copyId, $this->visibility());
 
         return $copy === null ? null : (string) $copy['status'];
     }
@@ -240,7 +251,7 @@ final class CopyController extends CatalogueBaseController
             'can_choose_owner' => $canChooseOwner,
             'household_options' => $this->services->copyHousehold()->options($user, $this->services->householdScope($user), $copy),
             'action' => $copy === null ? '/editions/' . $edition['id'] . '/copies' : '/copies/' . $copy['id'],
-            'location_tree' => $this->services->locations()->tree(),
+            'location_tree' => $this->services->locations()->visibleTree($this->visibility()),
         ], $status);
     }
 }

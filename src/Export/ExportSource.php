@@ -85,11 +85,17 @@ abstract class ExportSource
     }
 
     /**
+     * @param string $where optional condition on the table (alias "t"), with its bound values in $params
+     * @param array<string, mixed> $params
+     *
      * @return array<int, string> id => full path ("Fiction › Classics")
      */
-    protected function treePaths(string $table): array
+    protected function treePaths(string $table, string $where = '1 = 1', array $params = []): array
     {
-        return Tree::paths($this->pdo->query('SELECT * FROM ' . $table . ' ORDER BY name, id')->fetchAll(PDO::FETCH_ASSOC));
+        $stmt = $this->pdo->prepare('SELECT t.* FROM ' . $table . ' t WHERE ' . $where . ' ORDER BY t.name, t.id');
+        $stmt->execute($params);
+
+        return Tree::paths($stmt->fetchAll(PDO::FETCH_ASSOC));
     }
 
     /**

@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Auth;
 
+use DigitalLibrary\Database\Params;
 use DigitalLibrary\Security\Role;
+use DigitalLibrary\Security\Visibility;
 use PDO;
 
 final class UserRepository
@@ -150,6 +152,40 @@ final class UserRepository
     public function all(): array
     {
         $stmt = $this->pdo->query(self::SELECT . ' ORDER BY u.display_name, u.id');
+
+        return array_map(User::fromRow(...), $stmt->fetchAll());
+    }
+
+    /**
+     * Active users the viewer may be shown by name: everyone when
+     * unrestricted, otherwise the viewer and the members of their
+     * households. Users of other households are never listed.
+     *
+     * @return list<User>
+     */
+    public function activeKnownTo(Visibility $visibility): array
+    {
+        $params = new Params();
+        $stmt = $this->pdo->prepare(self::SELECT . ' WHERE u.is_active = 1 AND ' . $visibility->user('u', $params) . ' ORDER BY u.display_name, u.id');
+        $params->bind($stmt);
+        $stmt->execute();
+
+        return array_map(User::fromRow(...), $stmt->fetchAll());
+    }
+
+    /**
+     * Active members of one household (the people a copy of that household
+     * may be lent to).
+     *
+     * @return list<User>
+     */
+    public function activeMembersOf(int $householdId): array
+    {
+        $stmt = $this->pdo->prepare(
+            self::SELECT . ' JOIN household_members hm ON hm.user_id = u.id
+             WHERE hm.household_id = :h AND u.is_active = 1 ORDER BY u.display_name, u.id'
+        );
+        $stmt->execute(['h' => $householdId]);
 
         return array_map(User::fromRow(...), $stmt->fetchAll());
     }

@@ -305,7 +305,7 @@ final class LoanTest extends IntegrationTestCase
         self::assertStringContainsString('Late reader', $active);
         self::assertStringContainsString('Punctual reader', $active);
         self::assertStringContainsString('Overdue', $this->request($browser, 'GET', "/copies/{$this->copyId}")->body());
-        self::assertSame(1, $this->services()->loans()->countOverdueForOwner($this->aliceId));
+        self::assertSame(1, $this->services()->loans()->countOverdueForOwner($this->aliceId, \DigitalLibrary\Security\Visibility::unrestricted()));
         self::assertStringContainsString('You have 1 overdue loans.', $this->request($browser, 'GET', '/')->body());
         [$bob] = $this->signedIn('bob@example.org');
         self::assertStringNotContainsString('overdue loans', $this->request($bob, 'GET', '/')->body());
@@ -314,7 +314,7 @@ final class LoanTest extends IntegrationTestCase
         $loanId = $this->countRows("SELECT id FROM loans WHERE borrower_name = 'Late reader'");
         $this->request($browser, 'POST', "/loans/{$loanId}/return", ['_csrf' => $token]);
         self::assertStringNotContainsString('Late reader', $this->request($browser, 'GET', '/loans?status=overdue')->body());
-        self::assertSame(0, $this->services()->loans()->countOverdueForOwner($this->aliceId));
+        self::assertSame(0, $this->services()->loans()->countOverdueForOwner($this->aliceId, \DigitalLibrary\Security\Visibility::unrestricted()));
         self::assertStringNotContainsString('overdue loans', $this->request($browser, 'GET', '/')->body());
     }
 

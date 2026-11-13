@@ -10,6 +10,7 @@ use DigitalLibrary\Http\HttpException;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Http\Response;
 use DigitalLibrary\Security\Permission;
+use DigitalLibrary\Security\Visibility;
 
 abstract class Controller
 {
@@ -39,6 +40,18 @@ abstract class Controller
         }
 
         return $user;
+    }
+
+    /**
+     * What the signed-in user may see (phase H2). Every record a controller
+     * loads or lists is read through it, for GET and POST alike, so a
+     * record outside the user's households is answered with 404 exactly
+     * like one that does not exist. Unrestricted for administrators and
+     * while the household feature is disabled.
+     */
+    protected function visibility(): Visibility
+    {
+        return $this->services->visibility($this->services->auth()->user());
     }
 
     protected function flash(string $type, string $messageKey): void

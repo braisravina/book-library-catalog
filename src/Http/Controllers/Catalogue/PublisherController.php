@@ -17,7 +17,7 @@ final class PublisherController extends CatalogueBaseController
     {
         return $this->render('catalogue/publishers_index', [
             'page_title' => 'catalogue.publishers.title',
-            'publishers' => $this->services->publishers()->allWithCounts(),
+            'publishers' => $this->services->publishers()->allWithCounts($this->visibility()),
         ]);
     }
 
@@ -26,13 +26,13 @@ final class PublisherController extends CatalogueBaseController
      */
     public function show(Request $request, array $params): Response
     {
-        $publisher = $this->found($this->services->publishers()->find($this->id($params)));
+        $publisher = $this->found($this->services->publishers()->find($this->id($params), $this->visibility()));
 
         return $this->render('catalogue/publisher_show', [
             'page_title' => null,
             'title' => $publisher['name'],
             'publisher' => $publisher,
-            'editions' => $this->services->publishers()->editions((int) $publisher['id']),
+            'editions' => $this->services->publishers()->editions((int) $publisher['id'], $this->visibility()),
             'can_edit' => $this->can($this->user($request), Permission::CatalogueEditAny),
         ]);
     }
@@ -42,7 +42,7 @@ final class PublisherController extends CatalogueBaseController
      */
     public function edit(Request $request, array $params): Response
     {
-        $publisher = $this->found($this->services->publishers()->find($this->id($params)));
+        $publisher = $this->found($this->services->publishers()->find($this->id($params), $this->visibility()));
 
         return $this->form($publisher, (string) $publisher['name'], []);
     }
@@ -52,7 +52,7 @@ final class PublisherController extends CatalogueBaseController
      */
     public function update(Request $request, array $params): Response
     {
-        $publisher = $this->found($this->services->publishers()->find($this->id($params)));
+        $publisher = $this->found($this->services->publishers()->find($this->id($params), $this->visibility()));
         $name = trim((string) $request->input('name', ''));
         $validator = Validator::make(['name' => $name], ['name' => ['required', 'max:255', 'no_control']]);
         if (!$validator->fails() && !$this->services->publishers()->rename((int) $publisher['id'], $name)) {
@@ -72,10 +72,10 @@ final class PublisherController extends CatalogueBaseController
      */
     public function merge(Request $request, array $params): Response
     {
-        $publisher = $this->found($this->services->publishers()->find($this->id($params)));
+        $publisher = $this->found($this->services->publishers()->find($this->id($params), $this->visibility()));
         $repo = $this->services->publishers();
 
-        return $this->mergeRecord($request, $publisher, 'publisher', '/publishers', $repo->find(...), $repo->mergeInto(...));
+        return $this->mergeRecord($request, $publisher, 'publisher', '/publishers', fn (int $id): ?array => $repo->find($id, $this->visibility()), $repo->mergeInto(...));
     }
 
     /**
@@ -83,7 +83,7 @@ final class PublisherController extends CatalogueBaseController
      */
     public function destroy(Request $request, array $params): Response
     {
-        $publisher = $this->found($this->services->publishers()->find($this->id($params)));
+        $publisher = $this->found($this->services->publishers()->find($this->id($params), $this->visibility()));
         $repo = $this->services->publishers();
 
         return $this->deleteUnused($request, $publisher, 'publisher', '/publishers', $repo->usage((int) $publisher['id']), $repo->delete(...));

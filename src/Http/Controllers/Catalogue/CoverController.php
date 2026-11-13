@@ -22,7 +22,7 @@ final class CoverController extends CatalogueBaseController
      */
     public function store(Request $request, array $params): Response
     {
-        $edition = $this->found($this->services->editions()->find($this->id($params)));
+        $edition = $this->found($this->services->editions()->find($this->id($params), $this->visibility()));
         $this->authorize($this->services->authorizer()->canEditRecord(
             $this->user($request),
             $edition['created_by'] === null ? null : (int) $edition['created_by'],
@@ -58,7 +58,10 @@ final class CoverController extends CatalogueBaseController
      */
     public function show(Request $request, array $params): Response
     {
-        $cover = $this->found($this->services->coverRecords()->find($this->id($params)));
+        // Checked on every request, before the ETag is compared: a cover of an
+        // edition that left the user's view is 404 even if their browser
+        // still holds a copy.
+        $cover = $this->found($this->services->coverRecords()->find($this->id($params), $this->visibility()));
         $thumbnail = $request->query('size') === 'thumb';
         $path = $this->services->covers()->path((string) $cover['storage_key'], $thumbnail);
         if ($path === null) {
@@ -66,7 +69,10 @@ final class CoverController extends CatalogueBaseController
         }
         $etag = '"' . substr((string) $cover['sha256'], 0, 32) . ($thumbnail ? '-t' : '') . '"';
         $headers = [
-            'Cache-Control' => 'private, max-age=86400',
+            // With households the browser must ask every time (the answer is
+            // usually 304), so a removed membership applies to the next
+            // request instead of after the cache lifetime.
+            'Cache-Control' => $this->services->householdsEnabled() ? 'private, no-cache' : 'private, max-age=86400',
             'ETag' => $etag,
             'Content-Security-Policy' => "default-src 'none'; sandbox",
             'Content-Disposition' => 'inline; filename="cover-' . (int) $cover['id'] . '.jpg"',
@@ -87,9 +93,9 @@ final class CoverController extends CatalogueBaseController
      */
     public function destroy(Request $request, array $params): Response
     {
-        $cover = $this->found($this->services->coverRecords()->find($this->id($params)));
+        $cover = $this->found($this->services->coverRecords()->find($this->id($params), $this->visibility()));
         $editionId = (int) $cover['edition_id'];
-        $edition = $this->found($this->services->editions()->find($editionId));
+        $edition = $this->found($this->services->editions()->find($editionId, $this->visibility()));
         $this->authorize($this->services->authorizer()->canEditRecord(
             $this->user($request),
             $edition['created_by'] === null ? null : (int) $edition['created_by'],
