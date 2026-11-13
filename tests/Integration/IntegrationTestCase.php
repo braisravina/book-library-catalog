@@ -15,8 +15,10 @@ use DigitalLibrary\Http\Response;
 use DigitalLibrary\Security\PasswordHasher;
 use DigitalLibrary\Security\Role;
 use DigitalLibrary\Security\Session;
+use DigitalLibrary\Metadata\Backoff\ProviderBackoff;
 use DigitalLibrary\Metadata\Http\HttpClient;
 use DigitalLibrary\Tests\Support\FakeHttpClient;
+use DigitalLibrary\Tests\Support\InMemoryBackoffStore;
 use DigitalLibrary\Tests\Support\TestDatabaseGuard;
 use DigitalLibrary\Tests\Support\TestDatabaseSafetyException;
 use DigitalLibrary\Upload\CoverImageProcessor;
@@ -71,10 +73,18 @@ abstract class IntegrationTestCase extends TestCase
     /** Offline HTTP client used for every request (reset in setUp). */
     protected static FakeHttpClient $http;
 
+    /** Metadata provider backoff state shared by a test's requests (reset in setUp). */
+    protected static InMemoryBackoffStore $backoff;
+
+    /** Seconds added to the backoff clock, to simulate time passing. */
+    protected static int $clockOffset = 0;
+
     protected function setUp(): void
     {
         self::$configOverrides = [];
         self::$http = new FakeHttpClient();
+        self::$backoff = new InMemoryBackoffStore();
+        self::$clockOffset = 0;
         if (self::$skipReason !== null) {
             self::markTestSkipped(self::$skipReason);
         }
@@ -180,6 +190,7 @@ abstract class IntegrationTestCase extends TestCase
         $services->set(PDO::class, $this->pdo());
         $services->set(Session::class, $browser);
         $services->set(HttpClient::class, self::$http);
+        $services->set(ProviderBackoff::class, new ProviderBackoff(self::$backoff, static fn (): int => time() + self::$clockOffset));
         $services->set(CoverImageProcessor::class, new CoverImageProcessor(
             self::coverDirectory(),
             isUploadedFile: static fn (string $path): bool => self::$trustUploads,

@@ -35,7 +35,7 @@ final class OpenLibraryProvider implements MetadataProvider
     {
         $response = $this->http->get(self::url($isbn), self::MAX_BYTES);
         if ($response->status !== 200) {
-            throw new HttpException('Open Library returned HTTP ' . $response->status);
+            throw HttpException::forStatus('Open Library', $response);
         }
         $data = json_decode($response->body, true);
         if (!is_array($data)) {

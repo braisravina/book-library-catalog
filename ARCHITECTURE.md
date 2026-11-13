@@ -60,7 +60,7 @@ published port, bound to `127.0.0.1` (see
 | `Export` | `CatalogueExport`, `PersonalExport` (keyset-batched sources), `Dataset`, `CsvWriter`, `JsonWriter` |
 | `Backup` | `BackupCreator`, `BackupVerifier`, `BackupRestorer`, `DatabaseDumper`, `DumpReader`, `Manifest`, strict `TarWriter`/`TarReader`/`TarPath` |
 | `Maintenance` | `Cleanup` (retention and housekeeping) |
-| `Metadata` | `MetadataService`, providers (`Provider\OpenLibraryProvider`, `Provider\GoogleBooksProvider`), `BookMetadata`, `MetadataPrefill`, `CoverImporter`, hardened HTTP (`Http\CurlHttpClient`, `Http\OutboundPolicy`) |
+| `Metadata` | `MetadataService`, providers (`Provider\OpenLibraryProvider`, `Provider\GoogleBooksProvider`), `BookMetadata`, `MetadataPrefill`, `MetadataReview`, `CoverImporter`, provider backoff (`Backoff\ProviderBackoff`, `Backoff\FileBackoffStore`), hardened HTTP (`Http\CurlHttpClient`, `Http\OutboundPolicy`) |
 | `Console` | `bin/console` commands (`Console`; backups, restore, maintenance and cleanup in `Operations`) |
 
 ## Request lifecycle
@@ -197,10 +197,16 @@ Controller (HTTP, permissions, audit)  ──▶  Input\* (parse + validate requ
 ### Adding a book
 
 1. `GET /books/new` asks for an ISBN, or "book without ISBN".
-2. `GET /books/new?isbn=…` validates and normalises it to ISBN-13. If an
-   edition already has it (whichever form was typed), the duplicate page
-   offers **View record** or **Add another copy**. Otherwise the full form
-   opens with the ISBN pre-filled.
+   `Isbn::problem()` gives the specific reason an ISBN is invalid
+   (characters, length, prefix, check digit); `app.js` applies the same
+   rules while typing (`IsbnEntryAssetsTest` keeps them in step) and shows
+   an `aria-busy` / `role="status"` loading state during the lookup.
+2. `GET /books/new?isbn=…` ("Look up book") validates and normalises it to
+   ISBN-13. If an edition already has it (whichever form was typed), the
+   duplicate page offers **View record** or **Add another copy**. Otherwise
+   the full form opens with the ISBN pre-filled and the lookup review.
+   `&manual=1` ("Enter details manually") does the same checks but never
+   contacts a provider.
 3. `POST /books` creates the work, edition, authors, publisher, categories
    and, if ticked, the user's first copy. Without an ISBN, editions with
    the same title (case- and accent-insensitive) are listed as possible
@@ -342,6 +348,29 @@ POST /books ──▶ cachedRecord(id, ISBN) must match ──▶ editions.metad
   `CoverImageProcessor::storeDownloaded()`: the same validation and
   re-encoding as uploads, without the HTTP-upload origin check, which can't
   apply to a server-side file.
+- **Review panel** (`MetadataReview`, `catalogue/_lookup_review`): built
+  from each provider's own normalised data (`LookupResult::$byProvider`):
+  the provider that supplied each pre-filled value, the fields no provider
+  supplied, and differing values from other providers (case, spacing,
+  trailing punctuation and author order are not differences). It reports;
+  it never invents or combines values. Cover URLs are never shown. After a
+  validation error on `POST /books` the panel is rebuilt from the cache only
+  (`lookup(..., network: false)`): no outbound request on POST.
+- **Existing works** (`WorkRepository::similar()`): same title or original
+  title (collation: case- and accent-insensitive), also without a subtitle
+  part, or a title containing it by a shared author. Shown with **Add as a
+  new edition** (`/works/{id}/editions/new?isbn=…`), whose form is pre-filled
+  from the cache only; the user submits it through the normal edition flow.
+  Nothing is merged automatically.
+- **Backoff** (`Backoff\ProviderBackoff`): HTTP 429, 500, 502, 503 and 504
+  pause that provider: 30 s, doubling per consecutive failure up to 15 min,
+  or `Retry-After` (seconds or HTTP date) clamped to 5 s – 15 min. While
+  paused the provider is not contacted and the next one is used; any other
+  answer, including "not found", clears the pause. Transport errors and
+  other statuses are plain failures. Nothing sleeps or retries inside a
+  request. State: `storage/cache/metadata-backoff-<provider>.json`
+  (`FileBackoffStore`, `flock`ed, `0600`); if it cannot be written, there is
+  simply no backoff. No schema change.
 - **Verification status:** in the development sandbox, Open Library is
   blocked by egress policy and Google Books answers HTTP 429 without an API
   key. Live transport and error handling were exercised, but a successful

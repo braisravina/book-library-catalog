@@ -42,7 +42,7 @@ final class CurlHttpClient implements HttpClient
                 continue;
             }
 
-            return new HttpResponse($status, $body, $headers['content-type'] ?? '');
+            return new HttpResponse($status, $body, $headers['content-type'] ?? '', $headers);
         }
 
         throw new HttpException('Too many redirects');
@@ -71,7 +71,9 @@ final class CurlHttpClient implements HttpClient
             CURLOPT_ENCODING => '',
             CURLOPT_HEADERFUNCTION => static function ($ch, string $line) use (&$headers): int {
                 $pos = strpos($line, ':');
-                if ($pos !== false) {
+                if (str_starts_with($line, 'HTTP/')) {
+                    $headers = []; // a new response (e.g. after 100 Continue)
+                } elseif ($pos !== false) {
                     $headers[strtolower(trim(substr($line, 0, $pos)))] = trim(substr($line, $pos + 1));
                 }
 

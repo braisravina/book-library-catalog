@@ -79,7 +79,7 @@ final class CatalogueFlowTest extends IntegrationTestCase
         [$browser] = $this->signedIn('member@example.org');
         $response = $this->request($browser, 'GET', '/books/new?isbn=978-0-306-40615-8');
         self::assertSame(422, $response->status());
-        self::assertStringContainsString('Enter a valid ISBN-10 or ISBN-13.', $response->body());
+        self::assertStringContainsString('The check digit does not match.', $response->body());
     }
 
     public function testPostingADuplicateIsbnCreatesNothing(): void

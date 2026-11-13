@@ -8,8 +8,10 @@ use DigitalLibrary\Catalogue\DuplicateIsbnException;
 use DigitalLibrary\Catalogue\EditConflictException;
 use DigitalLibrary\Catalogue\Input\EditionInput;
 use DigitalLibrary\Catalogue\Input\WorkInput;
+use DigitalLibrary\Catalogue\Isbn;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Http\Response;
+use DigitalLibrary\Metadata\MetadataPrefill;
 use DigitalLibrary\Security\Permission;
 use DigitalLibrary\Validation\Validator;
 
@@ -79,8 +81,28 @@ final class WorkController extends CatalogueBaseController
     public function createEdition(Request $request, array $params): Response
     {
         $work = $this->found($this->services->works()->find($this->id($params)));
+        $input = EditionInput::blank('', (string) $work['title']);
+        $prefilled = false;
+        // "Add as a new edition" from the add-a-book review: carry the ISBN
+        // over and pre-fill edition fields from the cached lookup only (no
+        // outbound request). The user reviews everything before saving.
+        $isbn = Isbn::tryParse(substr((string) $request->query('isbn', ''), 0, 32));
+        if ($isbn !== null) {
+            $input = EditionInput::blank($isbn->isbn13, (string) $work['title']);
+            $metadata = $this->services->metadata();
+            $cached = $metadata->enabled() ? $metadata->lookup($isbn, $this->user($request)->id, network: false) : null;
+            if ($cached !== null && $cached->found()) {
+                $edition = MetadataPrefill::inputs($cached->metadata, $isbn)[1];
+                $input = new EditionInput(
+                    $edition->title !== '' ? $edition->title : (string) $work['title'],
+                    $edition->subtitle, $edition->publisher, $edition->publicationYear, '', $edition->language,
+                    $edition->pageCount, '', $isbn->isbn13, '', '', [],
+                );
+                $prefilled = true;
+            }
+        }
 
-        return $this->editionForm($work, EditionInput::blank('', (string) $work['title']), []);
+        return $this->editionForm($work, $input, [], prefilled: $prefilled);
     }
 
     /**
@@ -164,9 +186,10 @@ final class WorkController extends CatalogueBaseController
      * @param array<string, mixed>        $work
      * @param array<string, list<string>> $errors
      */
-    private function editionForm(array $work, EditionInput $input, array $errors, int $status = 200, ?int $duplicateId = null): Response
+    private function editionForm(array $work, EditionInput $input, array $errors, int $status = 200, ?int $duplicateId = null, bool $prefilled = false): Response
     {
         return $this->render('catalogue/edition_form', [
+            'prefilled' => $prefilled,
             'page_title' => 'catalogue.edition.new_title',
             'edition' => ['work_id' => $work['id'], 'work_title' => $work['title']],
             'conflict' => false,

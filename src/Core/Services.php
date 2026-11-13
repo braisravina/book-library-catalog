@@ -34,6 +34,8 @@ use DigitalLibrary\Loans\LoanRepository;
 use DigitalLibrary\Loans\LoanService;
 use DigitalLibrary\Wishlist\WishlistRepository;
 use DigitalLibrary\Wishlist\WishlistService;
+use DigitalLibrary\Metadata\Backoff\FileBackoffStore;
+use DigitalLibrary\Metadata\Backoff\ProviderBackoff;
 use DigitalLibrary\Metadata\CoverImporter;
 use DigitalLibrary\Metadata\Http\CurlHttpClient;
 use DigitalLibrary\Metadata\Http\HttpClient;
@@ -276,8 +278,21 @@ final class Services
                 $this->pdo(),
                 array_values(array_filter($providers)),
                 max(1, $this->config->int('METADATA_CACHE_DAYS', 30)),
+                $this->metadataBackoff(),
             );
         });
+    }
+
+    /**
+     * Per-provider backoff after HTTP 429 and temporary 5xx answers. State
+     * lives in storage/cache (one small file per provider; deleting the files
+     * resets it). Tests replace it through set().
+     */
+    public function metadataBackoff(): ProviderBackoff
+    {
+        return $this->once(ProviderBackoff::class, fn (): ProviderBackoff => new ProviderBackoff(
+            new FileBackoffStore($this->basePath . '/storage/cache'),
+        ));
     }
 
     public function coverImporter(): CoverImporter

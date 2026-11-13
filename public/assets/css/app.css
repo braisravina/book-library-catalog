@@ -324,3 +324,51 @@ legend { font-weight: 600; padding: 0; margin-bottom: var(--space-2); }
 /* Contain visually-hidden (absolutely positioned) labels inside scrolling tables on narrow screens. */
 .table-wrap { position: relative; }
 .filter-grid .form-field { align-content: start; }
+
+/* ---------------------------------------------------------------------------
+   ISBN-assisted entry: ISBN step, lookup review, possible existing works
+   ------------------------------------------------------------------------- */
+.isbn-check { margin: 0; min-height: 1.4em; font-size: 0.9rem; padding-left: 0; list-style: none; }
+.isbn-check.is-valid { color: var(--color-success-text); }
+.lookup-status { margin: var(--space-2) 0 0; min-height: 1.4em; color: var(--color-muted); }
+.isbn-form[aria-busy="true"] .lookup-status::before {
+    content: ""; display: inline-block; width: 0.9em; height: 0.9em; margin-right: var(--space-2); vertical-align: -0.1em;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: dla-spin 0.8s linear infinite;
+}
+@keyframes dla-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .isbn-form[aria-busy="true"] .lookup-status::before { animation: none; } }
+.button[disabled] { opacity: 0.7; cursor: progress; }
+.button[hidden] { display: none; }
+
+.lookup-review { border: 1px solid var(--color-border); border-radius: var(--radius); padding: var(--space-2) var(--space-3) var(--space-3); margin-bottom: var(--space-3); }
+.lookup-review h2 { margin-top: var(--space-2); }
+.lookup-review h3 { font-size: 1rem; margin: var(--space-3) 0 var(--space-1); }
+.lookup-conflict-note { margin: var(--space-2) 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius); background: var(--color-warning-bg); color: var(--color-warning-text); }
+.lookup-fields { margin: 0; display: grid; gap: var(--space-2); }
+.lookup-field { display: grid; grid-template-columns: 11rem minmax(0, 1fr); gap: var(--space-1) var(--space-3); padding-top: var(--space-2); border-top: 1px solid var(--color-border); }
+.lookup-field:first-child { border-top: 0; padding-top: 0; }
+.lookup-field dt { font-weight: 600; }
+.lookup-field dd { margin: 0; overflow-wrap: anywhere; }
+.lookup-field.has-conflict dt::after { content: " ≠"; color: var(--color-warning-text); }
+.lookup-source { display: inline-block; margin-left: var(--space-1); font-size: 0.85rem; color: var(--color-muted); }
+.lookup-alternatives { margin: var(--space-1) 0 0; padding: 0; list-style: none; display: grid; gap: var(--space-1); }
+.lookup-alternatives li { padding: var(--space-1) var(--space-2); border-left: 3px solid var(--color-warning-text); background: var(--color-surface-alt); border-radius: 0 var(--radius) var(--radius) 0; }
+.lookup-alternatives .button { margin-left: var(--space-1); min-height: 2.75rem; }
+.lookup-alt-label { font-size: 0.85rem; color: var(--color-muted); }
+.lookup-long summary { cursor: pointer; }
+.lookup-missing ul { margin: 0; padding-left: 1.2rem; }
+
+.similar-works h2 { border-bottom: 0; margin-top: 0; }
+.similar-list { margin: 0 0 var(--space-2); padding: 0; list-style: none; display: grid; gap: var(--space-2); }
+.similar-item { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--space-2); padding: var(--space-2); background: var(--color-surface); color: var(--color-text); border-radius: var(--radius); }
+.similar-text { overflow-wrap: anywhere; }
+.similar-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.similar-actions .button { min-height: 2.75rem; }
+
+/* Phones: stacked fields and full-width actions (touch targets stay >= 44px). */
+@media (max-width: 40rem) {
+    .lookup-field { grid-template-columns: 1fr; }
+    .isbn-form .form-actions { flex-direction: column; align-items: stretch; }
+    .similar-item, .similar-actions { flex-direction: column; align-items: stretch; }
+    .lookup-alternatives .button:not([hidden]) { display: flex; width: 100%; margin: var(--space-1) 0 0; }
+}

@@ -117,4 +117,32 @@ final class ProviderTest extends TestCase
         self::assertSame('D', $work->description);
         self::assertSame(['T', 'P', '1999', '300', 'gl', '9788437604947'], [$edition->title, $edition->publisher, $edition->publicationYear, $edition->pageCount, $edition->language, $edition->isbn]);
     }
+
+    public function testStatusFailuresCarryTheStatusAndRetryAfter(): void
+    {
+        $http = (new FakeHttpClient())
+            ->on(OpenLibraryProvider::url($this->isbn), new HttpResponse(503, 'down', 'text/plain', ['retry-after' => '120']))
+            ->onPrefix('https://www.googleapis.com/books/v1/volumes', new HttpResponse(429, '{"error":{"message":"secret detail"}}'));
+
+        try {
+            (new OpenLibraryProvider($http))->fetch($this->isbn);
+            self::fail('Expected an exception');
+        } catch (HttpException $e) {
+            self::assertSame([503, '120', 'Open Library returned HTTP 503'], [$e->status, $e->retryAfter, $e->getMessage()]);
+        }
+        try {
+            (new GoogleBooksProvider($http))->fetch($this->isbn);
+            self::fail('Expected an exception');
+        } catch (HttpException $e) {
+            self::assertSame([429, null], [$e->status, $e->retryAfter]);
+            self::assertStringNotContainsString('secret detail', $e->getMessage(), 'Response bodies are never part of the message');
+        }
+    }
+
+    public function testResponseHeadersAreCaseInsensitive(): void
+    {
+        $response = new HttpResponse(429, '', '', ['retry-after' => '5']);
+        self::assertSame('5', $response->header('Retry-After'));
+        self::assertNull($response->header('X-Missing'));
+    }
 }

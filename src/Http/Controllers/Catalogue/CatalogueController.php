@@ -14,6 +14,8 @@ use DigitalLibrary\Catalogue\SearchCriteria;
 use DigitalLibrary\Catalogue\Vocabulary;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Metadata\BookMetadata;
+use DigitalLibrary\Metadata\LookupResult;
+use DigitalLibrary\Metadata\MetadataReview;
 use DigitalLibrary\Metadata\MetadataPrefill;
 use DigitalLibrary\Http\Response;
 use DigitalLibrary\Security\Permission;
@@ -21,9 +23,13 @@ use DigitalLibrary\Validation\Validator;
 
 /**
  * Browsing/search and the "add a book" flow:
- *   1. ISBN step: an ISBN is validated and checked for duplicates first;
+ *   1. ISBN step: an ISBN is validated (with a specific reason when it is
+ *      not valid) and checked for duplicates first; "Look up book" queries
+ *      the providers, "manual" skips them;
  *   2. duplicate: offer the existing record or "add another copy";
- *   3. full form: creates work + edition (+ optional first copy).
+ *   3. full form: pre-filled for review (provider of each field, missing
+ *      fields, conflicting values, possible existing works to add a new
+ *      edition to), then creates work + edition (+ optional first copy).
  */
 final class CatalogueController extends CatalogueBaseController
 {
@@ -45,44 +51,39 @@ final class CatalogueController extends CatalogueBaseController
 
     public function create(Request $request): Response
     {
-        if ($request->query('manual') === '1') {
-            return $this->bookForm($request, WorkInput::blank(), EditionInput::blank());
-        }
+        $manual = $request->query('manual') === '1';
         $rawIsbn = trim((string) $request->query('isbn', ''));
         if ($rawIsbn === '') {
-            return $this->render('catalogue/isbn_step', ['page_title' => 'catalogue.add.title', 'isbn' => '', 'error' => null]);
+            return $manual
+                ? $this->bookForm($request, WorkInput::blank(), EditionInput::blank())
+                : $this->isbnStep($rawIsbn, null);
         }
         $isbn = Isbn::tryParse($rawIsbn);
         if ($isbn === null) {
-            return $this->render('catalogue/isbn_step', ['page_title' => 'catalogue.add.title', 'isbn' => $rawIsbn, 'error' => 'validation.isbn'], 422);
+            // Manual entry keeps what was typed; saving validates it again.
+            return $manual
+                ? $this->bookForm($request, WorkInput::blank(), EditionInput::blank(mb_substr($rawIsbn, 0, 32)))
+                : $this->isbnStep($rawIsbn, Isbn::problem($rawIsbn), 422);
         }
         $existing = $this->services->books()->existingEditionForIsbn($isbn);
         if ($existing !== null) {
             return $this->duplicate($request, $existing, 200);
         }
-
-        // Not catalogued yet: pre-fill from the metadata providers (if enabled).
-        // Everything is shown for review; nothing is saved until the user submits.
-        $work = WorkInput::blank();
-        $edition = EditionInput::blank($isbn->isbn13);
-        $lookup = null;
         $metadata = $this->services->metadata();
-        if ($metadata->enabled()) {
-            $result = $metadata->lookup($isbn, $this->user($request)->id);
-            if ($result->found()) {
-                [$work, $edition] = MetadataPrefill::inputs($result->metadata, $isbn);
-            }
-            $lookup = [
-                'found' => $result->found(),
-                'sources' => $result->sources,
-                'failures' => $result->failures,
-                'record_id' => $result->found() ? $result->primaryRecordId : null,
-                'cover_available' => $result->metadata->coverUrl !== '',
-                'import_cover' => true,
-            ];
+        if ($manual || !$metadata->enabled()) {
+            return $this->bookForm($request, WorkInput::blank(), EditionInput::blank($isbn->isbn13));
         }
 
-        return $this->bookForm($request, $work, $edition, lookup: $lookup);
+        // Not catalogued yet: pre-fill from the metadata providers. Everything
+        // is shown for review; nothing is saved until the user submits.
+        $work = WorkInput::blank();
+        $edition = EditionInput::blank($isbn->isbn13);
+        $result = $metadata->lookup($isbn, $this->user($request)->id);
+        if ($result->found()) {
+            [$work, $edition] = MetadataPrefill::inputs($result->metadata, $isbn);
+        }
+
+        return $this->bookForm($request, $work, $edition, lookup: $this->lookupView($result, true), similar: $this->similarWorks($work));
     }
 
     public function store(Request $request): Response
@@ -124,10 +125,13 @@ final class CatalogueController extends CatalogueBaseController
             $recordId = $providerData === null ? null : (int) $recordInput;
         }
         $importCover = $request->input('import_cover') === '1' && $providerData !== null && $providerData->coverUrl !== '';
-        $lookup = $recordId === null ? null : [
-            'found' => true, 'sources' => [], 'failures' => [], 'record_id' => $recordId,
-            'cover_available' => $providerData->coverUrl !== '', 'import_cover' => $importCover,
-        ];
+        $lookup = null;
+        if ($recordId !== null && $providerData !== null && $edition->parsedIsbn() !== null) {
+            // Re-display the review from the cache only: no outbound request on POST.
+            $cached = $this->services->metadata()->lookup($edition->parsedIsbn(), $user->id, network: false);
+            $lookup = ['record_id' => $recordId, 'cover_available' => $providerData->coverUrl !== '', 'import_cover' => $importCover]
+                + $this->lookupView($cached, false);
+        }
 
         // Books without an ISBN: warn about same-title records unless the
         // user has confirmed this is a different book.
@@ -136,7 +140,9 @@ final class CatalogueController extends CatalogueBaseController
             $titleMatches = $this->services->editions()->titleMatches($work->title);
         }
         if ($validator->fails() || $titleMatches !== []) {
-            return $this->bookForm($request, $work, $edition, $validator->errors(), $titleMatches, $addCopy, $copy, 422, $lookup);
+            $similar = $edition->parsedIsbn() !== null ? $this->similarWorks($work) : [];
+
+            return $this->bookForm($request, $work, $edition, $validator->errors(), $titleMatches, $addCopy, $copy, 422, $lookup, $similar);
         }
 
         try {
@@ -177,8 +183,60 @@ final class CatalogueController extends CatalogueBaseController
     }
 
     /**
+     * @param array{string, array<string, int>}|null $error translation key and parameters
+     */
+    private function isbnStep(string $isbn, ?array $error, int $status = 200): Response
+    {
+        return $this->render('catalogue/isbn_step', [
+            'page_title' => 'catalogue.add.title',
+            'isbn' => mb_substr($isbn, 0, 64),
+            'error' => $error,
+            'lookup_enabled' => $this->services->metadata()->enabled(),
+        ], $status);
+    }
+
+    /**
+     * What the template needs from a lookup. A record is only linked
+     * (metadata_record_id, cover import) when the lookup found something.
+     *
+     * @return array<string, mixed>
+     */
+    private function lookupView(LookupResult $result, bool $importCover): array
+    {
+        return [
+            'found' => $result->found(),
+            'sources' => $result->sources,
+            'failures' => $result->failures,
+            'throttled' => $result->throttled,
+            'record_id' => $result->found() ? $result->primaryRecordId : null,
+            'cover_available' => $result->metadata->coverUrl !== '',
+            'import_cover' => $importCover,
+            'review' => $result->found() ? MetadataReview::fromProviders($result->byProvider) : null,
+        ];
+    }
+
+    /**
+     * Existing works that may be the same book (suggestions only).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function similarWorks(WorkInput $work): array
+    {
+        if ($work->title === '') {
+            return [];
+        }
+
+        return $this->services->works()->similar(
+            $work->title,
+            array_values(array_map(static fn (array $a): string => (string) $a['name'], $work->authors)),
+        );
+    }
+
+    /**
      * @param array<string, list<string>>       $errors
      * @param list<array<string, mixed>>        $titleMatches
+     * @param array<string, mixed>|null         $lookup
+     * @param list<array<string, mixed>>        $similar
      */
     private function bookForm(
         Request $request,
@@ -190,6 +248,7 @@ final class CatalogueController extends CatalogueBaseController
         ?CopyInput $copy = null,
         int $status = 200,
         ?array $lookup = null,
+        array $similar = [],
     ): Response {
         return $this->render('catalogue/book_form', [
             'page_title' => 'catalogue.add.title',
@@ -201,6 +260,8 @@ final class CatalogueController extends CatalogueBaseController
             'copy' => $copy,
             'can_add_copy' => $this->can($this->user($request), Permission::CopyManageOwn),
             'lookup' => $lookup,
+            'similar_works' => $similar,
+            'isbn13' => $edition->parsedIsbn()?->isbn13,
         ] + $this->formOptions(), $status);
     }
 }

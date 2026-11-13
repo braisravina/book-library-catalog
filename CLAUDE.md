@@ -66,6 +66,9 @@ These rules apply to every commit, in every phase, with no exceptions.
   - Phase 5C: branch `phase-5c` from the committed Phase 5B CI fix
     `ea65ce6518ae5106f4cad0c0b70129eff940c5b4` (tree
     `0becea22c0f77687cb27880b227148fbb6170b9c`).
+  - ISBN-assisted entry: branch `isbn-assisted-entry` from `main` at the
+    merge of Phase 5C, commit `4f36a3b7b2480680a3fc6e6c7c0b1f7656b678aa`
+    (tree `b03398e08eaa46dfbfc6396393c132d2d125f011`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -129,6 +132,15 @@ These rules apply to every commit, in every phase, with no exceptions.
   `CurlHttpClient` + `OutboundPolicy`). Never build request URLs from user
   input. Tests must use `Tests\Support\FakeHttpClient` and must not touch
   the network.
+- ISBN-assisted entry: ISBN messages come from `Isbn::problem()`; keep the
+  browser copy in `app.js` in step (`IsbnEntryAssetsTest`). Lookups run only
+  on the explicit "Look up book" GET, never on POST or in the new-edition
+  form (cache only: `lookup(..., network: false)`); no background/JSON
+  lookup endpoint. `MetadataReview` reports provider values, it never
+  invents or combines them. Existing-work suggestions never merge records.
+  Provider backoff only through `Backoff\ProviderBackoff` (429 and
+  500/502/503/504, bounded, never sleeps in a request); tests use
+  `Tests\Support\InMemoryBackoffStore`.
 - Administrative account changes go through `Auth\UserAdministration`
   (lock-out safeguards).
 - Loans change `copies.status` only through `Loans\LoanService` (copy lock,
