@@ -423,6 +423,13 @@ final class HouseholdTransferTest extends IntegrationTestCase
             $report = json_decode(stream_get_contents($out), true, 16, JSON_THROW_ON_ERROR);
             self::assertArrayHasKey('dependencies', $report);
             self::assertSame($before, $this->snapshot());
+            // Isolate the port safeguard: keep every other prerequisite valid.
+            // Reuse the disposable PDO so even a regression cannot connect to 3306.
+            $ordinaryPort = new Services(self::config()->with('DB_PORT', '3306'), dirname(__DIR__, 2));
+            $ordinaryPort->set(PDO::class, $this->pdo());
+            $ordinaryConsole = new \DigitalLibrary\Console\Console($ordinaryPort, out: $out, err: $err);
+            self::assertNotSame(0, $ordinaryConsole->run($args));
+            self::assertSame($before, $this->snapshot());
         } finally {
             fclose($out); fclose($err);
             foreach (glob($dir . '/*') ?: [] as $file) { unlink($file); }
