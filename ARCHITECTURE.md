@@ -954,12 +954,12 @@ household is ignored; every active account can borrow; there is one
 location tree; accounts and invitations carry no households
 (`HouseholdFeatureDisabledTest`).
 
-**Left for phase H4** (not started): moving inventory between households
-in bulk (copies, locations and their subtrees), `household_id NOT NULL`,
-retiring the temporary default household, and the release decision.
+**H4 follow-up:** reviewed bulk and subtree transfers are now implemented in
+development (see the H4 section below). NOT NULL constraints and default
+retirement are deliberately deferred. The production release decision remains
+separate.
 Known limits until then: a location, and the copies in it, cannot change
-household through the location pages; a copy changes household one at a
-time; a creator learns that a record of theirs is held elsewhere (and
+household through the location pages; cross-household moves require the administrator H4 workflow; a creator learns that a record of theirs is held elsewhere (and
 nothing more) from losing the right to edit it.
 
 
@@ -1506,3 +1506,29 @@ where the application cannot see the port.
   database init script (run with stub binaries), and the discovery script
   (read-only commands only; planted tokens, e-mail addresses, password
   hashes and public client addresses never reach the report).
+
+
+## Household inventory transfers (H4, development-only)
+
+H4 adds administrator-only durable inventory transfer plans, atomic batches of
+1–100 copies, complete location subtrees (at most 100 nodes), and separately
+confirmed ownership reassignment only for copies without loan history.
+InventoryTransferService owns validation and transactional audit;
+TransferRepository contains bound SQL and narrow field updates. Read-only
+preview and explicit plan persistence are separate from application.
+
+New migrations create inventory_transfers/inventory_transfer_items and add
+locations.row_version; existing household columns remain nullable. Saved plans
+are not authorization: WriteGuard refreshes the administrator, locks all owner
+accounts in id order, then operation, editions, works, copies and locations. H4
+application serializes with H3 writers using exclusive household locks. It
+revalidates the entire saved copy/subtree state, destination placement, loans,
+owner eligibility and database-collation code conflicts before writing anything.
+Operation completion and audit share the inventory transaction.
+
+Default retention and nullable compatibility are deliberate H4 outcomes, not
+unfinished backfills. There is no production-enabling or finalization migration.
+See docs/HOUSEHOLD_INVENTORY.md for limits, UI, idempotency, diagnostics and
+rollback limitations. Future media transfers must keep copy IDs as physical
+identities rather than treating ISBN as an inventory identifier. No new media
+feature is included.

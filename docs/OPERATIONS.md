@@ -610,3 +610,28 @@ These steps are not done yet (see also DEPLOYMENT.md):
 3. Run one full restore drill on the production host and record how long it
    took (your measured recovery time).
 4. Decide the retention values and your recovery point objective.
+
+
+## H4 inventory assignment and rehearsal
+
+See HOUSEHOLD_INVENTORY.md for the complete administrator workflow and bounded
+atomicity model. Existing records are never automatically distributed to newly
+created households. Default inventory, NULL assignments, shared collections,
+memberships and pending invitations require separate administrator decisions.
+The default household remains protected and household columns stay nullable.
+
+The local-only inventory:check command prints read-only diagnostics. It requires
+a dedicated loopback *_test/*_rehearsal database on a non-system port, maintenance,
+explicit administrator id, stopped-writer acknowledgement and exclusive operation
+lock. It is not a production assignment tool; no mutating maintenance CLI or flag
+bypass is supplied. Saved plans can be resumed by operation id, but stale state
+requires a fresh preview. Each confirmed batch commits independently.
+
+Before any later owner-run production release, verify a same-engine backup and
+restore rehearsal, rehearse against an isolated restored database under owner
+control, record ids/counts and integrity checks, measure ALTER disk/time overhead,
+and stop all writers during migrations. Verify NULLs, copy/location and parent
+household alignment, cycles, code conflicts, loans, ownership and planned access
+for every role before returning service. Never silently resolve conflicts by
+changing inventory codes. Retain pre-release images and document the precise
+compatibility/recovery boundary.

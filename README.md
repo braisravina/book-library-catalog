@@ -446,10 +446,20 @@ tests/                   PHPUnit unit and integration suites
   belong to one household, each household has its own location tree, and
   new accounts and invitations can be given households. The feature is
   not released: production refuses to start with it enabled
-  (ARCHITECTURE.md, "Households"; `config/household_access.php`). Bulk
-  reassignment between households (H4) is not started.
+  (ARCHITECTURE.md, "Households"; `config/household_access.php`). Reviewed H4 inventory management is described below.
 - **Phase 5 — proposed:** production readiness: build and validate the
   Alpine images and CI, configure the reverse proxy and client IP, implement
   the audit-database separation, schedule and drill backups. Then optional
   e-mail delivery (invitations, password reset) and multi-factor
   authentication.
+
+
+### Household inventory management (H4, development-only)
+
+Administrators can review default/unassigned inventory, preview and confirm
+individual or bounded bulk transfers, transfer whole location subtrees and
+inspect dependency/conflict reports and durable operation history. Transfers
+retain identifiers and loan history; active loans or ineligible owners block
+the entire operation. Same-household member edits remain available. No default
+retirement, NOT NULL finalization or production activation is performed.
+See [household inventory management](docs/HOUSEHOLD_INVENTORY.md).

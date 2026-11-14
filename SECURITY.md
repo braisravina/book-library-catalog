@@ -844,3 +844,31 @@ done on the production host yet.
 - [ ] Audit-log integrity decision implemented (see review above)
 - [ ] PHP-FPM worker count and MariaDB memory settings measured and tuned
       (DEPLOYMENT.md, "Resource planning")
+
+
+## Household inventory management (H4, development-only)
+
+Cross-household movement is administrator-only, including the existing copy-edit
+endpoint, which now refuses household and owner changes while enabled. Members
+retain same-household own-copy editing. H4 GET/POST routes require household.manage
+and feature enablement, with fresh service-level administrator authorization.
+Plans, ids and digests confer no privileges. All POSTs retain CSRF. Selection
+ids/versions are exact and bounded; stale or invalid inputs reject the whole
+transaction. Destination owners/accounts are locked and revalidated.
+
+Transfers retain copy IDs and every loan relationship, reject active loans and
+never grant membership or change ownership implicitly. Separate ownership
+reassignment rejects any loan history to prevent newly exposing borrowers under
+the existing owner-based authorization model. Household transfers keep the same
+owner and preserve existing borrower/owner/admin history permissions.
+
+Application, immutable completion and audit writes commit together; retries are
+idempotent. Location subtrees are never split automatically. Default and NULL
+assignments stay distinct. New tables retain evidence rather than cascading it
+away when a household/location/copy changes or disappears.
+
+Production checks in ConfigValidator and Services remain intact. inventory:check
+is a read-only local rehearsal command with explicit environment, maintenance,
+operator acknowledgements and exclusive operations-lock checks; it has no apply
+or production mode. See docs/HOUSEHOLD_INVENTORY.md. Turning off enforcement is
+not a privacy-safe rollback: disabled mode reveals the catalogue installation-wide.

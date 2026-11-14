@@ -193,7 +193,7 @@ These rules apply to every commit, in every phase, with no exceptions.
     server, no credentials, only allowlisted bibliographic fields the user
     selects, never private data.
   - Only the owner may set `METADATA_CONTACT`.
-- **Households** (phases H1 to H3 are development-only; ARCHITECTURE.md,
+- **Households** (phases H1 to H4 are development-only; ARCHITECTURE.md,
   "Households"). Shared bibliographic records (works, editions, authors,
   publishers, covers) have no household; inventory (`copies`, `locations`)
   belongs to one. Never add per-household roles, never cache memberships
@@ -205,7 +205,7 @@ These rules apply to every commit, in every phase, with no exceptions.
   stay curated lists, not permission boundaries. `HOUSEHOLDS_ENABLED` must
   stay off in production until the owner releases the feature
   (`ConfigValidator` enforces it; completing a phase never authorizes a
-  release); do not start H4 or DVD/CD work without the owner's approval.
+  release); do not start DVD/CD or other media work without the owner's approval.
   Every new route must be classified in `config/household_access.php`
   (`HouseholdAccessMatrixTest`). Keep `household_id` nullable until H4 has
   evaluated rollback compatibility. Inventory codes are unique per
@@ -231,9 +231,10 @@ These rules apply to every commit, in every phase, with no exceptions.
     is exclusive to their households (`Authorizer::canEditSharedRecord()`,
     `heldOutsideView()` / `sharedBeyondView()`); covers follow the
     edition; authors and publishers stay administrator-only.
-  - Copies only through `Catalogue\CopyService` (never
+  - Ordinary copies through `Catalogue\CopyService`, reviewed H4 transfers through
+    `Households\InventoryTransferService` (never
     `CopyRepository::create/update/delete` from a controller); a copy on
-    loan never changes household; bulk transfers are H4.
+    loan never changes household; bulk transfers use the H4 workflow.
   - A copy of a book another household holds is added by ISBN
     (`CopyService::createByIsbn()`): never accept an edition id for an
     edition the user cannot see, and show only
@@ -244,7 +245,8 @@ These rules apply to every commit, in every phase, with no exceptions.
     (`CollectionService`); never share one implicitly or with all of the
     owner's households, and never make a private collection shared.
   - Wishlist links only to editions visible when saving.
-  - Locations only through `Households\LocationService`: one tree per
+  - Ordinary locations through `Households\LocationService`, H4 subtree transfers
+    through `Households\InventoryTransferService`: one tree per
     household, a child takes its parent's household, no move across
     households.
   - Accounts and invitations get households only by an administrator's
@@ -397,3 +399,26 @@ Before any infrastructure-related task, follow:
 
 This restriction applies to all tools, agents, delegated
 tasks, and future sessions.
+
+## Phase H4 inventory management
+
+Development branch household-access-h4, based on committed H3 a54a02b921dfb3a89412266a70e67a4d627edccb.
+Keep the main development-directory rule and Option B. H4 remains development-only.
+Cross-household/ownership changes go through InventoryTransferService; ordinary
+CopyService edits cannot bypass preview and confirmation. TransferRepository may
+perform narrow copy/location updates only inside that guarded service. Reuse
+CopyHousehold resolution and owner policy, preserve identifiers, nullable
+household columns, the default household and all released migrations. No media
+expansion or production-guard changes are authorized.
+
+H4 lock order: exclusive household rows, all required accounts sorted by id,
+transfer operation, all editions, all works, all copies, then locations. Loan
+checks follow copy locks; transfer does not rewrite loans. Audit uses the same
+transaction and PDO; no controller-after-commit audit for H4 application.
+Snapshot plans are immutable; completed confirmation must never repeat writes.
+Copy batches are 1–100 (config may lower the cap), subtrees at most 100 nodes
+and the same copy cap, never automatically chunked. Ownership reassignment with
+any loan history is refused to prevent historical borrower disclosure.
+
+Read docs/HOUSEHOLD_INVENTORY.md for operational details. inventory:check is only
+a read-only guarded local rehearsal tool, not a production or applying CLI.

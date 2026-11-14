@@ -925,3 +925,28 @@ CI has been written and statically tested only. Steps:
    SECURITY.md's checklist.
 
 The logs contain only throwaway CI passwords; no repository secrets are used.
+
+
+## H4 release boundary and future owner-run migration
+
+H4 is development-only. ConfigValidator and Services still prevent production
+households; HOUSEHOLDS_ENABLED must remain false. Neither the implementation nor
+passing tests authorizes deployment or activation. The owner alone performs all
+production operations after a separately reviewed release.
+
+Preparation sequence: verified same-engine backup plus off-host copy; protected
+restore rehearsal under owner control; baseline row counts, primary-key sets and
+field digests; migration and real-data assignment rehearsal; measured free-space
+and runtime budget including copied indexes/temporary tables and backups; tested
+recovery with explicit data-loss/recovery-time expectations. Then, only under
+separate authorization, maintenance and stopped writers, a fresh verified backup,
+ordered migrations, reviewed assignments, membership/access checks and owner
+activation decision. H4 introduces two additive migrations and no automatic
+assignment, NOT NULL constraint or default retirement.
+
+Do not use feature disablement as a rollback after separation: it restores
+catalogue-wide reads and global application code validation. Prefer maintenance
+and a compatible household-aware application recovery. Retaining an additive
+schema permits older named-column SQL but does not preserve all behavior or new
+location version guarantees. Restoring a backup is not atomic and loses writes
+after its recovery point. Consult HOUSEHOLD_INVENTORY.md before any rollback.
