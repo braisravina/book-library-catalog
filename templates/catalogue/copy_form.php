@@ -34,6 +34,7 @@ $enum = static function (array $values, string $group) use ($view): array {
         <div class="alert alert-error" role="alert"><?= $view->t('catalogue.edit_conflict') ?> <a href="<?= $view->e($edition_url) ?>" target="_blank" rel="noopener"><?= $view->t('catalogue.edit_conflict_view') ?></a></div>
     <?php endif; ?>
     <?php if ($errors !== []): ?><div class="alert alert-error" role="alert"><?= $view->t('validation.summary') ?></div><?php endif; ?>
+    <?php if ($copy !== null && !empty($households_enabled)): ?><p class="hint"><?= $view->t('transfers.error.workflow') ?><?php if ($authorizer->canManageHouseholds($current_user)): ?> <a href="/admin/inventory"><?= $view->t('transfers.title') ?></a><?php endif; ?></p><?php endif; ?>
     <form method="post" action="<?= $view->e($action) ?>" class="form" novalidate>
         <?= $view->csrfField() ?>
         <?php if ($copy !== null): ?><input type="hidden" name="row_version" value="<?= (int) $copy['row_version'] ?>"><?php endif; ?>

@@ -298,15 +298,25 @@ final class CopyController extends CatalogueBaseController
     private function formChoices(Request $request, ?array $copy): array
     {
         $user = $this->user($request);
-        $canChooseOwner = $this->can($user, Permission::CopyManageAny);
+        $lockedPlacement = $copy !== null && $this->services->householdsEnabled();
+        $canChooseOwner = $this->can($user, Permission::CopyManageAny) && !$lockedPlacement;
+        $householdOptions = $this->services->copyHousehold()->options($user, $this->services->householdScope($user), $copy);
+        if ($lockedPlacement) {
+            $householdOptions = array_intersect_key($householdOptions, [(string) ($copy['household_id'] ?? '') => true]);
+        }
+
+        $locationTree = $this->services->locations()->visibleTree($this->visibility());
+        if ($lockedPlacement) {
+            $locationTree = array_values(array_filter($locationTree, static fn (array $location): bool => $location['household_id'] === $copy['household_id']));
+        }
 
         return [
             'owners' => $canChooseOwner
                 ? array_values(array_filter($this->services->users()->all(), static fn (User $u): bool => $u->isActive))
-                : [$user],
+                : [$lockedPlacement ? $this->services->users()->findById((int) $copy['owner_user_id']) : $user],
             'can_choose_owner' => $canChooseOwner,
-            'household_options' => $this->services->copyHousehold()->options($user, $this->services->householdScope($user), $copy),
-            'location_tree' => $this->services->locations()->visibleTree($this->visibility()),
+            'household_options' => $householdOptions,
+            'location_tree' => $locationTree,
         ];
     }
 }

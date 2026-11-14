@@ -85,9 +85,9 @@ final class LocationService
      * @throws LocationException
      * @throws WriteDeniedException notFound when the location does not exist
      */
-    public function update(int $actorId, int $id, ?int $parentId, string $name, string $kind, ?string $description): array
+    public function update(int $actorId, int $id, ?int $parentId, string $name, string $kind, ?string $description, ?int $expectedVersion = null): array
     {
-        return $this->guardName(fn (): array => $this->guard->run($actorId, function (WriteActor $actor) use ($id, $parentId, $name, $kind, $description): array {
+        return $this->guardName(fn (): array => $this->guard->run($actorId, function (WriteActor $actor) use ($id, $parentId, $name, $kind, $description, $expectedVersion): array {
             $this->requireManager($actor);
             // Both rows in id order, so two concurrent moves cannot deadlock.
             $rows = [];
@@ -99,6 +99,9 @@ final class LocationService
                 $rows[$lockId] = $this->locations->lock($lockId, true);
             }
             $location = $rows[$id] ?? throw WriteDeniedException::notFound();
+            if ($expectedVersion !== null && (int) $location['row_version'] !== $expectedVersion) {
+                throw new LocationException('transfers.error.stale', 'row_version');
+            }
             $householdId = self::householdOf($location);
             if ($parentId !== null) {
                 $parent = $rows[$parentId] ?? throw new LocationException('validation.in', 'parent_id');

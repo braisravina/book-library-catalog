@@ -14,7 +14,7 @@ use PHPUnit\Framework\TestCase;
 final class HouseholdAccessMatrixTest extends TestCase
 {
     private const KINDS = ['public', 'account', 'admin', 'bibliographic', 'inventory', 'loan', 'collection', 'wishlist', 'export', 'household'];
-    private const PHASES = ['none', 'H1', 'H2', 'H3'];
+    private const PHASES = ['none', 'H1', 'H2', 'H3', 'H4'];
 
     /**
      * @return array<string, array{kind: string, phase: string, rule: string}>

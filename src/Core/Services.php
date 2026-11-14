@@ -404,6 +404,19 @@ final class Services
         return $this->once(HouseholdService::class, fn (): HouseholdService => new HouseholdService($this->pdo(), $this->households(), $this->authorizer()));
     }
 
+    public function inventoryTransfers(): \DigitalLibrary\Households\InventoryTransferService
+    {
+        $limit = $this->config->get('HOUSEHOLD_TRANSFER_LIMIT', '100');
+        if (!preg_match('/^[0-9]+$/D', $limit) || (int) $limit < 1 || (int) $limit > 100) {
+            throw new ConfigException('HOUSEHOLD_TRANSFER_LIMIT must be between 1 and 100.');
+        }
+        return $this->once(\DigitalLibrary\Households\InventoryTransferService::class, fn () => new \DigitalLibrary\Households\InventoryTransferService(
+            $this->writeGuard(), new \DigitalLibrary\Households\TransferRepository($this->pdo()), $this->households(),
+            $this->users(), $this->authorizer(), $this->editions(), $this->works(), $this->copies(), $this->locations(),
+            $this->copyHousehold(), $this->audit(), $this->config->int('HOUSEHOLD_TRANSFER_LIMIT', 100),
+        ));
+    }
+
     public function locationService(): LocationService
     {
         return $this->once(LocationService::class, fn (): LocationService => new LocationService(

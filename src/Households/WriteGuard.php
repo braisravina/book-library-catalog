@@ -30,9 +30,10 @@ use PDO;
  *   1. households       every row, shared, in id order (only while the
  *                       household feature is enabled); location mutations
  *                       take exclusive locks even with the feature disabled
- *   2. users            the actor (shared; exclusive when the service
- *                       itself serialises on the account), then any
- *                       other account, in id order
+ *   2. users            all required accounts in id order (shared; the
+ *                       actor is exclusive when the service serialises
+ *                       on that account)
+ *      H4 transfer operation (after all accounts, before catalogue rows)
  *   3. collections      the collection being changed (exclusive)
  *   4. editions         shared for inventory writes, exclusive for
  *                       metadata edits
@@ -111,12 +112,14 @@ final class WriteGuard
      *
      * @param bool $exclusiveHouseholds serialise location trees, including when the feature is disabled
      *
+     * @param list<int> $accountIds additional accounts locked shared in global id order
+     *
      * @return T
      *
      * @throws WriteDeniedException the account no longer exists or is deactivated (forbidden)
      * @throws WriteBusyException   the locks could not be obtained
      */
-    public function run(int $actorId, callable $work, bool $exclusiveActor = false, bool $exclusiveHouseholds = false): mixed
+    public function run(int $actorId, callable $work, bool $exclusiveActor = false, bool $exclusiveHouseholds = false, array $accountIds = []): mixed
     {
         if ($this->pdo->inTransaction()) {
             throw new \LogicException('A guarded write must open its own transaction.');
@@ -126,8 +129,8 @@ final class WriteGuard
                 // For the next transaction only; the session level is unchanged.
                 $this->pdo->exec('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
 
-                return Transaction::run($this->pdo, function () use ($actorId, $work, $exclusiveActor, $exclusiveHouseholds): mixed {
-                    return $work($this->enter($actorId, $exclusiveActor, $exclusiveHouseholds));
+                return Transaction::run($this->pdo, function () use ($actorId, $work, $exclusiveActor, $exclusiveHouseholds, $accountIds): mixed {
+                    return $work($this->enter($actorId, $exclusiveActor, $exclusiveHouseholds, $accountIds));
                 });
             } catch (\PDOException $e) {
                 if (!Engine::isLockFailure($e)) {
@@ -152,14 +155,23 @@ final class WriteGuard
         return $this->households->isMember($householdId, $userId);
     }
 
-    private function enter(int $actorId, bool $exclusiveActor, bool $exclusiveHouseholds): WriteActor
+    private function enter(int $actorId, bool $exclusiveActor, bool $exclusiveHouseholds, array $accountIds): WriteActor
     {
         if ($exclusiveHouseholds) {
             $this->households->lockAllExclusive();
         } elseif ($this->enabled) {
             $this->households->lockAllShared();
         }
-        $user = $this->users->findByIdLocked($actorId, $exclusiveActor);
+        // H4: account IDs only determine lock order, never authorization.
+        $ids = array_unique([$actorId, ...$accountIds]);
+        sort($ids, SORT_NUMERIC);
+        $user = null;
+        foreach ($ids as $id) {
+            $locked = $this->users->findByIdLocked($id, $id === $actorId && $exclusiveActor);
+            if ($id === $actorId) {
+                $user = $locked;
+            }
+        }
         if ($user === null || !$user->isActive) {
             throw WriteDeniedException::forbidden();
         }

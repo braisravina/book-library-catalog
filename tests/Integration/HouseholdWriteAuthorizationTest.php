@@ -322,8 +322,8 @@ final class HouseholdWriteAuthorizationTest extends IntegrationTestCase
         // Moving it to Casa: the location has to follow, and the move is audited.
         $move = fn (array $fields): Response => $this->request($dora, 'POST', "/copies/{$copy}", $fields + ['_csrf' => $token, 'owner_user_id' => (string) $this->doraId, 'status' => 'available', 'row_version' => $this->rowVersion('copies', $copy)]);
         self::assertSame(422, $move(['household_id' => (string) $this->casa, 'location_id' => (string) $this->pisoShelf])->status());
-        self::assertSame(303, $move(['household_id' => (string) $this->casa, 'location_id' => (string) $this->casaShelf])->status());
-        self::assertEquals(['from' => $this->piso, 'to' => $this->casa], $this->auditDetails('copy.updated')['household_changed']);
+        self::assertSame(422, $move(['household_id' => (string) $this->casa, 'location_id' => (string) $this->casaShelf])->status(), 'H4 requires administrator preview and confirmation');
+        self::assertSame((string) $this->piso, (string) $this->value("SELECT household_id FROM copies WHERE id = {$copy}"));
 
         // An administrator may place a copy anywhere, but its owner must be able to reach it.
         [$admin, $adminToken] = $this->signedIn('admin@example.org');
@@ -396,13 +396,13 @@ final class HouseholdWriteAuthorizationTest extends IntegrationTestCase
         $move = fn (): Response => $this->request($dora, 'POST', "/copies/{$copy}", ['_csrf' => $token, 'owner_user_id' => (string) $this->doraId, 'status' => 'on_loan', 'household_id' => (string) $this->piso, 'row_version' => $this->rowVersion('copies', $copy)]);
         $refused = $move();
         self::assertSame(422, $refused->status());
-        self::assertStringContainsString('Record its return before moving it', $refused->body());
+        self::assertStringContainsString('administrator transfer workflow', $refused->body());
         self::assertSame((string) $this->casa, (string) $this->value("SELECT household_id FROM copies WHERE id = {$copy}"));
 
         // Once returned it can move; the loan history goes with the copy.
         $loan = (int) $this->value("SELECT id FROM loans WHERE copy_id = {$copy}");
         self::assertSame(303, $this->request($dora, 'POST', "/loans/{$loan}/return", ['_csrf' => $token])->status());
-        self::assertSame(303, $this->request($dora, 'POST', "/copies/{$copy}", ['_csrf' => $token, 'owner_user_id' => (string) $this->doraId, 'status' => 'available', 'household_id' => (string) $this->piso, 'row_version' => $this->rowVersion('copies', $copy)])->status());
+        self::assertSame(422, $this->request($dora, 'POST', "/copies/{$copy}", ['_csrf' => $token, 'owner_user_id' => (string) $this->doraId, 'status' => 'available', 'household_id' => (string) $this->piso, 'row_version' => $this->rowVersion('copies', $copy)])->status(), 'H4 keeps member edits within the existing household');
         self::assertSame(1, $this->countRows("SELECT COUNT(*) FROM loans WHERE copy_id = {$copy}"));
         // A copy with history is withdrawn, never deleted.
         self::assertSame(303, $this->request($dora, 'POST', "/copies/{$copy}/delete", ['_csrf' => $token])->status());
@@ -798,7 +798,12 @@ final class HouseholdWriteAuthorizationTest extends IntegrationTestCase
     public function testEveryHouseholdHasItsOwnLocationTree(): void
     {
         [$admin, $token] = $this->signedIn('admin@example.org');
-        $post = fn (string $path, array $fields): Response => $this->request($admin, 'POST', $path, $fields + ['_csrf' => $token, 'kind' => 'room', 'description' => '']);
+        $post = function (string $path, array $fields) use ($admin, $token): Response {
+            if (preg_match('#^/admin/locations/(\d+)$#', $path, $m)) {
+                $fields += ['row_version' => (string) $this->pdo()->query('SELECT row_version FROM locations WHERE id = ' . (int) $m[1])->fetchColumn()];
+            }
+            return $this->request($admin, 'POST', $path, $fields + ['_csrf' => $token, 'kind' => 'room', 'description' => '']);
+        };
         $household = fn (int $id): ?string => ($v = $this->value("SELECT household_id FROM locations WHERE id = {$id}")) === null ? null : (string) $v;
         $id = fn (string $name, int $householdId): int => (int) $this->value("SELECT id FROM locations WHERE name = '{$name}' AND household_id = {$householdId}");
 

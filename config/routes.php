@@ -62,6 +62,7 @@ return static function (Router $router, Services $s): void {
     $registration = new RegistrationController($s);
     $export = new ExportController($s);
     $households = new HouseholdController($s);
+    $inventory = new \DigitalLibrary\Http\Controllers\Admin\InventoryController($s);
 
     $view = ['auth', 'can:catalogue.view'];
     $create = ['auth', 'can:catalogue.create'];
@@ -206,6 +207,11 @@ return static function (Router $router, Services $s): void {
     // also answers 404 unless the household feature is enabled, which production
     // never allows until the access boundary is complete (phases H2/H3).
     $manageHouseholds = ['auth', 'can:household.manage'];
+    $router->get('/admin/inventory', $inventory->index(...), $manageHouseholds, 'admin.inventory');
+    $router->post('/admin/inventory/preview', $inventory->preview(...), $manageHouseholds, 'admin.inventory.preview');
+    $router->get('/admin/inventory/transfers/{id:\d+}', $inventory->show(...), $manageHouseholds, 'admin.inventory.transfer');
+    $router->post('/admin/inventory/transfers/{id:\d+}/apply', $inventory->apply(...), $manageHouseholds, 'admin.inventory.apply');
+    $router->post('/admin/inventory/transfers/{id:\d+}/cancel', $inventory->cancel(...), $manageHouseholds, 'admin.inventory.cancel');
     $router->get('/admin/households', $households->index(...), $manageHouseholds, 'admin.households');
     $router->get('/admin/households/new', $households->create(...), $manageHouseholds, 'admin.households.create');
     $router->post('/admin/households', $households->store(...), $manageHouseholds, 'admin.households.store');

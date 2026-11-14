@@ -116,6 +116,15 @@ final class CopyService
         return $this->guardCode(fn (): array => $this->guard->run($actorId, function (WriteActor $actor) use ($copyId, $input, $expectedVersion): array {
             $copy = $this->lockManaged($actor, $copyId, true);
             $this->requireOwnerChoice($actor, $input);
+            // H4: edits cannot bypass reviewed cross-household or ownership workflows.
+            if ($this->guard->enabled() && (($input->householdId !== '' && $input->householdId !== (string) ($copy['household_id'] ?? ''))
+                || $input->ownerId() !== (int) $copy['owner_user_id'])) {
+                throw new CopyValidationException(['household_id' => ['transfers.error.workflow']]);
+            }
+            // Even feature-off legacy ownership edits must not expose historical borrowers.
+            if ($input->ownerId() !== (int) $copy['owner_user_id'] && $this->loans->hasAnyLoan($copyId)) {
+                throw new CopyValidationException(['owner_user_id' => ['transfers.error.owner_history']]);
+            }
 
             $householdId = $this->validate($actor, $input, $copy);
             if (!$this->copies->update($copyId, ['household_id' => $householdId] + $input->toRecord(), $actor->user->id, $expectedVersion)) {

@@ -6,6 +6,7 @@
     <h1><?= $view->t('households.title') ?></h1>
     <a class="button button-primary" href="/admin/households/new"><?= $view->t('households.new') ?></a>
 </div>
+<p><a class="button" href="/admin/inventory"><?= $view->t('transfers.title') ?></a></p>
 <div class="alert alert-info" role="note"><?= $view->t('households.preview_notice') ?></div>
 <?php if ($households === []): ?>
     <p class="muted"><?= $view->t('households.empty') ?></p>

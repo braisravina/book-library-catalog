@@ -165,7 +165,12 @@ final class HouseholdFeatureDisabledTest extends IntegrationTestCase
         $page = $this->request($admin, 'GET', '/admin/locations')->body();
         self::assertStringNotContainsString('name="household_id"', $page);
         self::assertStringNotContainsString('<h3>', $page);
-        $post = fn (string $path, array $fields): Response => $this->request($admin, 'POST', $path, $fields + ['_csrf' => $token, 'kind' => 'room', 'description' => '']);
+        $post = function (string $path, array $fields) use ($admin, $token): Response {
+            if (preg_match('#^/admin/locations/(\d+)$#', $path, $m)) {
+                $fields += ['row_version' => (string) $this->pdo()->query('SELECT row_version FROM locations WHERE id = ' . (int) $m[1])->fetchColumn()];
+            }
+            return $this->request($admin, 'POST', $path, $fields + ['_csrf' => $token, 'kind' => 'room', 'description' => '']);
+        };
         self::assertSame(303, $post('/admin/locations', ['name' => 'House', 'household_id' => (string) $this->other])->status());
         $house = (int) $this->pdo()->query("SELECT id FROM locations WHERE name = 'House'")->fetchColumn();
         self::assertSame((string) $default, (string) $this->pdo()->query("SELECT household_id FROM locations WHERE id = {$house}")->fetchColumn());

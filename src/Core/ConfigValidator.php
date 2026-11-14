@@ -27,6 +27,7 @@ final class ConfigValidator
     /** Positive integer settings: key => [min, max]. */
     private const INTEGERS = [
         'DB_PORT' => [1, 65535],
+        'HOUSEHOLD_TRANSFER_LIMIT' => [1, 100],
         'SESSION_IDLE_TIMEOUT' => [60, 86400],
         'SESSION_ABSOLUTE_TIMEOUT' => [300, 2592000],
         'LOGIN_MAX_ATTEMPTS' => [1, 1000],
@@ -307,6 +308,10 @@ final class ConfigValidator
      */
     private function households(Config $config, bool $production): void
     {
+        $limit = $this->read($config, 'HOUSEHOLD_TRANSFER_LIMIT');
+        if ($limit !== null && (!preg_match('/^[0-9]+$/D', $limit) || (int) $limit < 1 || (int) $limit > 100)) {
+            $this->error('HOUSEHOLD_TRANSFER_LIMIT', 'must be a whole number between 1 and 100.');
+        }
         if ($production && $config->bool('HOUSEHOLDS_ENABLED', false)) {
             $this->error('HOUSEHOLDS_ENABLED', 'must not be enabled in production: household access control has not been released for production (reads and writes are isolated since phases H2 and H3, but the feature stays development-only until the owner releases it).');
         }

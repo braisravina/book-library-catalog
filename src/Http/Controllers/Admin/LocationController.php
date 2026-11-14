@@ -139,9 +139,13 @@ final class LocationController extends TreeAdminController
                 $id = $saved['id'];
             } else {
                 $id = (int) $node['id'];
-                $saved = $service->update($userId, $id, $parentId, $old['name'], $old['kind'], $description);
+                $saved = $service->update($userId, $id, $parentId, $old['name'], $old['kind'], $description, (int) $request->input('row_version', '0'));
             }
         } catch (LocationException $e) {
+            if ($e->field === 'row_version') {
+                $node['row_version'] = (int) $request->input('row_version', '0');
+                return $this->page($old, ['name' => [$e->getMessage()]], $node, 409);
+            }
             return $this->page($old, [($e->field !== '' ? $e->field : 'name') => [$e->getMessage()]], $node, 422);
         }
         $this->audit($request, $node === null ? 'location.created' : 'location.updated', 'location', $id, ['name' => $old['name'], 'parent_id' => $parentId, 'household_id' => $saved['household_id']]);

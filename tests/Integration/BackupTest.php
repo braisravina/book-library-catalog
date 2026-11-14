@@ -68,7 +68,7 @@ final class BackupTest extends IntegrationTestCase
 
         $m = $result['manifest'];
         self::assertSame(['dla-backup', 1], [$m['format'], $m['format_version']]);
-        self::assertSame('2026_11_14_100003_create_invitation_households', $m['application']['schema_version']);
+        self::assertSame('2026_11_15_100001_add_location_row_versions', $m['application']['schema_version']);
         self::assertSame(2, $m['database']['tables']['loans']);
         self::assertSame(0, $m['database']['tables']['login_attempts'], 'Transient login attempts are not backed up');
         self::assertSame(['referenced' => 2, 'files' => 3, 'missing' => []], $m['covers']);
@@ -175,6 +175,29 @@ final class BackupTest extends IntegrationTestCase
             self::assertStringContainsString('nothing was changed', $e->getMessage());
         }
         self::assertSame($before, $this->fingerprint());
+    }
+
+    public function testTransferPlansSurviveBackupAndRestore(): void
+    {
+        self::$configOverrides['HOUSEHOLDS_ENABLED'] = 'true';
+        $actor = $this->createUser('transfer-admin@example.org', Role::Admin);
+        $destination = $this->createHousehold('Transfer destination');
+        $copy = $this->makeBook($actor, 'Transfer backup fixture', null, [], [], [], $actor)['copy_id'];
+        $services = new Services(self::config(), dirname(__DIR__, 2));
+        $services->set(PDO::class, $this->pdo());
+        $transfer = $services->inventoryTransfers();
+        $id = $transfer->plan($actor, ['source' => $this->defaultHouseholdId(), 'destination' => $destination,
+            'selected' => [$copy . ':1'], 'reason' => 'Restore rehearsal']);
+        $before = $transfer->show($actor, $id);
+        $this->schemaTouched = true;
+        $archive = $this->creator()->create($this->backups)['path'];
+        $transfer->cancel($actor, $id);
+        $target = $this->work . '/transfer-restored-covers';
+        mkdir($target, 0750);
+        $this->restorer($target)->restore($archive, true);
+        self::assertSame($before, $transfer->show($actor, $id));
+        $transfer->apply($actor, $id, $before['digest']);
+        self::assertSame('completed', $transfer->show($actor, $id)['status']);
     }
 
     public function testRestoreRecreatesDatabaseAndCoversInADisposableEnvironment(): void

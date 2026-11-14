@@ -20,6 +20,9 @@ final class AdminTreeTest extends IntegrationTestCase
 
     private function post(string $path, array $body): \DigitalLibrary\Http\Response
     {
+        if (preg_match('#^/admin/locations/(\d+)$#', $path, $m)) {
+            $body += ['row_version' => (string) $this->pdo()->query('SELECT row_version FROM locations WHERE id = ' . (int) $m[1])->fetchColumn()];
+        }
         return $this->request($this->browser, 'POST', $path, ['_csrf' => $this->token] + $body);
     }
 

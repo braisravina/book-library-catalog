@@ -226,10 +226,19 @@ final class HouseholdCopyAssignmentTest extends IntegrationTestCase
         self::assertSame($this->casa, $this->household($copyId));
         self::assertArrayNotHasKey('household_changed', $this->auditDetails('copy.updated'));
 
-        // To another of the owner's households: allowed and audited.
-        self::assertSame(303, $update(['household_id' => (string) $this->piso])->status());
+        // H4: members cannot move even their own copy; the administrator reviews it.
+        self::assertSame(422, $update(['household_id' => (string) $this->piso])->status());
+        $services = new \DigitalLibrary\Core\Services(self::config(), dirname(__DIR__, 2));
+        $services->set(PDO::class, $this->pdo());
+        $transfer = $services->inventoryTransfers();
+        $move = function (int $source, int $destination) use ($transfer, $copyId): void {
+            $id = $transfer->plan($this->adminId, ['source' => $source, 'destination' => $destination,
+                'selected' => [$copyId . ':' . $this->rowVersion('copies', $copyId)], 'reason' => 'Reviewed transfer']);
+            $transfer->apply($this->adminId, $id, $transfer->show($this->adminId, $id)['digest']);
+        };
+        $move($this->casa, $this->piso);
         self::assertSame($this->piso, $this->household($copyId));
-        self::assertEquals(['from' => $this->casa, 'to' => $this->piso], $this->auditDetails('copy.updated')['household_changed']);
+        self::assertSame($this->piso, $this->auditDetails('inventory.transferred')['household_to']);
 
         // To a household the owner does not belong to: refused, nothing changes.
         foreach ([(string) $attic, (string) $this->defaultHouseholdId(), '999999'] as $forged) {
@@ -258,7 +267,8 @@ final class HouseholdCopyAssignmentTest extends IntegrationTestCase
         $adminUpdate = fn (int $household): \DigitalLibrary\Http\Response => $this->request($admin, 'POST', "/copies/{$copyId}", ['_csrf' => $adminToken, 'row_version' => $this->rowVersion('copies', $copyId), 'owner_user_id' => (string) $this->aliceId, 'status' => 'available', 'household_id' => (string) $household]);
         self::assertSame(422, $adminUpdate($attic)->status());
         $this->addHouseholdMember($attic, $this->aliceId);
-        self::assertSame(303, $adminUpdate($attic)->status());
+        self::assertSame(422, $adminUpdate($attic)->status(), 'Even administrators must use the explicit workflow');
+        $move($this->piso, $attic);
         self::assertSame($attic, $this->household($copyId));
     }
 

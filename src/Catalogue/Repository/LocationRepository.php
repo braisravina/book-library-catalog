@@ -59,7 +59,7 @@ final class LocationRepository extends TreeRepository
     public function update(int $id, ?int $parentId, string $name, string $kind, ?string $description): void
     {
         $this->run(
-            'UPDATE locations SET parent_id = :p, name = :n, kind = :k, description = :d, updated_at = UTC_TIMESTAMP() WHERE id = :id',
+            'UPDATE locations SET parent_id = :p, name = :n, kind = :k, description = :d, row_version = row_version + 1, updated_at = UTC_TIMESTAMP() WHERE id = :id',
             ['p' => $parentId, 'n' => $name, 'k' => $kind, 'd' => $description, 'id' => $id],
         );
     }

@@ -77,6 +77,16 @@ try {
             }
             break;
 
+        case 'transfer':
+            $waitUntil((float) $job['start']);
+            try {
+                $result = $services->inventoryTransfers()->apply((int) $job['actor'], (int) $job['operation'], (string) $job['digest']);
+                echo $result['status'] . "\n";
+            } catch (\DigitalLibrary\Households\TransferException $e) {
+                echo $e->getMessage() . "\n";
+            }
+            break;
+
         case 'lend':
             $waitUntil((float) $job['start']);
             try {

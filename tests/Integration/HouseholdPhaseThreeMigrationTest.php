@@ -78,7 +78,7 @@ final class HouseholdPhaseThreeMigrationTest extends IntegrationTestCase
         $copiesBefore = $this->rows('copies');
         $collectionsBefore = $this->rows('collections');
 
-        $applied = (new Migrator($pdo, dirname(__DIR__, 2) . '/database/migrations'))->migrate();
+        $applied = $this->migrateUpTo($pdo, self::H3[3]);
         self::assertSame(self::H3, $applied);
 
         // Copies: every row as it was (codes, households, versions, timestamps), plus the derived scope.
@@ -154,6 +154,7 @@ final class HouseholdPhaseThreeMigrationTest extends IntegrationTestCase
 
         // Re-running the migrator is a no-op and nothing is reported as modified.
         $migrator = new Migrator($pdo, dirname(__DIR__, 2) . '/database/migrations');
+        self::assertSame(['2026_11_15_100000_create_inventory_transfers', '2026_11_15_100001_add_location_row_versions'], $migrator->migrate());
         self::assertSame([], $migrator->migrate());
         foreach ($migrator->status() as $row) {
             self::assertTrue($row['applied'] && !$row['modified'] && !$row['other_engine'], $row['version']);

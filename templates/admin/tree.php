@@ -64,6 +64,7 @@ if ($households === []) {
         <h2 id="form-heading"><?= $view->t($editing ? 'admin.' . $key . '.edit' : 'admin.' . $key . '.new') ?></h2>
         <form method="post" action="<?= $view->e($editing ? $base_path . '/' . (int) $node['id'] : $base_path) ?>" class="form" novalidate>
             <?= $view->csrfField() ?>
+            <?php if ($isLocation && $editing): ?><input type="hidden" name="row_version" value="<?= (int) $node['row_version'] ?>"><?php endif; ?>
             <?= $view->partial('partials/input', ['name' => 'name', 'label' => 'fields.name', 'value' => $old['name'], 'errors' => $errors, 'required' => true, 'maxlength' => 150]) ?>
             <div class="form-field">
                 <label for="parent_id"><?= $view->t('fields.parent') ?></label>
