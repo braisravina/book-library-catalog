@@ -88,6 +88,10 @@ These rules apply to every commit, in every phase, with no exceptions.
     `534fb1d6d63fe180ec80c405f7ff416b0959c97a`). From this phase on, work
     happens only in the main project directory on ordinary branches (no
     extra worktrees or delivery directories); the owner commits.
+  - Households phase H3: on the same branch `household-access-h2`, from
+    the committed phase H2, commit
+    `5f1b8df12fb45eef245bb1cdc5e2de2ccb1d0b51` (tree
+    `bd1894d935e69e441010508104e909f181735aea`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -189,7 +193,7 @@ These rules apply to every commit, in every phase, with no exceptions.
     server, no credentials, only allowlisted bibliographic fields the user
     selects, never private data.
   - Only the owner may set `METADATA_CONTACT`.
-- **Households** (phases H1 and H2 are development-only; ARCHITECTURE.md,
+- **Households** (phases H1 to H3 are development-only; ARCHITECTURE.md,
   "Households"). Shared bibliographic records (works, editions, authors,
   publishers, covers) have no household; inventory (`copies`, `locations`)
   belongs to one. Never add per-household roles, never cache memberships
@@ -199,12 +203,55 @@ These rules apply to every commit, in every phase, with no exceptions.
   `Households\HouseholdService` and are audited (members by id only).
   Membership never grants editing of another member's copy. Collections
   stay curated lists, not permission boundaries. `HOUSEHOLDS_ENABLED` must
-  stay off in production until H3 is complete (`ConfigValidator`
-  enforces it); do not start H3, H4 or DVD/CD work without the owner's
-  approval. Every new route must be classified in
-  `config/household_access.php` (`HouseholdAccessMatrixTest`). Keep
-  `household_id` nullable and uniqueness unchanged until H4 has evaluated
-  rollback compatibility.
+  stay off in production until the owner releases the feature
+  (`ConfigValidator` enforces it; completing a phase never authorizes a
+  release); do not start H4 or DVD/CD work without the owner's approval.
+  Every new route must be classified in `config/household_access.php`
+  (`HouseholdAccessMatrixTest`). Keep `household_id` nullable until H4 has
+  evaluated rollback compatibility. Inventory codes are unique per
+  household through `copies.inventory_scope_id` (generated,
+  `COALESCE(household_id, 0)`) and `uq_copies_scope_inventory_code`: never
+  write that column, never add a global unique index back, and never
+  report a code of another household.
+- **Household write authorization (H3).** Every write that depends on
+  household access runs in `Households\WriteGuard::run()` (it opens the
+  transaction itself, at READ COMMITTED, locks every household row shared
+  and re-reads the actor and their memberships from the database); the
+  service then repeats its authorization against the rows it locks. Never
+  authorize a write only in a controller, never pass a `User` or scope
+  from the request into the decision, and never start a guarded write
+  inside an open transaction. Keep the lock order documented in
+  `WriteGuard` (households, users, collections, editions, works, copies,
+  loans, locations); metadata edits lock the edition or work exclusively,
+  inventory writes lock them shared. The work passed to `run()` must be
+  database-only (a deadlock victim is run again). A record outside the
+  actor's households is `WriteDeniedException::notFound()` (404, like a
+  missing one); never 403 for something they cannot see. Rules:
+  - Works and editions: administrators, or the creator while the record
+    is exclusive to their households (`Authorizer::canEditSharedRecord()`,
+    `heldOutsideView()` / `sharedBeyondView()`); covers follow the
+    edition; authors and publishers stay administrator-only.
+  - Copies only through `Catalogue\CopyService` (never
+    `CopyRepository::create/update/delete` from a controller); a copy on
+    loan never changes household; bulk transfers are H4.
+  - A copy of a book another household holds is added by ISBN
+    (`CopyService::createByIsbn()`): never accept an edition id for an
+    edition the user cannot see, and show only
+    `EditionRepository::bibliographic()`.
+  - Borrowers with an account must be active members of the copy's
+    household, for administrators too.
+  - A shared collection has one explicit household
+    (`CollectionService`); never share one implicitly or with all of the
+    owner's households, and never make a private collection shared.
+  - Wishlist links only to editions visible when saving.
+  - Locations only through `Households\LocationService`: one tree per
+    household, a child takes its parent's household, no move across
+    households.
+  - Accounts and invitations get households only by an administrator's
+    explicit choice; memberships from an invitation are created in the
+    redeeming transaction.
+  - With the feature disabled none of this may be observable
+    (`HouseholdFeatureDisabledTest`).
 - **Household read isolation (H2).** `Security\Visibility` is the only
   definition of what a viewer may read: copies and locations through the
   household, editions and works when the viewer catalogued them or through
@@ -299,6 +346,24 @@ These rules apply to every commit, in every phase, with no exceptions.
   and temporary directories.
 - Cover files are only ever reached through `CoverImageProcessor::path()` /
   `delete()`, never by building paths from input.
+
+
+
+Location tree mutations take exclusive household locks in id order before
+account and location locks, including with the feature disabled. This
+serialises root-name checks and disjoint subtree moves: the nullable
+parent unique index alone cannot prevent duplicate roots or concurrent cycles.
+Ordinary guarded writes retain shared household locks when enabled.
+
+Application rollback retains the H3 schema; it does not restore global
+inventory-code uniqueness. If H3 has allowed the same code in different
+households, the previous application's global pre-check can refuse edits
+of those copies, including an unchanged code. Review and resolve such
+collisions explicitly before reverting to global uniqueness; never drop
+copies or silently rewrite codes. Disabling the feature also restores the
+global application pre-check, with the same collision limitation. There is
+no automatic down migration; an older backup loses subsequent writes.
+
 
 ## Commands
 

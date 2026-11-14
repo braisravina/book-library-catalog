@@ -437,7 +437,7 @@ database:
   migration: read MariaDB's upgrade notes, back up, test the restore on a
   copy first.
 
-## Households (phases H1 and H2, development-only)
+## Households (phases H1 to H3, development-only)
 
 Not deployed to production yet (see DEPLOYMENT.md, section 11). For when it
 is, as part of the complete household release:
@@ -464,6 +464,58 @@ is, as part of the complete household release:
   check when a user reports missing books. Membership changes apply to
   the member's next request; nobody has to sign in again.
 - Phase H2 adds no migration and no setting.
+- Phase H3 adds four migrations (`2026_11_14_100000` to `100003`), no
+  setting:
+  - `100000` makes inventory codes unique per household. It adds a
+    generated column to `copies` and replaces the unique index in one
+    `ALTER TABLE` (the table is rebuilt: with a large `copies` table allow
+    for the time and for free disk space of about the table's size). No
+    code, copy or household is changed. Before it, this must return no
+    row (it cannot, with the index that exists today, but it is the
+    condition the new index needs):
+    `SELECT COALESCE(household_id, 0) AS scope, inventory_code, COUNT(*) FROM copies WHERE inventory_code IS NOT NULL GROUP BY scope, inventory_code HAVING COUNT(*) > 1;`
+  - `100001` and `100002` add `collections.household_id` and give existing
+    **shared** collections the default household. Private collections are
+    not touched. Afterwards this returns 0:
+    `SELECT COUNT(*) FROM collections WHERE visibility = 'shared' AND household_id IS NULL;`
+  - `100003` adds `invitation_households` (empty).
+  - The previous application version runs on the migrated schema, so the
+    application can be rolled back without touching the database. A
+    backup taken before the migrations restores the earlier schema; run
+    `migrate` afterwards. Backups restore only into the same engine.
+- With the feature enabled, the things to check when a user cannot change
+  something they expect to: their memberships (a write is authorized by
+  the memberships at that moment), whether another household holds a copy
+  of the record (then an administrator edits its description), and the
+  household of the copy, location or collection concerned. A "try again"
+  page (HTTP 409) means two changes met on the same records; nothing was
+  saved and repeating the action is safe.
+- Deleting a household requires it to have no members, copies, locations
+  or shared collections. Pending invitations that named it simply lose
+  that assignment.
+
+
+
+Invitation replacement and redemption take shared household locks before
+invitation/account locks, avoiding an inverse order with household deletion.
+With the feature disabled, pending assignments are ignored during redemption
+and are not carried into replacement invitations.
+
+Location tree mutations take exclusive household locks in id order before
+account and location locks, including with the feature disabled. This
+serialises root-name checks and disjoint subtree moves: the nullable
+parent unique index alone cannot prevent duplicate roots or concurrent cycles.
+Ordinary guarded writes retain shared household locks when enabled.
+
+Application rollback retains the H3 schema; it does not restore global
+inventory-code uniqueness. If H3 has allowed the same code in different
+households, the previous application's global pre-check can refuse edits
+of those copies, including an unchanged code. Review and resolve such
+collisions explicitly before reverting to global uniqueness; never drop
+copies or silently rewrite codes. Disabling the feature also restores the
+global application pre-check, with the same collision limitation. There is
+no automatic down migration; an older backup loses subsequent writes.
+
 
 ## Metadata cache
 

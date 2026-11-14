@@ -847,14 +847,16 @@ recommended once the ingress exists. ⚠ production
 
 ## 11. Updating the application
 
-> **Households (phases H1 and H2) are not to be deployed.** The household
-> code and its three migrations (`2026_11_13_18000*`) are development-only:
-> reads are isolated per household (H2), but the rules for changing shared
-> records are not implemented (H3). Deploy household functionality only as
-> the complete release that includes phase H3. `HOUSEHOLDS_ENABLED` must
+> **Households (phases H1 to H3) are not to be deployed.** The household
+> code and its migrations (`2026_11_13_18000*` and `2026_11_14_10000*`)
+> are development-only: reads (H2) and writes (H3) are isolated per
+> household, but the feature has not been released and completing phase H3
+> does not authorize a release. Deploy household functionality only when
+> the owner decides to, as one reviewed release. `HOUSEHOLDS_ENABLED` must
 > stay `false` (`config:check --strict` fails otherwise); while it is
-> false the application behaves as it did before households. Phase H2 adds
-> no migration.
+> false the application behaves as it did before households. See
+> OPERATIONS.md, "Households", for what the migrations do and the checks
+> to run around them.
 
 1. Read the release notes and the diff of `docker-compose.prod.yml`,
    `.env.production.example` and the migrations.

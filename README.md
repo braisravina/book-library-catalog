@@ -431,16 +431,23 @@ tests/                   PHPUnit unit and integration suites
 - **Phase 4B — Invitations, data portability and recovery (done):**
   invitation-only registration, CSV/JSON export, backup/verify/restore
   tooling with maintenance mode, and retention housekeeping.
-- **Households — phases H1 and H2 (development-only, not for production):**
+- **Households — phases H1 to H3 (development-only, not for production):**
   household and membership schema, migration of existing records into a
   temporary default household, administrator pages behind
-  `HOUSEHOLDS_ENABLED`, the household of each copy (H1), and read
-  isolation (H2): with the feature enabled a user sees only the inventory
-  of their own households, the bibliographic records those households
-  hold and the ones they catalogued themselves. The rules for changing
-  shared records are phase H3; until then the feature cannot be enabled
-  in production (ARCHITECTURE.md, "Households";
-  `config/household_access.php`).
+  `HOUSEHOLDS_ENABLED`, the household of each copy (H1); read isolation
+  (H2): with the feature enabled a user sees only the inventory of their
+  own households, the bibliographic records those households hold and the
+  ones they catalogued themselves; and write authorization (H3): every
+  change is checked again inside its transaction against the user's
+  memberships at that moment, shared records are edited by their creator
+  only while no other household holds them, inventory codes are unique
+  per household, a copy of a book another household holds is added by
+  ISBN, loans go to members of the copy's household, shared collections
+  belong to one household, each household has its own location tree, and
+  new accounts and invitations can be given households. The feature is
+  not released: production refuses to start with it enabled
+  (ARCHITECTURE.md, "Households"; `config/household_access.php`). Bulk
+  reassignment between households (H4) is not started.
 - **Phase 5 — proposed:** production readiness: build and validate the
   Alpine images and CI, configure the reverse proxy and client IP, implement
   the audit-database separation, schedule and drill backups. Then optional

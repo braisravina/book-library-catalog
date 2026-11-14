@@ -366,19 +366,18 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   - Wishlist changes aren't audited by design (private, not catalogue
     data).
 
-### Households (phases H1 and H2, development-only)
+### Households (phases H1 to H3, development-only)
 
 Household-based access control is being built in phases. Reads are
-isolated since phase H2; the rules for changing shared records are phase
-H3. **It is not a complete security boundary yet**, so enforcement on read
-paths (H2) and write paths (H3) ships together and no household
-functionality is enabled in production before that. While the feature is
-disabled, every signed-in user with `catalogue.view` sees the whole
-catalogue, as before.
+isolated since phase H2 and writes since phase H3. **It has not been
+released**: it stays development-only until the owner decides otherwise
+(phase H4 comes first), and production refuses to start with it enabled.
+While the feature is disabled, every signed-in user with `catalogue.view`
+sees the whole catalogue and every rule is the one from before households.
 
 - **Fail closed.** `HOUSEHOLDS_ENABLED` defaults to `false`. In production
   the application ignores it and `config:check` reports it as an error, so
-  the incomplete feature cannot be exposed by a configuration mistake.
+  the unreleased feature cannot be exposed by a configuration mistake.
   While disabled, every `/admin/households` route answers 404 (also for
   administrators), the navigation entry is absent, and a `household_id`
   submitted with a copy is ignored.
@@ -390,8 +389,8 @@ catalogue, as before.
   (`Security\HouseholdScope`), never cached in the session: adding or
   removing a member applies to that member's next request. Administrators
   reach every household. Deactivated accounts reach none and cannot be
-  added to a household. New accounts, however created, belong to no
-  household.
+  added to a household. New accounts belong to no household unless an
+  administrator assigns one explicitly (on creation or on the invitation).
 - **Copy assignment** goes through `Households\CopyHousehold` only. A
   non-administrator can place a copy only in a household they belong to;
   a household they may not use and one that does not exist produce the
@@ -424,9 +423,8 @@ catalogue, as before.
   - **Residual, accepted:** ISBN-13 is unique across the shared catalogue,
     so entering an ISBN that only another household holds reveals that
     the book is catalogued, with its bibliographic description and
-    nothing else. Shared collections are still visible to every user with
-    `catalogue.view` (name and description; items filtered per viewer,
-    owner named only to household co-members).
+    nothing else. (Shared collections were visible to every user in H2;
+    since H3 they are visible to the household they are shared with.)
   - **Revocation** applies to the next request in the existing session:
     memberships are read from the database per request and never stored
     in the session; covers are served `private, no-cache` and the
@@ -435,15 +433,79 @@ catalogue, as before.
     that returns record data, identical-404 comparison, counts, revocation,
     feature-off behaviour) on MariaDB and MySQL; `VisibilityTest`;
     `HouseholdAccessMatrixTest`.
-- **Known gaps until H3** (each listed per route in
-  `config/household_access.php`): the creator of a shared work or edition
-  can still edit it when another household also holds it; an ISBN held
-  only by another household cannot be adopted by the user (an
-  administrator must add the copy); household checks are not yet repeated
-  under row locks; inventory codes are unique across households, so the
-  "code already in use" error can refer to another household's copy;
-  locations are administered as one tree; invitations cannot assign
-  households.
+- **Write authorization (H3).** Every write that depends on household
+  access runs in a guarded transaction (`Households\WriteGuard`): shared
+  locks on the household rows, then the acting account and its memberships
+  read again from the database, then the service's authorization repeated
+  against the rows it locks. The controller's check is never the only one.
+  - **Revocation and races.** `HouseholdService` removes a membership
+    under the exclusive lock of the household row, so a removal waits for
+    the writes in flight and every later write sees it: after an
+    administrator is told a member was removed, no write authorized by
+    that membership can still be committed. The same holds for a
+    deactivated account. A first copy added by another household and an
+    edit of the record lock the edition (and work) row against each other.
+  - **404 before 403, for writes too.** A copy, loan, edition, collection
+    or wishlist entry outside the actor's households is refused exactly
+    like one that does not exist, also when it left their view between
+    the form and the submit. Identifiers of another household's records
+    (copy, loan, edition, cover, location, collection, household) open
+    nothing and change nothing (`HouseholdWriteAuthorizationTest::
+    testUnauthorizedRequestsModifyNothing` compares every table).
+  - **Shared bibliographic records.** Administrators change any work or
+    edition. A member changes one they created only while no household
+    they do not belong to holds it; covers follow their edition; authors
+    and publishers stay with administrators; seeing never implies
+    editing.
+  - **Inventory.** A copy is placed only in a household the actor may use,
+    owned by someone who reaches it, in a location of that household.
+    Inventory codes are unique per household (a database index over
+    `COALESCE(household_id, 0)`, so copies without a household cannot
+    repeat a code either); the "already in use" error only ever concerns
+    the copy's own household. A copy on loan cannot change household.
+  - **Add a copy by ISBN.** The edition is resolved from the ISBN on the
+    server inside the transaction; an edition id from the request never
+    reaches an edition the user cannot see. Only the shared description
+    is shown.
+  - **Loans.** A borrower account must be an active member of the copy's
+    household at that moment, for administrators as well; a lender who no
+    longer reaches the household can neither lend nor return. Loan
+    history is never rewritten.
+  - **Collections.** Sharing is with one explicitly chosen household; a
+    collection never becomes shared or changes household on its own;
+    lists, totals, the edition page and direct URLs follow the household;
+    items out of the actor's view cannot be added, moved, removed or
+    detected.
+  - **Wishlists.** A link to a catalogue edition is stored only for an
+    edition the user can see when saving, and dropped on the next save
+    once it is out of view.
+  - **Locations** are administrator-only, one tree per household; a
+    location never moves to another household's tree.
+  - **Accounts and invitations.** No membership by default. Assignments on
+    an invitation are an intention only: memberships are created in the
+    redeeming transaction, for households that still exist, so a revoked,
+    expired, replaced or used link grants nothing. Membership changes are
+    audited by account id, never by name or address.
+  - **Lock failures.** A deadlock victim is run again; a lock wait timeout
+    rolls back and is answered with a "try again" page. No partial write.
+  - **Residual, accepted:**
+    - a member who catalogued a record learns that some other household
+      now holds it, because they can no longer edit it (the policy itself:
+      "once another household holds the record, an administrator edits
+      it"). The refusal is the generic 403 and the page shows a neutral
+      note; nothing identifies the household, owner, count or location;
+    - ISBN-13 stays unique across the shared catalogue, so an ISBN that
+      only another household holds is still reported as catalogued, with
+      its bibliographic description only (as in H2);
+    - authors, publishers and categories are one shared vocabulary.
+  - Tests, on MariaDB 11.4 and MySQL 8.4: `HouseholdWriteAuthorizationTest`,
+    `HouseholdWriteConcurrencyTest` (second connection and second process:
+    removal in flight, real deadlock, parallel inventory codes, loan
+    against removal), `HouseholdPhaseThreeMigrationTest`,
+    `HouseholdFeatureDisabledTest`, `HouseholdAccessMatrixTest`.
+- **Not done (phase H4, not started):** moving inventory between
+  households in bulk, `household_id NOT NULL`, retiring the default
+  household, and the production release itself.
 
 ### Request integrity
 
@@ -568,11 +630,35 @@ catalogue, as before.
 - Every dynamic response is sent with `Cache-Control: no-store` and
   `X-Robots-Tag: noindex`.
 
+
+Invitation replacement and redemption take shared household locks before
+invitation/account locks, avoiding an inverse order with household deletion.
+With the feature disabled, pending assignments are ignored during redemption
+and are not carried into replacement invitations.
+
+Location tree mutations take exclusive household locks in id order before
+account and location locks, including with the feature disabled. This
+serialises root-name checks and disjoint subtree moves: the nullable
+parent unique index alone cannot prevent duplicate roots or concurrent cycles.
+Ordinary guarded writes retain shared household locks when enabled.
+
+Application rollback retains the H3 schema; it does not restore global
+inventory-code uniqueness. If H3 has allowed the same code in different
+households, the previous application's global pre-check can refuse edits
+of those copies, including an unchanged code. Review and resolve such
+collisions explicitly before reverting to global uniqueness; never drop
+copies or silently rewrite codes. Disabling the feature also restores the
+global application pre-check, with the same collision limitation. There is
+no automatic down migration; an older backup loses subsequent writes.
+
+
+
 ## Known limitations and follow-ups
 
-- Households (phases H1 and H2): development-only. Reads are isolated, but
-  the write rules of phase H3 are missing; see "Households" above. Do not
-  deploy or enable before phase H3 is complete.
+- Households (phases H1 to H3): development-only. Reads and writes are
+  isolated per household; see "Households" above for the accepted
+  residuals. Not released: do not enable in production (the application
+  refuses) until the owner decides, after phase H4.
 - Phase 4B:
   - Without trusted-proxy configuration, the per-IP invitation limit applies
     to the proxy's address, as the login limit does.
