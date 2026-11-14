@@ -125,8 +125,10 @@ final class LoanController extends Controller
         try {
             $loanId = $this->services->loanService()->lend($user, (int) $copy['id'], $input);
         } catch (LoanException $e) {
-            if ($e->getMessage() === 'loans.error.forbidden') {
-                throw HttpException::forbidden();
+            $this->refuse($e);
+            if ($e->getMessage() === LoanService::BORROWER_REFUSED) {
+                // The borrower left the household (or was deactivated) meanwhile.
+                return $this->form($request, $copy, $input, ['borrower_user_id' => ['validation.in']], 422);
             }
 
             return $this->form($request, $copy, $input, [], 409, $e->getMessage());
@@ -172,9 +174,7 @@ final class LoanController extends Controller
         try {
             $this->services->loanService()->returnLoan($this->user($request), (int) $loan['id']);
         } catch (LoanException $e) {
-            if ($e->getMessage() === 'loans.error.forbidden') {
-                throw HttpException::forbidden();
-            }
+            $this->refuse($e);
             $this->flash('error', $e->getMessage());
 
             return Response::redirect('/copies/' . (int) $loan['copy_id']);
@@ -213,11 +213,25 @@ final class LoanController extends Controller
     }
 
     /**
-     * Accounts the copy may be lent to (besides a free-text name): every
-     * active user for an unrestricted viewer (administrators, and everyone
-     * while the household feature is disabled); otherwise only the active
-     * members of the copy's household. Users of other households are never
-     * offered or accepted.
+     * Refusals the service made under its locks: a copy or loan that is
+     * not (or no longer) in the user's households is 404, like a missing one.
+     */
+    private function refuse(LoanException $e): void
+    {
+        if ($e->getMessage() === 'loans.error.forbidden') {
+            throw HttpException::forbidden();
+        }
+        if (in_array($e->getMessage(), LoanService::NOT_FOUND, true)) {
+            throw HttpException::notFound();
+        }
+    }
+
+    /**
+     * Accounts the copy may be lent to (besides a free-text name): the
+     * active members of the copy's household, whoever records the loan
+     * (administrators included); every active user while the household
+     * feature is disabled. Users of other households are never offered or
+     * accepted. LoanService checks the borrower again under the copy lock.
      *
      * @param array<string, mixed> $copy
      *
@@ -225,15 +239,7 @@ final class LoanController extends Controller
      */
     private function borrowers(array $copy): array
     {
-        $ownerId = (int) $copy['owner_user_id'];
-        $visibility = $this->visibility();
-        if ($visibility->isUnrestricted()) {
-            $users = $this->services->users()->activeKnownTo($visibility);
-        } else {
-            $users = $copy['household_id'] === null ? [] : $this->services->users()->activeMembersOf((int) $copy['household_id']);
-        }
-
-        return array_values(array_filter($users, static fn (User $u): bool => $u->id !== $ownerId));
+        return $this->services->loanService()->eligibleBorrowers($copy);
     }
 
     /**

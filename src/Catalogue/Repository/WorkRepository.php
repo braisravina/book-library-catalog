@@ -25,6 +25,47 @@ final class WorkRepository extends Repository
     }
 
     /**
+     * Locks the work row for the rest of the transaction
+     * (Households\WriteGuard lock order): exclusively for a metadata edit,
+     * shared for an inventory write on one of its editions.
+     *
+     * @return array{id: int, created_by: ?int, title: string}|null
+     */
+    public function lock(int $id, bool $exclusive): ?array
+    {
+        $row = $this->one(
+            'SELECT id, created_by, title FROM works WHERE id = :id ' . ($exclusive ? 'FOR UPDATE' : 'LOCK IN SHARE MODE'),
+            ['id' => $id],
+        );
+
+        return $row === null ? null : [
+            'id' => (int) $row['id'],
+            'created_by' => $row['created_by'] === null ? null : (int) $row['created_by'],
+            'title' => (string) $row['title'],
+        ];
+    }
+
+    /**
+     * Whether the work reaches beyond the viewer's households: one of its
+     * editions is out of the viewer's view, or has a copy held outside
+     * their households. Such a work is changed by administrators only
+     * (phase H3). A yes or no for authorization; nothing about those
+     * editions or copies is ever returned.
+     */
+    public function sharedBeyondView(int $id, Visibility $visibility): bool
+    {
+        $params = new Params();
+
+        return $this->scalar(
+            'SELECT 1 FROM editions e WHERE e.work_id = ' . $params->add($id) . '
+               AND (NOT ' . $visibility->edition('e', $params) . '
+                    OR EXISTS (SELECT 1 FROM copies c WHERE c.edition_id = e.id AND ' . $visibility->copyOutside('c', $params) . '))
+             LIMIT 1',
+            $params->all(),
+        ) !== null;
+    }
+
+    /**
      * @param array<string, mixed> $data keys from FIELDS
      */
     public function create(array $data, int $userId): int

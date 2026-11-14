@@ -94,8 +94,9 @@ final class HouseholdReadIsolationTest extends IntegrationTestCase
             VALUES ({$this->lentBook['copy_id']}, {$this->anaId}, '2026-02-01', '2026-03-01', 'zzinv lender note', UTC_TIMESTAMP(), UTC_TIMESTAMP())");
         $this->borrowedLoan = (int) $this->pdo()->lastInsertId();
 
-        $this->pdo()->exec("INSERT INTO collections (owner_user_id, name, description, visibility, created_at, updated_at)
-            VALUES ({$this->beaId}, 'Shared picks', 'Open to everyone', 'shared', UTC_TIMESTAMP(), UTC_TIMESTAMP())");
+        // Shared with Casa (phase H3: a shared collection is shared with one household).
+        $this->pdo()->exec("INSERT INTO collections (owner_user_id, name, description, visibility, household_id, created_at, updated_at)
+            VALUES ({$this->beaId}, 'Shared picks', 'Open to everyone', 'shared', {$this->casa}, UTC_TIMESTAMP(), UTC_TIMESTAMP())");
         $this->sharedCollection = (int) $this->pdo()->lastInsertId();
         $this->pdo()->exec("INSERT INTO collections (owner_user_id, name, visibility, created_at, updated_at)
             VALUES ({$this->anaId}, 'Ana list', 'private', UTC_TIMESTAMP(), UTC_TIMESTAMP())");
@@ -186,6 +187,10 @@ final class HouseholdReadIsolationTest extends IntegrationTestCase
                 "/books?location={$this->pisoShelf}", '/books?language=fr', '/books?sort=recent', '/books?q=Borrowed', '/books?page=2',
             ],
             'books.create' => ['/books/new', '/books/new?manual=1', '/books/new?isbn=' . self::isbn(99) . '&manual=1'],
+            // "Add your copy" by ISBN: not catalogued, visible, and not an ISBN. The form for a
+            // book held elsewhere shows the shared description by design and is tested on its
+            // own (HouseholdWriteAuthorizationTest).
+            'books.copies.create' => ['/books/copies/new?isbn=' . self::isbn(99), '/books/copies/new?isbn=' . self::isbn(3), '/books/copies/new?isbn=nonsense', '/books/copies/new'],
             'works.show' => ["/works/{$b['work_id']}", "/works/{$s['work_id']}", "/works/{$g['work_id']}", "/works/{$this->lentBook['work_id']}", "/works/{$this->orphanBook['work_id']}"],
             'works.edit' => ["/works/{$b['work_id']}/edit", "/works/{$s['work_id']}/edit", "/works/{$g['work_id']}/edit"],
             'editions.create' => ["/works/{$b['work_id']}/editions/new", "/works/{$b['work_id']}/editions/new?isbn={$isbn}", "/works/{$s['work_id']}/editions/new?isbn={$isbn}"],
@@ -316,7 +321,9 @@ final class HouseholdReadIsolationTest extends IntegrationTestCase
         self::assertStringNotContainsString("/copies/{$this->givenPisoCopy}", $given->body());
         $this->assertNoMarker($given, 'edition held elsewhere');
         self::assertSame(200, $this->request($ana, 'GET', "/works/{$this->givenBook['work_id']}")->status());
-        self::assertSame(200, $this->request($ana, 'GET', "/editions/{$this->givenBook['edition_id']}/edit")->status(), 'She can still open her own record for editing');
+        // Phase H3: another household holds it, so its description is an administrator's to change.
+        self::assertSame(403, $this->request($ana, 'GET', "/editions/{$this->givenBook['edition_id']}/edit")->status(), 'A record another household holds is not hers to edit');
+        self::assertStringNotContainsString("/editions/{$this->givenBook['edition_id']}/edit", $given->body());
         self::assertStringContainsString('Given Away', $this->request($ana, 'GET', '/books?q=Given')->body());
 
         // Vera belongs to Casa but catalogued nothing: the same edition does not exist for her.
@@ -562,11 +569,14 @@ final class HouseholdReadIsolationTest extends IntegrationTestCase
         self::assertSame(0, $this->countRows("SELECT COUNT(*) FROM loans WHERE copy_id = {$copy}"));
         self::assertSame(303, $lend($this->veraId)->status(), 'A household co-member is accepted');
 
-        // Administrators may lend to any active user (unchanged).
+        // Phase H3: the same rule for loans recorded by an administrator.
         [$admin, $adminToken] = $this->signedIn('admin@example.org');
         $adminForm = $this->request($admin, 'GET', "/copies/{$this->sharedBook['copy_id']}/lend")->body();
-        self::assertStringContainsString('>Carl<', $adminForm);
-        self::assertSame(303, $this->request($admin, 'POST', "/copies/{$this->sharedBook['copy_id']}/lend", ['_csrf' => $adminToken, 'borrower_type' => 'user', 'borrower_user_id' => (string) $this->carlId, 'loaned_on' => '2026-01-05'])->status());
+        self::assertStringContainsString('>Vera<', $adminForm);
+        self::assertStringNotContainsString('>Carl<', $adminForm);
+        $adminLend = fn (int $borrower): Response => $this->request($admin, 'POST', "/copies/{$this->sharedBook['copy_id']}/lend", ['_csrf' => $adminToken, 'borrower_type' => 'user', 'borrower_user_id' => (string) $borrower, 'loaned_on' => '2026-01-05']);
+        self::assertSame(422, $adminLend($this->carlId)->status(), 'Not a member of the copy\'s household');
+        self::assertSame(303, $adminLend($this->veraId)->status());
     }
 
     // --- Membership changes --------------------------------------------------------

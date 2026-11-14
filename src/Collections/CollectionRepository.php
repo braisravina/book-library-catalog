@@ -11,6 +11,11 @@ use DigitalLibrary\Security\Visibility;
 /**
  * SQL for collections and their (edition-level) items. Visibility filtering
  * happens here for lists; single records are checked by the Authorizer.
+ *
+ * A private collection has no household. A shared collection is shared
+ * with one household (household_id), chosen explicitly: it is listed for
+ * the members of that household only (Visibility::sharedCollection()),
+ * and its items are filtered per viewer like everywhere else.
  */
 final class CollectionRepository extends Repository
 {
@@ -25,8 +30,9 @@ final class CollectionRepository extends Repository
      */
     private static function select(Visibility $visibility, Params $params): string
     {
-        return 'SELECT c.id, c.owner_user_id, c.name, c.description, c.visibility, c.created_at, c.updated_at,
+        return 'SELECT c.id, c.owner_user_id, c.name, c.description, c.visibility, c.household_id, c.created_at, c.updated_at,
                 CASE WHEN ' . $visibility->user('u', $params) . ' THEN u.display_name END AS owner_name,
+                (SELECT h.name FROM households h WHERE h.id = c.household_id AND ' . $visibility->sharedCollection('c', $params) . ') AS household_name,
                 (SELECT COUNT(*) FROM collection_items ci JOIN editions ie ON ie.id = ci.edition_id
                   WHERE ci.collection_id = c.id AND ' . $visibility->edition('ie', $params) . ') AS item_count
             FROM collections c
@@ -50,7 +56,7 @@ final class CollectionRepository extends Repository
      */
     public function lock(int $id): ?array
     {
-        return $this->one('SELECT id, owner_user_id, name, visibility FROM collections WHERE id = :id FOR UPDATE', ['id' => $id]);
+        return $this->one('SELECT id, owner_user_id, name, visibility, household_id FROM collections WHERE id = :id FOR UPDATE', ['id' => $id]);
     }
 
     /**
@@ -60,10 +66,13 @@ final class CollectionRepository extends Repository
      */
     public function list(string $scope, int $userId, int $page, Visibility $visibility): array
     {
+        // "Shared with me": other users' collections shared with one of the
+        // viewer's households. The total is counted over the same rows, so
+        // it never reveals how many collections other households share.
         $where = static fn (Params $params): string => match ($scope) {
             'mine' => ' WHERE c.owner_user_id = ' . $params->add($userId),
             'all' => '',
-            default => " WHERE c.visibility = 'shared' AND c.owner_user_id <> " . $params->add($userId),
+            default => " WHERE c.visibility = 'shared' AND c.owner_user_id <> " . $params->add($userId) . ' AND ' . $visibility->sharedCollection('c', $params),
         };
         $params = new Params();
         $rows = $this->many(
@@ -87,20 +96,24 @@ final class CollectionRepository extends Repository
         ) !== null;
     }
 
-    public function create(int $ownerId, CollectionInput $input): int
+    /**
+     * @param ?int $householdId the household a shared collection is shared with
+     *                          (decided by CollectionService, never taken from the request as is)
+     */
+    public function create(int $ownerId, CollectionInput $input, ?int $householdId): int
     {
         return $this->insert(
-            'INSERT INTO collections (owner_user_id, name, description, visibility, created_at, updated_at)
-             VALUES (:o, :n, :d, :v, UTC_TIMESTAMP(), UTC_TIMESTAMP())',
-            ['o' => $ownerId, 'n' => $input->name, 'd' => $input->description === '' ? null : $input->description, 'v' => $input->visibility],
+            'INSERT INTO collections (owner_user_id, name, description, visibility, household_id, created_at, updated_at)
+             VALUES (:o, :n, :d, :v, :h, UTC_TIMESTAMP(), UTC_TIMESTAMP())',
+            ['o' => $ownerId, 'n' => $input->name, 'd' => $input->description === '' ? null : $input->description, 'v' => $input->visibility, 'h' => $householdId],
         );
     }
 
-    public function update(int $id, CollectionInput $input): void
+    public function update(int $id, CollectionInput $input, ?int $householdId): void
     {
         $this->run(
-            'UPDATE collections SET name = :n, description = :d, visibility = :v, updated_at = UTC_TIMESTAMP() WHERE id = :id',
-            ['n' => $input->name, 'd' => $input->description === '' ? null : $input->description, 'v' => $input->visibility, 'id' => $id],
+            'UPDATE collections SET name = :n, description = :d, visibility = :v, household_id = :h, updated_at = UTC_TIMESTAMP() WHERE id = :id',
+            ['n' => $input->name, 'd' => $input->description === '' ? null : $input->description, 'v' => $input->visibility, 'h' => $householdId, 'id' => $id],
         );
     }
 
@@ -156,6 +169,44 @@ final class CollectionRepository extends Repository
         return (int) $this->scalar('SELECT COUNT(*) FROM collection_items WHERE collection_id = :c', ['c' => $collectionId]);
     }
 
+    /**
+     * Whether the edition is an item of the collection that the viewer may
+     * see. An item out of their view is answered like one that is not there.
+     */
+    public function hasVisibleItem(int $collectionId, int $editionId, Visibility $visibility): bool
+    {
+        $params = new Params();
+
+        return $this->scalar(
+            'SELECT 1 FROM collection_items ci JOIN editions e ON e.id = ci.edition_id
+             WHERE ci.collection_id = ' . $params->add($collectionId) . ' AND ci.edition_id = ' . $params->add($editionId) . '
+               AND ' . $visibility->edition('e', $params),
+            $params->all(),
+        ) !== null;
+    }
+
+    /**
+     * The collection's order as the viewer sees it: edition id => position,
+     * for the items in their view only (bounded by MAX_ITEMS).
+     *
+     * @return array<int, int>
+     */
+    public function visiblePositions(int $collectionId, Visibility $visibility): array
+    {
+        $params = new Params();
+        $out = [];
+        foreach ($this->many(
+            'SELECT ci.edition_id, ci.position FROM collection_items ci JOIN editions e ON e.id = ci.edition_id
+             WHERE ci.collection_id = ' . $params->add($collectionId) . ' AND ' . $visibility->edition('e', $params) . '
+             ORDER BY ci.position, ci.edition_id',
+            $params->all(),
+        ) as $row) {
+            $out[(int) $row['edition_id']] = (int) $row['position'];
+        }
+
+        return $out;
+    }
+
     public function hasItem(int $collectionId, int $editionId): bool
     {
         return $this->scalar('SELECT 1 FROM collection_items WHERE collection_id = :c AND edition_id = :e', ['c' => $collectionId, 'e' => $editionId]) !== null;
@@ -196,18 +247,22 @@ final class CollectionRepository extends Repository
     }
 
     /**
-     * Collections containing an edition that the given user may see.
+     * Collections containing an edition that the given user may see: their
+     * own, every collection for an administrator, and collections shared
+     * with one of their households.
      *
      * @return list<array<string, mixed>>
      */
-    public function containing(int $editionId, int $userId, bool $seeAll): array
+    public function containing(int $editionId, int $userId, bool $seeAll, Visibility $visibility): array
     {
+        $params = new Params();
+
         return $this->many(
             'SELECT c.id, c.name, c.visibility, c.owner_user_id FROM collections c
-             JOIN collection_items ci ON ci.collection_id = c.id AND ci.edition_id = :e
-             WHERE ' . ($seeAll ? '1 = 1' : "(c.owner_user_id = :u OR c.visibility = 'shared')") . '
+             JOIN collection_items ci ON ci.collection_id = c.id AND ci.edition_id = ' . $params->add($editionId) . '
+             WHERE ' . ($seeAll ? '1 = 1' : '(c.owner_user_id = ' . $params->add($userId) . " OR (c.visibility = 'shared' AND " . $visibility->sharedCollection('c', $params) . '))') . '
              ORDER BY c.name, c.id LIMIT 100',
-            ['e' => $editionId] + ($seeAll ? [] : ['u' => $userId]),
+            $params->all(),
         );
     }
 

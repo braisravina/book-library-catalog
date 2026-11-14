@@ -71,6 +71,52 @@ final class EditionRepository extends Repository
         );
     }
 
+    /**
+     * Locks the edition row for the rest of the transaction
+     * (Households\WriteGuard lock order): exclusively for a metadata edit,
+     * shared for an inventory write, so that a first copy added by another
+     * household and an edit of the edition are never interleaved.
+     *
+     * @return array{id: int, work_id: int, created_by: ?int, isbn_13: ?string, title: string}|null
+     */
+    public function lock(int $id, bool $exclusive): ?array
+    {
+        return self::locked($this->one(
+            'SELECT id, work_id, created_by, isbn_13, title FROM editions WHERE id = :id ' . ($exclusive ? 'FOR UPDATE' : 'LOCK IN SHARE MODE'),
+            ['id' => $id],
+        ));
+    }
+
+    /**
+     * The edition holding an ISBN-13, locked shared (adding a copy of a
+     * book that is already catalogued, whoever holds it).
+     *
+     * @return array{id: int, work_id: int, created_by: ?int, isbn_13: ?string, title: string}|null
+     */
+    public function lockByIsbn13(string $isbn13): ?array
+    {
+        return self::locked($this->one(
+            'SELECT id, work_id, created_by, isbn_13, title FROM editions WHERE isbn_13 = :isbn LOCK IN SHARE MODE',
+            ['isbn' => $isbn13],
+        ));
+    }
+
+    /**
+     * Whether a copy of the edition is held outside the viewer's
+     * households (the editing rule for shared records: such an edition is
+     * changed by administrators only). The answer is a yes or no used for
+     * authorization; nothing about those copies is ever returned.
+     */
+    public function heldOutsideView(int $id, Visibility $visibility): bool
+    {
+        $params = new Params();
+
+        return $this->scalar(
+            'SELECT 1 FROM copies c WHERE c.edition_id = ' . $params->add($id) . ' AND ' . $visibility->copyOutside('c', $params) . ' LIMIT 1',
+            $params->all(),
+        ) !== null;
+    }
+
     public function idByIsbn13(string $isbn13, ?int $excludeId = null): ?int
     {
         $id = $this->scalar(
@@ -235,6 +281,22 @@ final class EditionRepository extends Repository
             'SELECT DISTINCT e.language FROM editions e WHERE e.language IS NOT NULL AND ' . $visibility->edition('e', $params) . ' ORDER BY e.language',
             $params->all(),
         ), 'language');
+    }
+
+    /**
+     * @param array<string, mixed>|null $row
+     *
+     * @return array{id: int, work_id: int, created_by: ?int, isbn_13: ?string, title: string}|null
+     */
+    private static function locked(?array $row): ?array
+    {
+        return $row === null ? null : [
+            'id' => (int) $row['id'],
+            'work_id' => (int) $row['work_id'],
+            'created_by' => $row['created_by'] === null ? null : (int) $row['created_by'],
+            'isbn_13' => $row['isbn_13'] === null ? null : (string) $row['isbn_13'],
+            'title' => (string) $row['title'],
+        ];
     }
 
     /**

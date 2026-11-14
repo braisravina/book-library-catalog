@@ -27,6 +27,26 @@ final class UserRepository
     }
 
     /**
+     * The account as it is now, with its row locked until the transaction
+     * ends (Households\WriteGuard): shared, so a deactivation or role change
+     * waits for the write in flight; exclusive for services that serialise
+     * a user's own changes on the account row.
+     *
+     * The lock is taken on the users row alone (a locking read of the join
+     * would lock the shared roles row as well), then the account is read.
+     */
+    public function findByIdLocked(int $id, bool $exclusive = false): ?User
+    {
+        $stmt = $this->pdo->prepare('SELECT id FROM users WHERE id = :id ' . ($exclusive ? 'FOR UPDATE' : 'LOCK IN SHARE MODE'));
+        $stmt->execute(['id' => $id]);
+        if ($stmt->fetchColumn() === false) {
+            return null;
+        }
+
+        return $this->findById($id);
+    }
+
+    /**
      * @return array{user: User, password_hash: string}|null
      */
     public function findCredentialsByEmail(string $email): ?array

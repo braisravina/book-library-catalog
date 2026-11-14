@@ -280,7 +280,7 @@ final class HouseholdAdminTest extends IntegrationTestCase
         $withCopies = $this->createHousehold('With copies');
         $this->makeBook($this->adminId, 'Held', null, [], [], [], $this->adminId, null, $withCopies);
         $this->request($admin, 'POST', "/admin/households/{$withCopies}/delete", ['_csrf' => $token]);
-        self::assertStringContainsString('still has copies or locations', $this->request($admin, 'GET', "/admin/households/{$withCopies}/edit")->body());
+        self::assertStringContainsString('still has copies, locations or shared collections', $this->request($admin, 'GET', "/admin/households/{$withCopies}/edit")->body());
 
         $withLocations = $this->createHousehold('With locations');
         $this->pdo()->exec("INSERT INTO locations (parent_id, household_id, name, created_at, updated_at) VALUES (NULL, {$withLocations}, 'Attic', UTC_TIMESTAMP(), UTC_TIMESTAMP())");

@@ -18,6 +18,9 @@ final class InvitationRepository extends Repository
     private const SELECT = "SELECT i.id, i.email, i.role_id, r.code AS role, i.invited_by, i.expires_at, i.accepted_at, i.accepted_user_id,
             i.revoked_at, i.revoked_by, i.replaced_by_id, i.created_at,
             iu.display_name AS invited_by_name, au.display_name AS accepted_user_name,
+            (SELECT GROUP_CONCAT(h.name ORDER BY h.name SEPARATOR ', ')
+               FROM invitation_households ih JOIN households h ON h.id = ih.household_id
+              WHERE ih.invitation_id = i.id) AS household_names,
             CASE WHEN i.accepted_at IS NOT NULL THEN 'accepted'
                  WHEN i.revoked_at IS NOT NULL THEN 'revoked'
                  WHEN i.expires_at <= UTC_TIMESTAMP() THEN 'expired'
@@ -87,6 +90,30 @@ final class InvitationRepository extends Repository
              VALUES (:e, :r, :h, :b, :x, UTC_TIMESTAMP())',
             ['e' => $email, 'r' => $roleId, 'h' => $tokenHash, 'b' => $invitedBy, 'x' => $expiresAt],
         );
+    }
+
+    /**
+     * The households the invited account will join (phase H3). A deleted
+     * household is no longer listed: its rows are removed with it.
+     *
+     * @return list<int> ascending
+     */
+    public function householdIds(int $invitationId): array
+    {
+        return array_map('intval', array_column(
+            $this->many('SELECT household_id FROM invitation_households WHERE invitation_id = :i ORDER BY household_id', ['i' => $invitationId]),
+            'household_id',
+        ));
+    }
+
+    /**
+     * @param list<int> $householdIds
+     */
+    public function addHouseholds(int $invitationId, array $householdIds): void
+    {
+        foreach ($householdIds as $householdId) {
+            $this->run('INSERT INTO invitation_households (invitation_id, household_id) VALUES (:i, :h)', ['i' => $invitationId, 'h' => $householdId]);
+        }
     }
 
     public function revoke(int $id, ?int $by, ?int $replacedBy = null): void

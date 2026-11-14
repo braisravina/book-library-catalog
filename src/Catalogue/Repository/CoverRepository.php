@@ -53,14 +53,20 @@ final class CoverRepository extends Repository
     /**
      * Deletes the row; if it was primary, promotes the newest remaining cover.
      * Must run inside a transaction.
+     *
+     * @return bool false when the cover was already gone
      */
-    public function delete(int $id, int $editionId): void
+    public function delete(int $id, int $editionId): bool
     {
-        $this->run('DELETE FROM covers WHERE id = :id', ['id' => $id]);
+        if ($this->run('DELETE FROM covers WHERE id = :id AND edition_id = :e', ['id' => $id, 'e' => $editionId])->rowCount() === 0) {
+            return false;
+        }
         $next = $this->scalar('SELECT id FROM covers WHERE edition_id = :e ORDER BY id DESC LIMIT 1', ['e' => $editionId]);
         $hasPrimary = $this->scalar('SELECT 1 FROM covers WHERE edition_id = :e AND is_primary = 1', ['e' => $editionId]) !== null;
         if ($next !== null && !$hasPrimary) {
             $this->run('UPDATE covers SET is_primary = 1 WHERE id = :id', ['id' => (int) $next]);
         }
+
+        return true;
     }
 }

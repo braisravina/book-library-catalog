@@ -49,17 +49,25 @@ declare(strict_types=1);
  *   none  no household rule applies to the route
  *   H1    enforced since phase H1
  *   H2    read enforcement: enforced since phase H2 (Security\Visibility)
- *   H3    write enforcement (planned, not implemented)
+ *   H3    write enforcement: enforced since phase H3. The write runs in a
+ *         guarded transaction (Households\WriteGuard) that reads the actor
+ *         and their memberships again under the household locks and
+ *         repeats the authorization against the locked rows.
  * H2 and H3 ship together: no household functionality is enabled in
- * production before both are complete.
+ * production before both are complete (and the owner decides to).
  *
  * 'read' => 'H2' on a route of another phase means its record lookup is
  * already scoped: the route loads its work, edition, copy, loan or cover
  * through Security\Visibility, for GET and POST alike, so a record outside
  * the user's view is answered with 404 before anything is shown,
  * validated or written. No form, error page or re-displayed submission of
- * such a route can show another household's data. What remains for H3 on
- * those routes is the write rule stated after "H3 adds".
+ * such a route can show another household's data. The write rule of such
+ * a route (phase H3) is stated after "H3:".
+ *
+ *   exclusive    (H3) members change a work or edition they created only
+ *                while it is exclusive to their households; otherwise it is
+ *                an administrator's to change. The refusal is a plain 403
+ *                and names nothing of what other households hold.
  *
  * Every GET route of a record kind (bibliographic, inventory, loan,
  * collection, wishlist, export) must be read-enforced, and
@@ -89,7 +97,7 @@ return [
     'invite.redeem.submit' => $none('public', 'Invitation token exchange; no catalogue data.'),
     'invite.accept' => $none('public', 'No catalogue data.'),
     'invite.invalid' => $none('public', 'No catalogue data.'),
-    'invite.accept.submit' => $h3('public', 'The new account gets no household membership unless the invitation carries household assignments (optional, decided by an administrator when inviting). Default: no household access.'),
+    'invite.accept.submit' => $h3('public', 'The new account gets no household membership unless the invitation carries household assignments (optional, decided by an administrator when inviting). The memberships are created in the redeeming transaction, only for households that still exist, and audited by account id. A revoked, expired, used or unknown invitation grants nothing.'),
     'logout' => $none('account', 'No catalogue data.'),
     'account.password' => $none('account', 'Own account only.'),
     'account.password.update' => $none('account', 'Own account only.'),
@@ -97,62 +105,64 @@ return [
     // --- Catalogue: browse, search, add ------------------------------------------
     'books.index' => $h2('bibliographic', 'Search lists visible editions only; totals, pages and copy counts count visible copies only. The owner filter offers only users sharing a household with the viewer and matches on visible copies; the location filter offers only locations of households in scope; the language filter lists languages of visible editions.'),
     'books.create' => $h2('bibliographic', 'ISBN step: an ISBN that exists but is not visible is NOT reported as a duplicate with holdings; the user sees the shared bibliographic description only (no copy count, owner, household, location or link). Similar-work suggestions, and the author and publisher names offered while typing, come from visible records only. H3 adds the "add your copy" action for such an ISBN.'),
-    'books.store' => $read($h3('bibliographic', 'Same-title warnings, similar-work suggestions and the duplicate-ISBN answer reveal visible records only (an invisible duplicate shows the shared description without holdings); a location of another household is refused like one that does not exist. The first copy\'s household comes from Households\\CopyHousehold (phase H1). H3 adds: adopting an invisible duplicate ("add your copy").')),
+    'books.store' => $read($h3('bibliographic', 'Same-title warnings, similar-work suggestions and the duplicate-ISBN answer reveal visible records only (an invisible duplicate shows the shared description without holdings). H3: Catalogue\\BookService creates the work, edition and first copy in one guarded transaction; the first copy is placed by Catalogue\\CopyService like any other (household the user belongs to, location of that household). An ISBN held by another household is not entered again: the user adds a copy by ISBN (books.copies.*).')),
 
     // --- Works and editions (shared bibliographic records) ------------------------
     'works.show' => $h2('bibliographic', '404 unless the work is visible. Lists visible editions only; copy counts count visible copies.'),
-    'works.edit' => $read($h3('bibliographic', '404 unless the work is visible; then administrators or the creator (unchanged). H3 adds: a work also held by another household is edited by administrators only.')),
-    'works.update' => $read($h3('bibliographic', 'As works.edit, re-checked on submit (with the optimistic lock).')),
+    'works.edit' => $read($h3('bibliographic', '404 unless the work is visible. H3: administrators, or the creator while the work is exclusive to their households (no edition out of their view, no copy held by another household); otherwise 403. Seeing a work never implies editing it.')),
+    'works.update' => $read($h3('bibliographic', 'As works.edit, decided again by Catalogue\\BookService inside the guarded transaction, with the work row locked exclusively (inventory writes lock it shared, so a copy added by another household at that moment is seen), then the optimistic lock.')),
     'works.delete' => $none('admin', $adminOnly . ' Still refused while editions exist.'),
-    'editions.create' => $read($h3('bibliographic', '404 unless the work is visible. The cached-lookup prefill uses provider data only, never another household\'s records. H3 adds nothing to the form.')),
-    'editions.store' => $read($h3('bibliographic', '404 unless the work is visible. A duplicate ISBN held by an invisible edition gives the generic "ISBN already used" error without a link to it. H3 adds the write rule for shared works.')),
+    'editions.create' => $read($h3('bibliographic', '404 unless the work is visible. The cached-lookup prefill uses provider data only, never another household\'s records. H3: adding an edition needs catalogue.create and a visible work; it changes nothing of the work.')),
+    'editions.store' => $read($h3('bibliographic', '404 unless the work is visible, checked again in the guarded transaction. A duplicate ISBN held by an invisible edition gives the generic "ISBN already used" error without a link to it.')),
     'editions.show' => $h2('bibliographic', '404 unless the edition is visible. Copies, owners, locations, loan status and borrowers are shown for visible copies only; "other editions" lists visible editions; collections listed are those the viewer may see.'),
     'editions.open_library' => $h2('bibliographic', '404 unless the edition is visible (the page uses bibliographic fields only, never inventory).'),
-    'editions.edit' => $read($h3('bibliographic', '404 unless the edition is visible; then administrators or the creator (unchanged). H3 adds: an edition also held by another household is edited by administrators only.')),
-    'editions.update' => $read($h3('bibliographic', 'As editions.edit, re-checked on submit. An ISBN taken by an invisible edition gives the generic error without a link.')),
+    'editions.edit' => $read($h3('bibliographic', '404 unless the edition is visible. H3: administrators, or the creator while no copy of the edition is held outside their households; otherwise 403.')),
+    'editions.update' => $read($h3('bibliographic', 'As editions.edit, decided again by Catalogue\\BookService inside the guarded transaction with the edition row locked exclusively, then the optimistic lock. An ISBN taken by an invisible edition gives the generic error without a link.')),
     'editions.delete' => $none('admin', $adminOnly . ' Still refused while copies exist (any household).'),
 
     // --- Physical copies (household inventory) -----------------------------------
-    'copies.create' => $read($h3('inventory', '404 unless the edition is visible. The household choice is limited to the user\'s households (phase H1) and the locations offered to those households. H3 adds: reaching the form through the "add your copy" step of an ISBN held elsewhere, and locations narrowed to the chosen household.')),
-    'copies.store' => $read($h1('inventory', '404 unless the edition is visible. Household decided by Households\\CopyHousehold: the default household while the feature is disabled; with it enabled, administrators any household, others only their own households; the owner must be an administrator or a member of the household; the location must belong to it and be one the user can see. H3 adds: adopting an edition held elsewhere.')),
+    'copies.create' => $read($h3('inventory', '404 unless the edition is visible. The household choice is limited to the user\'s households and the locations offered are theirs, grouped by household; the form shows those of the chosen household.')),
+    'copies.store' => $read($h3('inventory', '404 unless the edition is visible. H3: Catalogue\\CopyService, in a guarded transaction: household from Households\\CopyHousehold (the default household while the feature is disabled; otherwise administrators any household, others only their own), the owner must be an administrator or a member of it, the location must belong to it, the inventory code is unique within it, and giving the copy to another owner needs copy.manage_any.')),
     'copies.edit' => $read($h3('inventory', '404 unless the copy is visible; then owner-only for members (copy.manage_own) or administrators. Household membership alone gives no right to edit. A copy left in a household its owner no longer belongs to is out of the owner\'s view.')),
-    'copies.update' => $read($h1('inventory', '404 unless the copy is visible; then owner or administrator (unchanged). A household change goes through Households\\CopyHousehold (same rules as copies.store) and is audited. H3 adds: the membership check is repeated under the row lock.')),
-    'copies.delete' => $read($h3('inventory', '404 unless the copy is visible; then owner or administrator. Copies with loan history are withdrawn, not deleted (unchanged). H3 adds the check under the row lock.')),
+    'copies.update' => $read($h3('inventory', 'As copies.edit, decided again by Catalogue\\CopyService with the copy row locked: a copy that left the user\'s households meanwhile is 404. A household change follows the rules of copies.store, is refused while the copy is on loan, and is audited. Optimistic lock.')),
+    'copies.delete' => $read($h3('inventory', 'As copies.update (404 out of scope, then owner or administrator), under the copy lock. Copies with loan history are withdrawn, not deleted.')),
+    'books.copies.create' => $read($h3('inventory', '"Add your copy" by ISBN. The edition is found from the ISBN on the server (never an id from the request). A visible edition redirects to its ordinary copy form; an ISBN that is not catalogued redirects to "add a book". Otherwise the form shows the shared bibliographic description only: no copy, count, owner, household, location or link, and the household and location choices are the user\'s own.')),
+    'books.copies.store' => $h3('inventory', 'As books.copies.create. Catalogue\\CopyService finds the edition by ISBN inside the guarded transaction and places the copy by the rules of copies.store (household the user belongs to, owner, location of that household, inventory code unique in the household). Viewers have no copy.manage_own and are refused by the route.'),
     'copies.show' => $h2('inventory', '404 unless the copy is visible. Location path, notes and price belong to the copy\'s household; borrower identity stays with whoever may manage the loan and the borrower.'),
 
     // --- Loans -------------------------------------------------------------------
-    'loans.create' => $read($h3('loan', '404 unless the copy is visible; then the copy\'s owner or an administrator. Borrowers offered: for an unrestricted viewer every active user; otherwise the active members of the copy\'s household, plus the free-text name. Users of other households are never listed.')),
-    'loans.store' => $read($h3('loan', 'As loans.create; a borrower account must be one the form offers (anything else is refused like an account that does not exist). H3 adds: LoanService repeats the household check under the copy lock.')),
+    'loans.create' => $read($h3('loan', '404 unless the copy is visible; then the copy\'s owner or an administrator. Borrowers offered: the active members of the copy\'s household (every active user only while the household feature is disabled), plus the free-text name. Users of other households are never listed.')),
+    'loans.store' => $read($h3('loan', 'As loans.create. H3: Loans\\LoanService, under the household locks and the copy lock: the lender must still reach the copy\'s household (404 otherwise), and a borrower account must be an active member of that household at that moment, whoever records the loan (administrators included); anything else is refused like an account that does not exist. A free-text name is always possible.')),
     'loans.index' => $h2('loan', '"Lent": loans of the user\'s own copies in households in scope. "Borrowed": the user\'s own loans, always (their own data), showing the title but no inventory details of a household they no longer reach. "All": administrators.'),
     'loans.return' => $read($h3('loan', '404 unless the loan\'s copy is visible; then the copy\'s owner or an administrator.')),
-    'loans.return.store' => $read($h3('loan', 'As loans.return. H3 adds the re-check under the row locks.')),
+    'loans.return.store' => $read($h3('loan', 'As loans.return, decided again under the household locks, the copy lock and the loan lock: a lender who no longer reaches the copy\'s household gets 404. Loan history is never rewritten when memberships change.')),
 
     // --- Wishlists (owner-only, unchanged) ----------------------------------------
     'wishlist.index' => $h2('wishlist', 'Own items only (unchanged). The "you own a copy" marker and links to editions apply to visible editions only.'),
     'wishlist.create' => $h2('wishlist', 'Pre-filling from an edition requires the edition to be visible (404 otherwise).'),
-    'wishlist.store' => $read($h3('wishlist', 'Starting an entry from an edition requires the edition to be visible (404 otherwise). H3 adds: linking by ISBN only to a visible edition (today the link may be stored but is never shown or exported while the edition is out of view).')),
+    'wishlist.store' => $read($h3('wishlist', 'Starting an entry from an edition requires the edition to be visible (404 otherwise), checked again in the guarded transaction. H3: an ISBN is linked only to an edition the user can see at that moment; a book held only by other households is never linked.')),
     'wishlist.edit' => $h2('wishlist', 'Own items only (unchanged); others get 404. Shows the user\'s own entry, never catalogue data.'),
-    'wishlist.update' => $h3('wishlist', 'Own items only; H3 adds ISBN auto-linking only to visible editions (the link is never shown or exported while the edition is out of view).'),
+    'wishlist.update' => $h3('wishlist', 'Own items only. H3: the link to a catalogue edition is kept only while that edition is visible and is otherwise resolved again, to a visible edition only, inside the guarded transaction.'),
     'wishlist.status' => $none('wishlist', 'Own items only (unchanged).'),
 
     // --- Collections (curated lists, not permission boundaries) -------------------
-    'collections.index' => $h2('collection', 'Private/shared visibility is unchanged and independent of households. Item counts count editions visible to the viewer; the owner of a collection is named only when the viewer shares a household with them.'),
-    'collections.create' => $h2('collection', 'Own collection (unchanged); an empty form with no catalogue data.'),
-    'collections.store' => $none('collection', 'Own collection (unchanged).'),
-    'collections.show' => $h2('collection', 'Collection visibility unchanged (owner, shared, administrator). Items are filtered per viewer: an edition the viewer cannot see is not listed and not counted, even in a shared collection. The owner is named only to household co-members.'),
-    'collections.edit' => $h2('collection', 'Owner or administrator (unchanged). The item count shown counts editions visible to the viewer.'),
-    'collections.update' => $none('collection', 'Owner or administrator (unchanged).'),
-    'collections.delete' => $none('collection', 'Owner or administrator (unchanged).'),
-    'collections.items.add' => $read($h3('collection', 'The edition must be visible to the user adding it (404 otherwise): a collection cannot be used to probe edition ids.')),
+    'collections.index' => $h2('collection', '"Mine": the user\'s own. "Shared with me": other users\' collections shared with a household in the viewer\'s scope (H3: sharing is with one explicitly chosen household); the total counts the same rows. "All": administrators. Item counts count editions visible to the viewer; the owner is named only to household co-members.'),
+    'collections.create' => $h2('collection', 'Own collection; an empty form with no catalogue data. The household choice lists the user\'s own households only.'),
+    'collections.store' => $h3('collection', 'Own collection. H3: a shared collection is shared with one household chosen explicitly: administrators any household, others only one they belong to (unknown and forbidden give the same error); the default household while the feature is disabled. Private collections have no household.'),
+    'collections.show' => $h2('collection', '404 unless the viewer is the owner, an administrator, or (shared) reaches the household the collection is shared with. Items are filtered per viewer: an edition the viewer cannot see is not listed and not counted. The owner is named only to household co-members.'),
+    'collections.edit' => $h2('collection', 'Owner or administrator, 404 for a collection the viewer cannot see. The item count shown counts editions visible to the viewer.'),
+    'collections.update' => $h3('collection', 'Owner or administrator, decided again under the collection lock. The household of a shared collection follows the rule of collections.store; a collection never becomes shared or changes household on its own.'),
+    'collections.delete' => $h3('collection', 'Owner or administrator, decided again under the collection lock (404 for a collection the user cannot see).'),
+    'collections.items.add' => $read($h3('collection', 'The edition must be visible to the user adding it, checked again in the guarded transaction (404 otherwise): a collection cannot be used to probe edition ids. An owner who left the household a collection is shared with cannot add to it.')),
     'collections.items.add_from_edition' => $read($h3('collection', 'As collections.items.add.')),
-    'collections.items.remove' => $none('collection', 'Owner or administrator (unchanged); removing needs no visibility.'),
-    'collections.items.move' => $h3('collection', 'Ordering works on the items visible to the manager.'),
+    'collections.items.remove' => $h3('collection', 'Owner or administrator. H3: an item the user cannot see is answered like one that is not in the collection (404).'),
+    'collections.items.move' => $h3('collection', 'Ordering moves a book among the items visible to the manager; items out of their view keep their places, and an invisible item is 404.'),
 
     // --- Export ------------------------------------------------------------------
     'export.index' => $h2('export', 'Lists dataset names only; no record data.'),
     'export.personal.json' => $h2('export', 'Own data only (no user parameter, unchanged). Copies: the user\'s copies in households in scope, with locations of those households. Loans: of own visible copies, and every loan where the user is the borrower (title and dates only when the copy is out of view). Collection items: visible editions only. Wishlist links to catalogue records only for visible ones.'),
     'export.personal.csv' => $h2('export', 'As export.personal.json.'),
-    'export.catalogue.json' => $h3('admin', $adminOnly . ' Gains household columns for copies and locations; memberships are not exported.'),
+    'export.catalogue.json' => $h3('admin', 'Administrators only (route permission); unrestricted scope. With households enabled, copies, locations and shared collections carry household_id and the household name; memberships are never exported. With the feature disabled the columns are unchanged.'),
     'export.catalogue.csv' => $h3('admin', 'As export.catalogue.json.'),
 
     // --- Audit log (read-only) ----------------------------------------------------
@@ -160,7 +170,7 @@ return [
     'admin.audit.show' => $none('admin', $adminOnly),
 
     // --- Covers ------------------------------------------------------------------
-    'covers.store' => $read($h3('bibliographic', '404 unless the edition is visible; then administrators or the creator (unchanged). H3 adds: administrators only when another household also holds the edition.')),
+    'covers.store' => $read($h3('bibliographic', '404 unless the edition is visible. H3: covers follow the editing rule of their edition (editions.edit), decided again by Catalogue\\BookService with the edition locked.')),
     'covers.show' => $h2('bibliographic', '404 unless the cover\'s edition is visible, checked before the ETag is compared. With households enabled it is served with "Cache-Control: private, no-cache" and an ETag, so a removed membership takes effect on the next request instead of after the cache lifetime.'),
     'covers.delete' => $read($h3('bibliographic', 'As covers.store.')),
 
@@ -180,13 +190,13 @@ return [
 
     // --- Administration ------------------------------------------------------------
     'admin.invitations' => $none('admin', $adminOnly),
-    'admin.invitations.create' => $h3('admin', $adminOnly . ' Optional household assignments for the invited account; default none.'),
-    'admin.invitations.store' => $h3('admin', 'As admin.invitations.create; assignments are stored with the invitation and applied only when it is redeemed.'),
+    'admin.invitations.create' => $h3('admin', 'Administrators only (route permission); unrestricted scope. Optional household assignments for the invited account; default none.'),
+    'admin.invitations.store' => $h3('admin', 'As admin.invitations.create; the households are locked and must exist; the assignments are stored with the invitation and applied only when it is redeemed.'),
     'admin.invitations.revoke' => $none('admin', $adminOnly),
-    'admin.invitations.replace' => $none('admin', $adminOnly),
+    'admin.invitations.replace' => $h3('admin', 'Administrators only (route permission); unrestricted scope. The new invitation keeps the assignments whose household still exists.'),
     'admin.users' => $none('admin', $adminOnly),
     'admin.users.create' => $none('admin', $adminOnly),
-    'admin.users.store' => $h1('admin', $adminOnly . ' A new account has no household membership (nothing is assigned on creation).'),
+    'admin.users.store' => $h3('admin', 'Administrators only (route permission); unrestricted scope. A new account has no household membership unless the administrator ticks households: those memberships are created with the account in one transaction and audited by account id.'),
     'admin.users.edit' => $none('admin', $adminOnly),
     'admin.users.update' => $none('admin', $adminOnly . ' Deactivating an account ends its sessions (unchanged); HouseholdScope gives a deactivated account no household.'),
     'admin.users.password' => $none('admin', $adminOnly),
@@ -196,7 +206,7 @@ return [
     'admin.households.store' => $h1('household', $householdAdmin . ' Audited (household.created).'),
     'admin.households.edit' => $h1('household', $householdAdmin . ' Lists members (name, e-mail, role): administrators only.'),
     'admin.households.update' => $h1('household', $householdAdmin . ' Optimistic lock; audited (household.updated).'),
-    'admin.households.delete' => $h1('household', $householdAdmin . ' Refused for the default household and while members, copies or locations remain; audited (household.deleted).'),
+    'admin.households.delete' => $h1('household', $householdAdmin . ' Refused for the default household and while members, copies, locations or shared collections remain; audited (household.deleted).'),
     'admin.households.members.add' => $h1('household', $householdAdmin . ' Active accounts only; audited by user id (household.member_added). Applies to the member\'s next request.'),
     'admin.households.members.remove' => $h1('household', $householdAdmin . ' The member\'s copies stay in the household; audited (household.member_removed). Applies to the member\'s next request.'),
     'admin.categories' => $none('admin', $adminOnly . ' Categories are a shared vocabulary without inventory data.'),
@@ -204,9 +214,9 @@ return [
     'admin.categories.edit' => $none('admin', $adminOnly),
     'admin.categories.update' => $none('admin', $adminOnly),
     'admin.categories.delete' => $none('admin', $adminOnly),
-    'admin.locations' => $h3('admin', $adminOnly . ' One independent location tree per household, managed per household.'),
-    'admin.locations.store' => $h1('admin', $adminOnly . ' A child location inherits its parent\'s household; a new root goes to the default household. H3 adds an explicit household for roots.'),
+    'admin.locations' => $h3('admin', 'Administrators only (route permission); unrestricted scope. One independent location tree per household, shown per household.'),
+    'admin.locations.store' => $h3('admin', 'Administrators only (route permission); unrestricted scope. Households\\LocationService: a root belongs to the household chosen explicitly (the default household while the feature is disabled); a child always belongs to its parent\'s household.'),
     'admin.locations.edit' => $h3('admin', $adminOnly),
-    'admin.locations.update' => $h3('admin', $adminOnly . ' A location cannot be moved under a parent of another household.'),
+    'admin.locations.update' => $h3('admin', 'Administrators only (route permission); unrestricted scope. A location is never moved under a parent of another household and never changes household (moving inventory between households is phase H4).'),
     'admin.locations.delete' => $none('admin', $adminOnly . ' Still refused while copies use the location or it has children.'),
 ];

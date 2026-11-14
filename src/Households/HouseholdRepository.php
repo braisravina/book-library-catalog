@@ -55,6 +55,26 @@ final class HouseholdRepository extends Repository
         return $this->one('SELECT id, name, description, system_key, row_version FROM households WHERE id = :id FOR UPDATE', ['id' => $id]);
     }
 
+    /**
+     * Shared lock on every household row, in id order (Households\WriteGuard).
+     * Membership changes and deletions take the exclusive lock of their
+     * household (lock()), so they wait for the writes in flight and are
+     * seen by every write that starts after them. LOCK IN SHARE MODE is
+     * the spelling both MySQL 8.4 and MariaDB 11.4 accept.
+     *
+     * @return list<int> the households that exist
+     */
+    public function lockAllShared(): array
+    {
+        return array_map('intval', array_column($this->many('SELECT id FROM households ORDER BY id LOCK IN SHARE MODE'), 'id'));
+    }
+
+    /** Serialises location tree mutations before any account or location locks. */
+    public function lockAllExclusive(): void
+    {
+        $this->many('SELECT id FROM households ORDER BY id FOR UPDATE');
+    }
+
     public function exists(int $id): bool
     {
         return $this->scalar('SELECT 1 FROM households WHERE id = :id', ['id' => $id]) !== null;
@@ -111,6 +131,14 @@ final class HouseholdRepository extends Repository
     public function locationCount(int $id): int
     {
         return (int) $this->scalar('SELECT COUNT(*) FROM locations WHERE household_id = :id', ['id' => $id]);
+    }
+
+    /**
+     * Collections shared with the household (a deletion guard: never shown).
+     */
+    public function collectionCount(int $id): int
+    {
+        return (int) $this->scalar('SELECT COUNT(*) FROM collections WHERE household_id = :id', ['id' => $id]);
     }
 
     public function memberCount(int $id): int
@@ -194,12 +222,50 @@ final class HouseholdRepository extends Repository
         return $this->scalar('SELECT 1 FROM household_members WHERE household_id = :h AND user_id = :u', ['h' => $householdId, 'u' => $userId]) !== null;
     }
 
-    public function addMember(int $householdId, int $userId, int $addedBy): void
+    public function addMember(int $householdId, int $userId, ?int $addedBy): void
     {
         $this->run(
             'INSERT INTO household_members (household_id, user_id, added_by, created_at) VALUES (:h, :u, :a, UTC_TIMESTAMP())',
             ['h' => $householdId, 'u' => $userId, 'a' => $addedBy],
         );
+    }
+
+    /**
+     * Household ids from a form (strings), reduced to distinct positive
+     * integers in ascending order: the order household rows are locked in.
+     *
+     * @param iterable<mixed> $raw
+     *
+     * @return list<int>|null null when a value is not an id
+     */
+    public static function idList(iterable $raw): ?array
+    {
+        $ids = [];
+        foreach ($raw as $value) {
+            if (!is_string($value) && !is_int($value) || preg_match('/^[1-9]\d{0,9}$/', (string) $value) !== 1) {
+                return null;
+            }
+            $ids[(int) $value] = true;
+        }
+        $ids = array_keys($ids);
+        sort($ids);
+
+        return $ids;
+    }
+
+    /**
+     * Every household as id => name (administration forms).
+     *
+     * @return array<string, string>
+     */
+    public function names(): array
+    {
+        $out = [];
+        foreach ($this->many('SELECT id, name FROM households ORDER BY name, id LIMIT ' . self::MAX_LISTED) as $row) {
+            $out[(string) $row['id']] = (string) $row['name'];
+        }
+
+        return $out;
     }
 
     public function removeMember(int $householdId, int $userId): bool

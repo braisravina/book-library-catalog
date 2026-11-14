@@ -246,7 +246,9 @@ abstract class IntegrationTestCase extends TestCase
     }
 
     /**
-     * Creates a book directly through the service layer.
+     * Creates a book directly through the repositories: a fixture, placed
+     * exactly where the test says (any owner, any household), without the
+     * rules a request is subject to.
      *
      * @param array<string, mixed> $edition overrides for the edition fields
      * @param list<string>         $authors
@@ -263,12 +265,33 @@ abstract class IntegrationTestCase extends TestCase
             $edition['title'] ?? $title, '', $edition['publisher'] ?? '', (string) ($edition['year'] ?? ''), '', $edition['language'] ?? '',
             '', '', $isbn ?? '', '', '', [],
         );
-        $copy = $copyOwner === null ? null : new \DigitalLibrary\Catalogue\Input\CopyInput((string) $copyOwner, $locationId === null ? '' : (string) $locationId, '', '', 'available', false, '', '', '', '', '');
 
+        $workId = $services->works()->create($work->toRecord(), $userId);
+        $services->works()->setAuthors($workId, array_map(
+            static fn (array $a): array => ['author_id' => $services->authors()->findOrCreate($a['name'], $userId), 'role' => $a['role']],
+            $work->authors,
+        ));
+        $services->works()->setCategories($workId, $work->categoryIds);
+        $publisherId = $editionInput->publisher === '' ? null : $services->publishers()->findOrCreate($editionInput->publisher);
+        $editionId = $services->editions()->create($workId, $editionInput->toRecord($publisherId), $userId);
+
+        return ['work_id' => $workId, 'edition_id' => $editionId, 'copy_id' => $copyOwner === null ? null : $this->makeCopy($editionId, $copyOwner, $householdId, $locationId)];
+    }
+
+    /**
+     * A copy placed directly in a household (the default one unless the
+     * test names another); a fixture, like makeBook().
+     */
+    protected function makeCopy(int $editionId, int $ownerId, ?int $householdId = null, ?int $locationId = null, ?string $inventoryCode = null): int
+    {
         // A copy belongs to a household: the default one unless the test names another.
-        $household = $copy === null ? null : ($householdId ?? $services->households()->defaultId());
+        $householdId ??= $this->defaultHouseholdId();
+        $this->pdo()->prepare(
+            "INSERT INTO copies (edition_id, owner_user_id, household_id, location_id, inventory_code, status, is_signed, created_by, updated_by, created_at, updated_at)
+             VALUES (:e, :o, :h, :l, :c, 'available', 0, :cb, :ub, UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+        )->execute(['e' => $editionId, 'o' => $ownerId, 'h' => $householdId === 0 ? null : $householdId, 'l' => $locationId, 'c' => $inventoryCode, 'cb' => $ownerId, 'ub' => $ownerId]);
 
-        return $services->books()->createBook($work, $editionInput, $copy, $userId, null, $household);
+        return (int) $this->pdo()->lastInsertId();
     }
 
     /**

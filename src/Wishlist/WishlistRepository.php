@@ -33,14 +33,6 @@ final class WishlistRepository extends Repository
     }
 
     /**
-     * Serialises wishlist changes of one user (duplicate checks run under it).
-     */
-    public function lockOwner(int $userId): bool
-    {
-        return $this->scalar('SELECT id FROM users WHERE id = :id FOR UPDATE', ['id' => $userId]) !== null;
-    }
-
-    /**
      * @return array<string, mixed>|null
      */
     public function find(int $id, Visibility $visibility): ?array
@@ -85,13 +77,37 @@ final class WishlistRepository extends Repository
     }
 
     /**
-     * Catalogue edition (and its work) holding this ISBN-13, if any.
+     * The catalogue edition (and its work) holding this ISBN-13, when the
+     * viewer may see it. An edition only other households hold is not
+     * linked: the entry keeps the ISBN and gains the link once the book is
+     * in the user's own library.
      *
      * @return array{id: int, work_id: int}|null
      */
-    public function editionForIsbn(string $isbn13): ?array
+    public function editionForIsbn(string $isbn13, Visibility $visibility): ?array
     {
-        $row = $this->one('SELECT id, work_id FROM editions WHERE isbn_13 = :isbn', ['isbn' => $isbn13]);
+        $params = new Params();
+        $row = $this->one(
+            'SELECT e.id, e.work_id FROM editions e WHERE e.isbn_13 = ' . $params->add($isbn13) . ' AND ' . $visibility->edition('e', $params),
+            $params->all(),
+        );
+
+        return $row === null ? null : ['id' => (int) $row['id'], 'work_id' => (int) $row['work_id']];
+    }
+
+    /**
+     * The edition (and its work) by id, when the viewer may see it: the
+     * only way an entry is linked to, or stays linked to, a catalogue record.
+     *
+     * @return array{id: int, work_id: int}|null
+     */
+    public function visibleEdition(int $editionId, Visibility $visibility): ?array
+    {
+        $params = new Params();
+        $row = $this->one(
+            'SELECT e.id, e.work_id FROM editions e WHERE e.id = ' . $params->add($editionId) . ' AND ' . $visibility->edition('e', $params),
+            $params->all(),
+        );
 
         return $row === null ? null : ['id' => (int) $row['id'], 'work_id' => (int) $row['work_id']];
     }

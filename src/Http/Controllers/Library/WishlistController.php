@@ -69,14 +69,14 @@ final class WishlistController extends Controller
             return $this->form(null, $input, $validator->errors(), $edition, 422);
         }
         try {
-            $id = $this->services->wishlistService()->add(
-                $user,
-                $input,
-                $edition === null ? null : ['id' => (int) $edition['id'], 'work_id' => (int) $edition['work_id']],
-            );
+            $id = $this->services->wishlistService()->add($user, $input, $edition === null ? null : (int) $edition['id']);
         } catch (WishlistException $e) {
             if ($e->getMessage() === 'wishlist.error.forbidden') {
                 throw HttpException::forbidden();
+            }
+            if ($e->getMessage() === 'wishlist.error.edition_not_found') {
+                // The edition left the user's view (or was deleted) meanwhile.
+                throw HttpException::notFound();
             }
 
             return $this->form(null, $input, [], $edition, 409, $e->getMessage(), $e->existingId);

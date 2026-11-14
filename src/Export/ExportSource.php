@@ -142,8 +142,9 @@ abstract class ExportSource
         foreach ($this->keyset(
             'SELECT c.id, c.edition_id, e.title AS edition_title, c.owner_user_id, u.display_name AS owner, c.location_id,
                     c.status, c.copy_condition, c.inventory_code, c.is_signed, c.acquired_on, c.acquisition_source,
-                    c.purchase_price_cents, c.currency, c.notes, c.created_at, c.updated_at
-             FROM copies c JOIN editions e ON e.id = c.edition_id JOIN users u ON u.id = c.owner_user_id',
+                    c.purchase_price_cents, c.currency, c.notes, c.created_at, c.updated_at, c.household_id, h.name AS household
+             FROM copies c JOIN editions e ON e.id = c.edition_id JOIN users u ON u.id = c.owner_user_id
+             LEFT JOIN households h ON h.id = c.household_id',
             $where,
             $params,
             [['c.id', 'id', 0]],
@@ -165,6 +166,9 @@ abstract class ExportSource
                 'price' => self::money($row['purchase_price_cents']),
                 'currency' => $row['currency'],
                 'notes' => $row['notes'],
+                // Emitted only by datasets that list them (the administrator export with households in use).
+                'household_id' => $row['household_id'] === null ? null : (int) $row['household_id'],
+                'household' => $row['household'],
                 'created_at' => self::dateTime($row['created_at']),
                 'updated_at' => self::dateTime($row['updated_at']),
             ];
@@ -186,8 +190,9 @@ abstract class ExportSource
     protected function collectionRows(string $where, array $params): \Generator
     {
         foreach ($this->keyset(
-            'SELECT c.id, c.owner_user_id, u.display_name AS owner, c.name, c.description, c.visibility, c.created_at, c.updated_at
-             FROM collections c JOIN users u ON u.id = c.owner_user_id',
+            'SELECT c.id, c.owner_user_id, u.display_name AS owner, c.name, c.description, c.visibility, c.created_at, c.updated_at,
+                    c.household_id, h.name AS household
+             FROM collections c JOIN users u ON u.id = c.owner_user_id LEFT JOIN households h ON h.id = c.household_id',
             $where,
             $params,
             [['c.id', 'id', 0]],
@@ -199,6 +204,8 @@ abstract class ExportSource
                 'name' => $row['name'],
                 'description' => $row['description'],
                 'visibility' => $row['visibility'],
+                'household_id' => $row['household_id'] === null ? null : (int) $row['household_id'],
+                'household' => $row['household'],
                 'created_at' => self::dateTime($row['created_at']),
                 'updated_at' => self::dateTime($row['updated_at']),
             ];

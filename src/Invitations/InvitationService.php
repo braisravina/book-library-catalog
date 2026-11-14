@@ -8,6 +8,7 @@ use DigitalLibrary\Auth\User;
 use DigitalLibrary\Auth\UserRepository;
 use DigitalLibrary\Catalogue\Repository\Repository;
 use DigitalLibrary\Database\Transaction;
+use DigitalLibrary\Households\HouseholdRepository;
 use DigitalLibrary\Security\Authorizer;
 use DigitalLibrary\Security\Permission;
 use DigitalLibrary\Security\Role;
@@ -22,6 +23,16 @@ use PDO;
  * marks the invitation accepted with a conditional UPDATE, so two
  * concurrent redemptions cannot both succeed. Every redemption failure is
  * reported with the same generic message.
+ *
+ * Households (phase H3). An invitation may carry the households the new
+ * account will join; by default it carries none and the account belongs
+ * to no household. The assignments are only a stored intention until the
+ * invitation is redeemed: the memberships are created in the redeeming
+ * transaction, after the same checks as the account itself, so a revoked,
+ * expired, used or unknown invitation grants nothing. A household deleted
+ * in the meantime is gone from the invitation (its rows are removed with
+ * it) and is never granted; replacing an invitation carries the remaining
+ * assignments over to the new one.
  */
 final class InvitationService
 {
@@ -35,17 +46,28 @@ final class InvitationService
         private readonly UserRepository $users,
         private readonly Authorizer $authorizer,
         private readonly int $maxDays = 30,
+        private readonly ?HouseholdRepository $households = null,
+        private readonly bool $householdsEnabled = false,
     ) {
     }
 
     /**
-     * @return array{id: int, token: string, expires_at: string}
+     * @param list<int> $householdIds households the invited account will join (distinct, ascending);
+     *                                ignored while the household feature is disabled
+     *
+     * @return array{id: int, token: string, expires_at: string, household_ids: list<int>}
      *
      * @throws InvitationException
      */
-    public function issue(User $admin, string $email, Role $role, string $expiresOn): array
+    public function issue(User $admin, string $email, Role $role, string $expiresOn, array $householdIds = []): array
     {
         $this->requireAdmin($admin);
+        if (!$this->householdsEnabled || $this->households === null) {
+            $householdIds = [];
+        }
+        if ($householdIds !== [] && !$this->authorizer->canManageHouseholds($admin)) {
+            throw new InvitationException('invitations.error.forbidden');
+        }
         $email = self::normaliseEmail($email);
         $expiresAt = $this->expiry($expiresOn);
         if (!in_array($role, self::INVITABLE_ROLES, true)) {
@@ -53,7 +75,13 @@ final class InvitationService
         }
         $token = InvitationToken::generate();
 
-        $id = $this->guard(fn (): int => Transaction::run($this->pdo, function () use ($admin, $email, $role, $expiresAt, $token): int {
+        $id = $this->guard(fn (): int => Transaction::run($this->pdo, function () use ($admin, $email, $role, $expiresAt, $token, $householdIds): int {
+            // Locked in id order: a household deleted at this moment refuses the invitation.
+            foreach ($householdIds as $householdId) {
+                if ($this->households->lock($householdId) === null) {
+                    throw new InvitationException('invitations.error.household');
+                }
+            }
             if ($this->users->emailExists($email)) {
                 throw new InvitationException('invitations.error.email_registered');
             }
@@ -66,10 +94,13 @@ final class InvitationService
                 $this->invitations->revoke((int) $open['id'], $admin->id);
             }
 
-            return $this->invitations->create($email, self::roleId($role), InvitationToken::hash($token), $admin->id, $expiresAt);
+            $id = $this->invitations->create($email, self::roleId($role), InvitationToken::hash($token), $admin->id, $expiresAt);
+            $this->invitations->addHouseholds($id, $householdIds);
+
+            return $id;
         }));
 
-        return ['id' => $id, 'token' => $token, 'expires_at' => $expiresAt];
+        return ['id' => $id, 'token' => $token, 'expires_at' => $expiresAt, 'household_ids' => $householdIds];
     }
 
     /**
@@ -91,7 +122,10 @@ final class InvitationService
      * Revokes an unused invitation and issues a new token for the same
      * address and role (e.g. the link was lost or has expired).
      *
-     * @return array{id: int, token: string, expires_at: string, email: string, role: Role}
+     * The household assignments that are still valid (their household
+     * exists) are carried over to the new invitation.
+     *
+     * @return array{id: int, token: string, expires_at: string, email: string, role: Role, household_ids: list<int>}
      *
      * @throws InvitationException
      */
@@ -102,6 +136,7 @@ final class InvitationService
         $token = InvitationToken::generate();
 
         return $this->guard(fn (): array => Transaction::run($this->pdo, function () use ($admin, $id, $expiresAt, $token): array {
+            $this->lockAssignmentHouseholds();
             $row = $this->invitations->lock($id) ?? throw new InvitationException('invitations.error.not_found');
             if ($row['accepted_at'] !== null) {
                 throw new InvitationException('invitations.error.not_open');
@@ -118,8 +153,10 @@ final class InvitationService
             $role = self::roleFromId((int) $row['role_id']);
             $newId = $this->invitations->create($email, self::roleId($role), InvitationToken::hash($token), $admin->id, $expiresAt);
             $this->invitations->setReplacement($id, $newId);
+            $householdIds = $this->existingHouseholds($this->invitations->householdIds($id));
+            $this->invitations->addHouseholds($newId, $householdIds);
 
-            return ['id' => $newId, 'token' => $token, 'expires_at' => $expiresAt, 'email' => $email, 'role' => $role];
+            return ['id' => $newId, 'token' => $token, 'expires_at' => $expiresAt, 'email' => $email, 'role' => $role, 'household_ids' => $householdIds];
         }));
     }
 
@@ -138,13 +175,15 @@ final class InvitationService
     /**
      * Creates the invited account. The invitee must type the invited address.
      *
-     * @return array{user_id: int, invitation_id: int, role: Role}
+     * @return array{user_id: int, invitation_id: int, role: Role, household_ids: list<int>, invited_by: ?int}
+     *         household_ids: the memberships created with the account
      *
      * @throws InvitationException always with GENERIC_ERROR, except 'invitations.error.email_mismatch'
      */
     public function redeem(string $tokenHash, string $email, string $displayName, string $passwordHash, string $locale): array
     {
         return $this->guard(fn (): array => Transaction::run($this->pdo, function () use ($tokenHash, $email, $displayName, $passwordHash, $locale): array {
+            $this->lockAssignmentHouseholds();
             $row = $this->invitations->lockByHash($tokenHash) ?? throw new InvitationException(self::GENERIC_ERROR, 'unknown');
             if ($row['accepted_at'] !== null) {
                 throw new InvitationException(self::GENERIC_ERROR, 'used');
@@ -167,9 +206,45 @@ final class InvitationService
                 // Unreachable under the row lock; rolls back the new account if it ever happens.
                 throw new InvitationException(self::GENERIC_ERROR, 'race');
             }
+            // The intended households, in the same transaction as the account:
+            // every failure above has already refused, so nothing is granted
+            // without a valid invitation. Household locks were taken before
+            // the invitation/account locks; missing households are skipped.
+            $invitedBy = $row['invited_by'] === null ? null : (int) $row['invited_by'];
+            $householdIds = $this->existingHouseholds($this->invitations->householdIds((int) $row['id']));
+            foreach ($householdIds as $householdId) {
+                $this->households?->addMember($householdId, $userId, $invitedBy);
+            }
 
-            return ['user_id' => $userId, 'invitation_id' => (int) $row['id'], 'role' => $role];
+            return ['user_id' => $userId, 'invitation_id' => (int) $row['id'], 'role' => $role, 'household_ids' => $householdIds, 'invited_by' => $invitedBy];
         }));
+    }
+
+    /**
+     * Existing assignments, protected by lockAssignmentHouseholds() before
+     * invitation or account locks. No household lock is upgraded here.
+     *
+     * @param list<int> $householdIds ascending
+     *
+     * @return list<int>
+     */
+    private function existingHouseholds(array $householdIds): array
+    {
+        if (!$this->householdsEnabled || $this->households === null) {
+            return [];
+        }
+
+        return array_values(array_filter($householdIds, fn (int $id): bool => $this->households->exists($id)));
+    }
+
+    private function lockAssignmentHouseholds(): void
+    {
+        if ($this->householdsEnabled) {
+            // Household deletion cascades into invitation assignments. Lock
+            // households first, before invitation/account rows, to avoid an
+            // inverse lock order during replacement or redemption.
+            $this->households?->lockAllShared();
+        }
     }
 
     public static function normaliseEmail(string $email): string

@@ -117,6 +117,10 @@ return static function (Router $router, Services $s): void {
     $router->get('/copies/{id:\d+}/edit', $copies->edit(...), $copyOwn, 'copies.edit');
     $router->post('/copies/{id:\d+}', $copies->update(...), $copyOwn, 'copies.update');
     $router->post('/copies/{id:\d+}/delete', $copies->destroy(...), $copyOwn, 'copies.delete');
+    // "Add your copy" of a book that is already catalogued, by ISBN (phase H3):
+    // the edition is found from the ISBN on the server, never from an id.
+    $router->get('/books/copies/new', $copies->createByIsbn(...), $copyOwn, 'books.copies.create');
+    $router->post('/books/copies', $copies->storeByIsbn(...), $copyOwn, 'books.copies.store');
 
     // Copy details and lending (Phase 4A). Object-level checks in LoanController/LoanService.
     $loanOwn = ['auth', 'can:loan.manage_own'];

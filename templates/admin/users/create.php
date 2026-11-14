@@ -4,6 +4,8 @@
 /** @var array<string, list<string>> $errors */
 /** @var list<\DigitalLibrary\Security\Role> $roles */
 /** @var list<string> $locales */
+/** @var array<string, string> $households  id => name; empty while the household feature is disabled */
+/** @var list<string> $selected_households */
 $invalid = static fn (string $f): string => !empty($errors[$f]) ? ' aria-invalid="true" aria-describedby="' . $f . '-errors"' : '';
 ?>
 <section class="form-card">
@@ -44,6 +46,9 @@ $invalid = static fn (string $f): string => !empty($errors[$f]) ? ' aria-invalid
             <p class="hint"><?= $view->t('account.password.help', ['min' => \DigitalLibrary\Security\PasswordPolicy::MIN_LENGTH]) ?></p>
             <?= $view->partial('partials/field_errors', ['messages' => $errors['password'] ?? [], 'id' => 'password-errors']) ?>
         </div>
+        <?php if (($households ?? []) !== []): ?>
+            <?= $view->partial('partials/household_checkboxes', ['households' => $households, 'selected' => $selected_households ?? [], 'errors' => $errors, 'hint' => 'households.assign.user_hint']) ?>
+        <?php endif; ?>
         <div class="form-actions">
             <button type="submit" class="button button-primary"><?= $view->t('actions.create') ?></button>
             <a class="button" href="/admin/users"><?= $view->t('actions.cancel') ?></a>

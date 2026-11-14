@@ -19,8 +19,8 @@ use DigitalLibrary\Validation\Validator;
  * Access: the routes require household.manage (administrators); every
  * action also requires the household feature to be enabled and answers
  * 404 otherwise, and HouseholdService checks the permission again. The
- * feature cannot be enabled in production in phase H1: memberships do not
- * restrict what users see until phases H2/H3.
+ * feature cannot be enabled in production (ConfigValidator): it stays
+ * development-only until the owner releases it.
  */
 final class HouseholdController extends Controller
 {

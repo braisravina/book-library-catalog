@@ -100,9 +100,48 @@ final class CopyRepository extends Repository
         $this->run('DELETE FROM copies WHERE id = :id', ['id' => $id]);
     }
 
-    public function inventoryCodeTaken(string $code, ?int $excludeId = null): bool
+    /**
+     * Locks the copy row for the rest of the transaction and returns it as
+     * it is now (Households\WriteGuard lock order: after its edition).
+     *
+     * @return array<string, mixed>|null
+     */
+    public function lock(int $id): ?array
     {
-        return $this->scalar('SELECT 1 FROM copies WHERE inventory_code = :c AND id <> :x', ['c' => $code, 'x' => $excludeId ?? 0]) !== null;
+        return $this->one('SELECT * FROM copies WHERE id = :id FOR UPDATE', ['id' => $id]);
+    }
+
+    /**
+     * The edition of a copy (it never changes), to lock the edition before
+     * the copy. Not a read of the copy for a viewer: the caller checks the
+     * locked row against the actor's households before anything else.
+     */
+    public function editionIdOf(int $id): ?int
+    {
+        $editionId = $this->scalar('SELECT edition_id FROM copies WHERE id = :id', ['id' => $id]);
+
+        return $editionId === null ? null : (int) $editionId;
+    }
+
+    /**
+     * Whether another copy already uses the inventory code.
+     *
+     * With $withinHousehold the question is asked inside one household
+     * (null: among the copies that have none), which is what the unique
+     * index enforces: another household's code is neither seen nor
+     * reported. Without it every copy is considered, which is the rule of
+     * an installation that does not use households.
+     */
+    public function inventoryCodeTaken(string $code, ?int $excludeId, bool $withinHousehold, ?int $householdId): bool
+    {
+        $sql = 'SELECT 1 FROM copies WHERE inventory_code = :c AND id <> :x';
+        $params = ['c' => $code, 'x' => $excludeId ?? 0];
+        if ($withinHousehold) {
+            $sql .= ' AND inventory_scope_id = :s';
+            $params['s'] = $householdId ?? 0;
+        }
+
+        return $this->scalar($sql . ' LIMIT 1', $params) !== null;
     }
 
     /**

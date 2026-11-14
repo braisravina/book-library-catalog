@@ -298,16 +298,17 @@ final class ConfigValidator
     }
 
     /**
-     * Household access control is development-only until it is complete:
-     * reads are scoped (phase H2), but the rules for changing shared
-     * records and the workflows around them are not (phase H3). Production
-     * therefore refuses to serve with the feature switched on (and
-     * Services::householdsEnabled() ignores the setting there as well).
+     * Household access control is development-only until the owner
+     * releases it: reads (phase H2) and writes (phase H3) are scoped, but
+     * the release also needs phase H4 and an explicit owner decision;
+     * completing H3 does not authorize one. Production therefore refuses to
+     * serve with the feature switched on (and Services::householdsEnabled()
+     * ignores the setting there as well).
      */
     private function households(Config $config, bool $production): void
     {
         if ($production && $config->bool('HOUSEHOLDS_ENABLED', false)) {
-            $this->error('HOUSEHOLDS_ENABLED', 'must not be enabled in production: household access control is incomplete (reads are isolated, but the write rules of phase H3 are not implemented).');
+            $this->error('HOUSEHOLDS_ENABLED', 'must not be enabled in production: household access control has not been released for production (reads and writes are isolated since phases H2 and H3, but the feature stays development-only until the owner releases it).');
         }
     }
 

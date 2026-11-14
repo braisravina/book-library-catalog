@@ -59,7 +59,7 @@ final class ExportController extends Controller
 
     public function catalogueJson(Request $request): Response
     {
-        $export = new CatalogueExport($this->services->pdo());
+        $export = new CatalogueExport($this->services->pdo(), $this->services->householdsEnabled());
         $this->audit($request, 'export.catalogue', 'catalogue', null, ['format' => 'json', 'dataset' => 'all']);
 
         return $this->json('catalogue', ['scope' => 'catalogue'], array_values($export->datasets()), 'library-catalogue');
@@ -70,7 +70,7 @@ final class ExportController extends Controller
      */
     public function catalogueCsv(Request $request, array $params): Response
     {
-        $dataset = (new CatalogueExport($this->services->pdo()))->datasets()[$params['dataset'] ?? ''] ?? throw HttpException::notFound();
+        $dataset = (new CatalogueExport($this->services->pdo(), $this->services->householdsEnabled()))->datasets()[$params['dataset'] ?? ''] ?? throw HttpException::notFound();
         $this->audit($request, 'export.catalogue', 'catalogue', null, ['format' => 'csv', 'dataset' => $dataset->name]);
 
         return $this->csv($dataset, 'library-catalogue-' . $dataset->name);

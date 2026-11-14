@@ -33,6 +33,24 @@ final class Authorizer
     }
 
     /**
+     * Changing a shared bibliographic record (work, edition, cover), phase
+     * H3. Administrators change any record. A member changes a record they
+     * created only while it is not held outside their households
+     * ($heldElsewhere, decided by WorkRepository::sharedBeyondView() /
+     * EditionRepository::heldOutsideView()): once another household holds
+     * the book, its description is an administrator's to change. Being
+     * able to see a record never grants this.
+     */
+    public function canEditSharedRecord(?User $user, ?int $createdBy, bool $heldElsewhere): bool
+    {
+        if ($this->can($user, Permission::CatalogueEditAny)) {
+            return true;
+        }
+
+        return !$heldElsewhere && $this->canEditRecord($user, $createdBy);
+    }
+
+    /**
      * Physical copies: admins manage any copy, members manage copies they own.
      */
     public function canManageCopy(?User $user, int $ownerId): bool
@@ -78,9 +96,13 @@ final class Authorizer
 
     /**
      * Private collections: owner and collection.manage_any. Shared
-     * collections: additionally every user with catalogue.view.
+     * collections: additionally every user with catalogue.view who reaches
+     * the household the collection is shared with ($householdInScope:
+     * Visibility::includesHousehold() of the collection's household; always
+     * true while the household feature is disabled). Sharing is with one
+     * explicitly chosen household, never with every household of the owner.
      */
-    public function canViewCollection(?User $user, int $ownerId, string $visibility): bool
+    public function canViewCollection(?User $user, int $ownerId, string $visibility, bool $householdInScope): bool
     {
         if ($user === null || !$user->isActive) {
             return false;
@@ -89,7 +111,7 @@ final class Authorizer
             return true;
         }
 
-        return $visibility === 'shared' && $this->can($user, Permission::CatalogueView);
+        return $visibility === 'shared' && $householdInScope && $this->can($user, Permission::CatalogueView);
     }
 
     /**

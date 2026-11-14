@@ -68,7 +68,8 @@ final class HouseholdMigrationTest extends IntegrationTestCase
         $copiesBefore = $this->rows('copies');
         $locationsBefore = $this->rows('locations');
 
-        $applied = (new Migrator($pdo, dirname(__DIR__, 2) . '/database/migrations'))->migrate();
+        // The phase H1 migrations only (later phases have their own upgrade test).
+        $applied = $this->migrateUpTo($pdo, self::H1[2]);
         self::assertSame(self::H1, $applied);
 
         // Nothing but the new column changed.
@@ -128,8 +129,9 @@ final class HouseholdMigrationTest extends IntegrationTestCase
         self::assertSame([$adminId, $memberId, $viewerId, $laterId], $after, 'Only a manual re-run adds accounts that qualify at that moment; the migration itself runs once');
 
         // Re-running the migrator is a no-op and nothing is reported as modified.
+        self::assertSame([], $this->migrateUpTo($pdo, self::H1[2]));
         $migrator = new Migrator($pdo, dirname(__DIR__, 2) . '/database/migrations');
-        self::assertSame([], $migrator->migrate());
+        $migrator->migrate();
         foreach ($migrator->status() as $row) {
             self::assertTrue($row['applied'] && !$row['modified'], $row['version']);
         }

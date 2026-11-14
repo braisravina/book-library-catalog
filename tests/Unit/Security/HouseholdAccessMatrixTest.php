@@ -116,7 +116,7 @@ final class HouseholdAccessMatrixTest extends TestCase
             }
         }
         self::assertGreaterThanOrEqual(30, $get);
-        self::assertSame('H3', $matrix['works.update']['phase'], 'Write rules for shared records are still phase H3');
+        self::assertSame('H3', $matrix['works.update']['phase'], 'Write rules for shared records are phase H3');
         self::assertSame('H3', $matrix['invite.accept.submit']['phase']);
     }
 
@@ -156,7 +156,32 @@ final class HouseholdAccessMatrixTest extends TestCase
             self::assertSame('H1', $entry['phase'], $name);
             self::assertStringStartsWith('admin.households', $name);
         }
-        self::assertSame('H1', $matrix['copies.store']['phase']);
-        self::assertSame('H1', $matrix['copies.update']['phase']);
+    }
+
+    /**
+     * Phase H3: every route that changes records, inventory, loans,
+     * collections or wishlist links is classified as write-enforced, and
+     * the routes that only look a record up keep their read phase.
+     */
+    public function testWritesAreEnforcedInPhaseThree(): void
+    {
+        $matrix = self::matrix();
+        foreach (['books.store', 'works.update', 'editions.store', 'editions.update', 'copies.store', 'copies.update', 'copies.delete',
+            'books.copies.store', 'covers.store', 'covers.delete', 'loans.store', 'loans.return.store', 'wishlist.store', 'wishlist.update',
+            'collections.store', 'collections.update', 'collections.delete', 'collections.items.add', 'collections.items.add_from_edition',
+            'collections.items.remove', 'collections.items.move', 'invite.accept.submit', 'admin.invitations.store', 'admin.invitations.replace',
+            'admin.users.store', 'admin.locations.store', 'admin.locations.update', 'export.catalogue.json', 'export.catalogue.csv'] as $name) {
+            self::assertSame('H3', $matrix[$name]['phase'], $name);
+        }
+        // Every POST route of a record kind states a household rule, unless it only touches the user's own wishlist status.
+        $unruled = [];
+        foreach (self::routes() as $name => [$method]) {
+            $entry = $matrix[$name];
+            if ($method === 'POST' && in_array($entry['kind'], ['bibliographic', 'inventory', 'loan', 'collection', 'wishlist'], true) && $entry['phase'] === 'none') {
+                $unruled[] = $name;
+            }
+        }
+        self::assertSame(['wishlist.status'], $unruled);
+        self::assertStringContainsString('WriteGuard', (string) file_get_contents(dirname(__DIR__, 3) . '/config/household_access.php'));
     }
 }

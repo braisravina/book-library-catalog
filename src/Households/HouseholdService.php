@@ -19,8 +19,9 @@ use PDO;
  * concurrent membership changes and deletions of one household are
  * serialised. Safeguards:
  *  - the temporary default household cannot be deleted;
- *  - a household that still has members, copies or locations cannot be
- *    deleted (memberships are removed one by one, each audited);
+ *  - a household that still has members, copies, locations or shared
+ *    collections cannot be deleted (memberships are removed one by one,
+ *    each audited);
  *  - only active accounts can be added (a disabled account never gains
  *    access through a membership).
  */
@@ -92,7 +93,7 @@ final class HouseholdService
             if ($household['system_key'] !== null) {
                 throw new HouseholdException('households.error.default_protected');
             }
-            if ($this->households->copyCount($id) > 0 || $this->households->locationCount($id) > 0) {
+            if ($this->households->copyCount($id) > 0 || $this->households->locationCount($id) > 0 || $this->households->collectionCount($id) > 0) {
                 throw new HouseholdException('households.error.in_use');
             }
             if ($this->households->memberCount($id) > 0) {

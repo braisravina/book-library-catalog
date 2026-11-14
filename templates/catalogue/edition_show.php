@@ -65,6 +65,7 @@ $details = [
             <div class="description"><?= nl2br($view->e($edition['description'] ?? $edition['work_description'])) ?></div>
         <?php endif; ?>
 
+        <?php if (!empty($shared_notice)): ?><p class="muted"><?= $view->t('catalogue.shared_record_notice') ?></p><?php endif; ?>
         <div class="form-actions">
             <?php if ($can_edit): ?><a class="button" href="/editions/<?= (int) $edition['id'] ?>/edit"><?= $view->t('catalogue.edition.edit_title') ?></a><?php endif; ?>
             <?php if ($can_edit_work): ?><a class="button" href="/works/<?= (int) $edition['work_id'] ?>/edit"><?= $view->t('catalogue.work.edit_title') ?></a><?php endif; ?>

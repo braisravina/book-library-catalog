@@ -15,20 +15,45 @@ final class LocationRepository extends TreeRepository
         return 'locations';
     }
 
-    public function create(?int $parentId, string $name, string $kind, ?string $description, int $userId): int
+    /**
+     * Every location belongs to one household, decided by
+     * Households\LocationService: the chosen household for a root, the
+     * parent's household for a child.
+     */
+    public function create(?int $parentId, ?int $householdId, string $name, string $kind, ?string $description, int $userId): int
     {
-        // A location belongs to one household: a child inherits its parent's,
-        // a new root goes to the temporary default household. Managing
-        // separate location trees per household is phase H3.
-        $household = $parentId !== null
-            ? $this->scalar('SELECT household_id FROM locations WHERE id = :id', ['id' => $parentId])
-            : $this->scalar("SELECT id FROM households WHERE system_key = 'default'");
-
         return $this->insert(
             'INSERT INTO locations (parent_id, household_id, name, kind, description, created_by, created_at, updated_at)
              VALUES (:p, :h, :n, :k, :d, :u, UTC_TIMESTAMP(), UTC_TIMESTAMP())',
-            ['p' => $parentId, 'h' => $household === null ? null : (int) $household, 'n' => $name, 'k' => $kind, 'd' => $description, 'u' => $userId],
+            ['p' => $parentId, 'h' => $householdId, 'n' => $name, 'k' => $kind, 'd' => $description, 'u' => $userId],
         );
+    }
+
+    /**
+     * Locks the location row for the rest of the transaction: exclusively
+     * for a change of the tree (Households\LocationService), shared when a
+     * copy is being stored in it (Catalogue\CopyService), so the location
+     * cannot disappear or be re-parented under the copy.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function lock(int $id, bool $exclusive): ?array
+    {
+        return $this->one('SELECT * FROM locations WHERE id = :id ' . ($exclusive ? 'FOR UPDATE' : 'LOCK IN SHARE MODE'), ['id' => $id]);
+    }
+
+    /**
+     * Whether another root location of the household (null: of the
+     * locations without one) already has the name. Roots of different
+     * households may share a name: each household has its own tree.
+     */
+    public function rootNameTaken(?int $householdId, string $name, ?int $excludeId = null): bool
+    {
+        return $this->scalar(
+            'SELECT 1 FROM locations WHERE parent_id IS NULL AND name = :name AND id <> :x AND '
+                . ($householdId === null ? 'household_id IS NULL' : 'household_id = :h') . ' LIMIT 1',
+            ['name' => $name, 'x' => $excludeId ?? 0] + ($householdId === null ? [] : ['h' => $householdId]),
+        ) !== null;
     }
 
     public function update(int $id, ?int $parentId, string $name, string $kind, ?string $description): void

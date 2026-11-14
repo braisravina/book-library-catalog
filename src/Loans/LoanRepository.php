@@ -30,7 +30,7 @@ final class LoanRepository extends Repository
      */
     public function lockCopy(int $copyId): ?array
     {
-        return $this->one('SELECT id, owner_user_id, status, edition_id FROM copies WHERE id = :id FOR UPDATE', ['id' => $copyId]);
+        return $this->one('SELECT id, owner_user_id, household_id, status, edition_id FROM copies WHERE id = :id FOR UPDATE', ['id' => $copyId]);
     }
 
     /**
@@ -90,6 +90,37 @@ final class LoanRepository extends Repository
         }
 
         return $out;
+    }
+
+    /**
+     * Whether the copy has an open loan, read as it is now (a locking
+     * read, for callers that hold the copy's row lock): a copy on loan
+     * cannot change household.
+     */
+    public function hasActiveLoan(int $copyId): bool
+    {
+        return $this->scalar('SELECT id FROM loans WHERE copy_id = :id AND returned_on IS NULL LIMIT 1 LOCK IN SHARE MODE', ['id' => $copyId]) !== null;
+    }
+
+    /**
+     * Whether the copy was ever lent (returned loans included), read as it
+     * is now, for callers that hold the copy's row lock: such a copy is
+     * withdrawn, not deleted.
+     */
+    public function hasAnyLoan(int $copyId): bool
+    {
+        return $this->scalar('SELECT id FROM loans WHERE copy_id = :id LIMIT 1 LOCK IN SHARE MODE', ['id' => $copyId]) !== null;
+    }
+
+    /**
+     * The copy of a loan, to lock the copy before the loan (the lock
+     * order of Households\WriteGuard).
+     */
+    public function copyIdOf(int $loanId): ?int
+    {
+        $copyId = $this->scalar('SELECT copy_id FROM loans WHERE id = :id', ['id' => $loanId]);
+
+        return $copyId === null ? null : (int) $copyId;
     }
 
     public function create(int $copyId, ?int $borrowerUserId, ?string $borrowerName, string $loanedOn, ?string $dueOn, ?string $notes, int $userId): int

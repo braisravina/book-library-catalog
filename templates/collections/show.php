@@ -13,6 +13,7 @@ $moves = ['top' => '⇈', 'up' => '↑', 'down' => '↓', 'bottom' => '⇊'];
 </div>
 <p class="muted">
     <span class="badge"><?= $view->t('collections.visibility.' . $collection['visibility']) ?></span>
+    <?php if ($collection['visibility'] === 'shared' && !empty($households_enabled) && ($collection['household_name'] ?? null) !== null): ?><?= $view->t('collections.shared_with', ['household' => (string) $collection['household_name']]) ?> ·<?php endif; ?>
     <?= $is_owner ? $view->t('collections.owned_by_you') : ($collection['owner_name'] !== null ? $view->t('collections.owned_by', ['name' => (string) $collection['owner_name']]) : $view->t('collections.owned_by_other')) ?>
     · <?= $view->t('collections.count', ['count' => $total]) ?>
 </p>

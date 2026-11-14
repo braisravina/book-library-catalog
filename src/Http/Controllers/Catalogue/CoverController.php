@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Http\Controllers\Catalogue;
 
-use DigitalLibrary\Database\Transaction;
 use DigitalLibrary\Http\HttpException;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Http\Response;
@@ -23,11 +22,9 @@ final class CoverController extends CatalogueBaseController
     public function store(Request $request, array $params): Response
     {
         $edition = $this->found($this->services->editions()->find($this->id($params), $this->visibility()));
-        $this->authorize($this->services->authorizer()->canEditRecord(
-            $this->user($request),
-            $edition['created_by'] === null ? null : (int) $edition['created_by'],
-        ));
         $editionId = (int) $edition['id'];
+        // Covers follow the editing rule of their edition.
+        $this->authorize($this->mayEditEdition($this->user($request), $editionId, $edition['created_by'] === null ? null : (int) $edition['created_by']));
 
         try {
             $image = $this->services->covers()->store($request->file('cover') ?? ['error' => UPLOAD_ERR_NO_FILE]);
@@ -38,10 +35,7 @@ final class CoverController extends CatalogueBaseController
         }
 
         try {
-            $coverId = Transaction::run(
-                $this->services->pdo(),
-                fn (): int => $this->services->coverRecords()->addPrimary($editionId, $image, $this->user($request)->id),
-            );
+            $coverId = $this->services->books()->addCover($this->user($request)->id, $editionId, $image);
         } catch (\Throwable $e) {
             // Never leave orphaned files behind when the database write fails.
             $this->services->covers()->delete($image->storageKey);
@@ -96,13 +90,10 @@ final class CoverController extends CatalogueBaseController
         $cover = $this->found($this->services->coverRecords()->find($this->id($params), $this->visibility()));
         $editionId = (int) $cover['edition_id'];
         $edition = $this->found($this->services->editions()->find($editionId, $this->visibility()));
-        $this->authorize($this->services->authorizer()->canEditRecord(
-            $this->user($request),
-            $edition['created_by'] === null ? null : (int) $edition['created_by'],
-        ));
+        $this->authorize($this->mayEditEdition($this->user($request), $editionId, $edition['created_by'] === null ? null : (int) $edition['created_by']));
 
-        Transaction::run($this->services->pdo(), fn () => $this->services->coverRecords()->delete((int) $cover['id'], $editionId));
-        $this->services->covers()->delete((string) $cover['storage_key']);
+        $deleted = $this->services->books()->deleteCover($this->user($request)->id, (int) $cover['id']);
+        $this->services->covers()->delete($deleted['storage_key']);
         $this->audit($request, 'cover.deleted', 'cover', (int) $cover['id'], ['edition_id' => $editionId]);
         $this->flash('success', 'catalogue.cover.deleted');
 

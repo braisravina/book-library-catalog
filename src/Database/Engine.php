@@ -26,6 +26,12 @@ final class Engine
     /** CHECK constraint violated: MySQL 3819, MariaDB 4025. */
     public const CHECK_VIOLATION_ERRORS = [3819, 4025];
 
+    /** Lock wait timeout exceeded (the statement, not the transaction, is rolled back). */
+    public const LOCK_WAIT_TIMEOUT = 1205;
+
+    /** Chosen as the deadlock victim: the whole transaction was rolled back. */
+    public const DEADLOCK = 1213;
+
     /** @var \WeakMap<PDO, string>|null */
     private static ?\WeakMap $cache = null;
 
@@ -62,5 +68,22 @@ final class Engine
     public static function isTimeout(\PDOException $e): bool
     {
         return in_array($e->errorInfo[1] ?? null, self::TIMEOUT_ERRORS, true);
+    }
+
+    /**
+     * The transaction lost a deadlock (same code on both engines). The
+     * server has already rolled it back, so it may be run again.
+     */
+    public static function isDeadlock(\PDOException $e): bool
+    {
+        return ($e->errorInfo[1] ?? null) === self::DEADLOCK;
+    }
+
+    /**
+     * A row lock could not be obtained: deadlock victim or lock wait timeout.
+     */
+    public static function isLockFailure(\PDOException $e): bool
+    {
+        return in_array($e->errorInfo[1] ?? null, [self::LOCK_WAIT_TIMEOUT, self::DEADLOCK], true);
     }
 }

@@ -175,6 +175,15 @@ final class RegistrationController extends Controller
             'via' => 'invitation',
             'invitation_id' => $result['invitation_id'],
         ], $ip, $request->userAgent());
+        // Memberships the invitation carried, recorded on each household by
+        // account id only (the administrator who invited is the actor).
+        foreach ($result['household_ids'] as $householdId) {
+            $this->services->audit()->log('household.member_added', $result['invited_by'], 'household', $householdId, [
+                'member_user_id' => $result['user_id'],
+                'via' => 'invitation',
+                'invitation_id' => $result['invitation_id'],
+            ], $ip, $request->userAgent());
+        }
 
         $session = $this->services->session();
         $session->remove(self::SESSION_KEY);

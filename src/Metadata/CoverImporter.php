@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Metadata;
 
-use DigitalLibrary\Catalogue\Repository\CoverRepository;
-use DigitalLibrary\Database\Transaction;
+use DigitalLibrary\Catalogue\BookService;
+use DigitalLibrary\Households\WriteBusyException;
+use DigitalLibrary\Households\WriteDeniedException;
 use DigitalLibrary\Metadata\Http\HttpClient;
 use DigitalLibrary\Metadata\Http\HttpException;
 use DigitalLibrary\Upload\CoverImageProcessor;
 use DigitalLibrary\Upload\UploadException;
-use PDO;
 
 /**
  * Downloads a provider's cover image and stores it as a local cover.
@@ -19,14 +19,16 @@ use PDO;
  * fetched through the hardened client (allowlisted HTTPS hosts, size cap),
  * and the bytes go through CoverImageProcessor's full validation and
  * re-encoding. Once stored, the catalogue no longer depends on the provider.
+ *
+ * The cover record is written through BookService::addCover(), so an
+ * imported cover follows the same editing rule as an uploaded one.
  */
 final class CoverImporter
 {
     public function __construct(
-        private readonly PDO $pdo,
         private readonly HttpClient $http,
         private readonly CoverImageProcessor $processor,
-        private readonly CoverRepository $covers,
+        private readonly BookService $books,
         private readonly int $maxBytes,
     ) {
     }
@@ -61,7 +63,11 @@ final class CoverImporter
         }
 
         try {
-            return Transaction::run($this->pdo, fn (): int => $this->covers->addPrimary($editionId, $image, $userId));
+            return $this->books->addCover($userId, $editionId, $image);
+        } catch (WriteDeniedException | WriteBusyException) {
+            $this->processor->delete($image->storageKey);
+
+            return null;
         } catch (\Throwable $e) {
             $this->processor->delete($image->storageKey);
             throw $e;

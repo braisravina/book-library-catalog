@@ -68,7 +68,7 @@ final class BackupTest extends IntegrationTestCase
 
         $m = $result['manifest'];
         self::assertSame(['dla-backup', 1], [$m['format'], $m['format_version']]);
-        self::assertSame('2026_11_13_180002_backfill_default_household', $m['application']['schema_version']);
+        self::assertSame('2026_11_14_100003_create_invitation_households', $m['application']['schema_version']);
         self::assertSame(2, $m['database']['tables']['loans']);
         self::assertSame(0, $m['database']['tables']['login_attempts'], 'Transient login attempts are not backed up');
         self::assertSame(['referenced' => 2, 'files' => 3, 'missing' => []], $m['covers']);

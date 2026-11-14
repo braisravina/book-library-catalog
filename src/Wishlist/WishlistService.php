@@ -6,43 +6,66 @@ namespace DigitalLibrary\Wishlist;
 
 use DigitalLibrary\Auth\User;
 use DigitalLibrary\Catalogue\Repository\Repository;
-use DigitalLibrary\Database\Transaction;
+use DigitalLibrary\Households\WriteActor;
+use DigitalLibrary\Households\WriteDeniedException;
+use DigitalLibrary\Households\WriteGuard;
 use DigitalLibrary\Security\Authorizer;
-use PDO;
 
 /**
- * Wishlist changes. Each runs in a transaction holding the owner's user row
- * lock, so the duplicate checks cannot race; the unique (user, wanted ISBN)
- * index backs this up. Entries of other users are reported as not found.
+ * Wishlist changes. Each is one guarded transaction (Households\WriteGuard)
+ * holding the owner's account row exclusively, so the duplicate checks
+ * cannot race; the unique (user, wanted ISBN) index backs this up.
+ * Entries of other users are reported as not found.
+ *
+ * Links to the catalogue (phase H3). An entry may point at a catalogue
+ * edition, but only at one the user is allowed to see at the moment it is
+ * saved, checked inside the transaction against their memberships as
+ * they are then:
+ *
+ *  - starting an entry from an edition requires that edition to be visible;
+ *  - an ISBN is linked automatically only to a visible edition. A book
+ *    that only other households hold is never linked, so the wishlist
+ *    cannot be used to learn or to reference what they hold; the entry
+ *    keeps its ISBN and is linked on a later save, once the book is in
+ *    the user's own library;
+ *  - a link whose edition has left the user's view is dropped the next
+ *    time the entry is saved (it is never shown or exported meanwhile).
+ *
+ * Without households every edition is visible and the behaviour is the
+ * one before households.
  */
 final class WishlistService
 {
     public function __construct(
-        private readonly PDO $pdo,
+        private readonly WriteGuard $guard,
         private readonly WishlistRepository $items,
         private readonly Authorizer $authorizer,
     ) {
     }
 
     /**
-     * @param ?array{id: int, work_id: ?int} $edition catalogue edition the entry was created from
+     * @param ?int $editionId catalogue edition the entry was started from
      *
      * @throws WishlistException
      */
-    public function add(User $user, WishlistInput $input, ?array $edition = null): int
+    public function add(User $user, WishlistInput $input, ?int $editionId = null): int
     {
-        if (!$this->authorizer->canManageWishlistItem($user, $user->id)) {
-            throw new WishlistException('wishlist.error.forbidden');
-        }
         $isbn13 = $input->isbn13();
 
-        return $this->guard(fn (): int => Transaction::run($this->pdo, function () use ($user, $input, $isbn13, $edition): int {
-            $this->items->lockOwner($user->id);
-            $edition ??= $isbn13 === null ? null : $this->items->editionForIsbn($isbn13);
-            $this->refuseDuplicate($user->id, $isbn13, $edition['id'] ?? null, $input, null);
+        return $this->guard(fn (): int => $this->guard->run($user->id, function (WriteActor $actor) use ($input, $isbn13, $editionId): int {
+            $userId = $actor->user->id;
+            if (!$this->authorizer->canManageWishlistItem($actor->user, $userId)) {
+                throw new WishlistException('wishlist.error.forbidden');
+            }
+            if ($editionId !== null) {
+                $edition = $this->items->visibleEdition($editionId, $actor->visibility) ?? throw new WishlistException('wishlist.error.edition_not_found');
+            } else {
+                $edition = $isbn13 === null ? null : $this->items->editionForIsbn($isbn13, $actor->visibility);
+            }
+            $this->refuseDuplicate($userId, $isbn13, $edition['id'] ?? null, $input, null);
 
-            return $this->items->create($user->id, $edition['id'] ?? null, $edition['work_id'] ?? null, $input, $isbn13);
-        }));
+            return $this->items->create($userId, $edition['id'] ?? null, $edition['work_id'] ?? null, $input, $isbn13);
+        }, exclusiveActor: true));
     }
 
     /**
@@ -51,20 +74,20 @@ final class WishlistService
     public function update(User $user, int $itemId, WishlistInput $input): void
     {
         $isbn13 = $input->isbn13();
-        $this->guard(fn () => Transaction::run($this->pdo, function () use ($user, $itemId, $input, $isbn13): void {
-            $this->items->lockOwner($user->id);
-            $item = $this->ownedLocked($user, $itemId);
-            // Changing the ISBN re-resolves the catalogue link; otherwise it is kept.
-            if ($isbn13 !== $item['isbn_13']) {
-                $edition = $isbn13 === null ? null : $this->items->editionForIsbn($isbn13);
-            } else {
-                $edition = $item['edition_id'] === null ? null : ['id' => (int) $item['edition_id'], 'work_id' => $item['work_id'] === null ? null : (int) $item['work_id']];
+        $this->guard(fn () => $this->guard->run($user->id, function (WriteActor $actor) use ($itemId, $input, $isbn13): void {
+            $item = $this->ownedLocked($actor, $itemId);
+            // The link is kept while its edition is still in view and the
+            // ISBN is unchanged; otherwise it is resolved again, to a
+            // visible edition only.
+            $edition = $item['edition_id'] === null ? null : $this->items->visibleEdition((int) $item['edition_id'], $actor->visibility);
+            if ($edition === null || $isbn13 !== $item['isbn_13']) {
+                $edition = $isbn13 === null ? null : $this->items->editionForIsbn($isbn13, $actor->visibility);
             }
             if ($item['status'] === 'wanted') {
-                $this->refuseDuplicate($user->id, $isbn13, $edition['id'] ?? null, $input, $itemId);
+                $this->refuseDuplicate($actor->user->id, $isbn13, $edition['id'] ?? null, $input, $itemId);
             }
             $this->items->update($itemId, $edition['id'] ?? null, $edition['work_id'] ?? null, $input, $isbn13);
-        }));
+        }, exclusiveActor: true));
     }
 
     /**
@@ -78,26 +101,25 @@ final class WishlistService
         if (!in_array($status, WishlistRepository::STATUSES, true)) {
             throw new WishlistException('wishlist.error.invalid_status');
         }
-        $this->guard(fn () => Transaction::run($this->pdo, function () use ($user, $itemId, $status): void {
-            $this->items->lockOwner($user->id);
-            $item = $this->ownedLocked($user, $itemId);
+        $this->guard(fn () => $this->guard->run($user->id, function (WriteActor $actor) use ($itemId, $status): void {
+            $item = $this->ownedLocked($actor, $itemId);
             if ($item['status'] === $status) {
                 return;
             }
             if ($status === 'wanted') {
-                $this->refuseDuplicate($user->id, $item['isbn_13'], $item['edition_id'] === null ? null : (int) $item['edition_id'], WishlistInput::fromRecord($item), $itemId);
+                $this->refuseDuplicate($actor->user->id, $item['isbn_13'], $item['edition_id'] === null ? null : (int) $item['edition_id'], WishlistInput::fromRecord($item), $itemId);
             }
             $this->items->setStatus($itemId, $status);
-        }));
+        }, exclusiveActor: true));
     }
 
     /**
      * @return array<string, mixed>
      */
-    private function ownedLocked(User $user, int $itemId): array
+    private function ownedLocked(WriteActor $actor, int $itemId): array
     {
         $item = $this->items->lock($itemId);
-        if ($item === null || !$this->authorizer->canManageWishlistItem($user, (int) $item['user_id'])) {
+        if ($item === null || !$this->authorizer->canManageWishlistItem($actor->user, (int) $item['user_id'])) {
             throw new WishlistException('wishlist.error.not_found');
         }
 
@@ -128,6 +150,9 @@ final class WishlistService
                 throw new WishlistException('wishlist.error.duplicate');
             }
             throw $e;
+        } catch (WriteDeniedException) {
+            // The account was deactivated while the request was in flight.
+            throw new WishlistException('wishlist.error.forbidden');
         }
     }
 }

@@ -10,6 +10,7 @@ use DigitalLibrary\Auth\UserAdministration;
 use DigitalLibrary\Auth\UserRepository;
 use DigitalLibrary\Catalogue\BookService;
 use DigitalLibrary\Catalogue\CatalogueSearch;
+use DigitalLibrary\Catalogue\CopyService;
 use DigitalLibrary\Catalogue\Repository\AuthorRepository;
 use DigitalLibrary\Catalogue\Repository\CategoryRepository;
 use DigitalLibrary\Catalogue\Repository\CopyRepository;
@@ -23,6 +24,8 @@ use DigitalLibrary\Database\ConnectionFactory;
 use DigitalLibrary\Households\CopyHousehold;
 use DigitalLibrary\Households\HouseholdRepository;
 use DigitalLibrary\Households\HouseholdService;
+use DigitalLibrary\Households\LocationService;
+use DigitalLibrary\Households\WriteGuard;
 use DigitalLibrary\I18n\Translator;
 use DigitalLibrary\Audit\AuditLogRepository;
 use DigitalLibrary\Backup\BackupCreator;
@@ -215,6 +218,8 @@ final class Services
             $this->users(),
             $this->authorizer(),
             max(1, min(90, $this->config->int('INVITATION_MAX_DAYS', 30))),
+            $this->households(),
+            $this->householdsEnabled(),
         ));
     }
 
@@ -251,7 +256,7 @@ final class Services
 
     public function userAdministration(): UserAdministration
     {
-        return $this->once(UserAdministration::class, fn (): UserAdministration => new UserAdministration($this->pdo(), $this->users()));
+        return $this->once(UserAdministration::class, fn (): UserAdministration => new UserAdministration($this->pdo(), $this->users(), $this->households(), $this->householdsEnabled()));
     }
 
     public function httpClient(): HttpClient
@@ -333,10 +338,9 @@ final class Services
     public function coverImporter(): CoverImporter
     {
         return $this->once(CoverImporter::class, fn (): CoverImporter => new CoverImporter(
-            $this->pdo(),
             $this->httpClient(),
             $this->covers(),
-            $this->coverRecords(),
+            $this->books(),
             $this->config->int('UPLOAD_MAX_BYTES', 5 * 1024 * 1024),
         ));
     }
@@ -348,7 +352,7 @@ final class Services
 
     public function loanService(): LoanService
     {
-        return $this->once(LoanService::class, fn (): LoanService => new LoanService($this->pdo(), $this->loans(), $this->authorizer()));
+        return $this->once(LoanService::class, fn (): LoanService => new LoanService($this->writeGuard(), $this->loans(), $this->users(), $this->authorizer()));
     }
 
     public function wishlist(): WishlistRepository
@@ -358,7 +362,7 @@ final class Services
 
     public function wishlistService(): WishlistService
     {
-        return $this->once(WishlistService::class, fn (): WishlistService => new WishlistService($this->pdo(), $this->wishlist(), $this->authorizer()));
+        return $this->once(WishlistService::class, fn (): WishlistService => new WishlistService($this->writeGuard(), $this->wishlist(), $this->authorizer()));
     }
 
     public function auditLog(): AuditLogRepository
@@ -373,16 +377,17 @@ final class Services
 
     public function collectionService(): CollectionService
     {
-        return $this->once(CollectionService::class, fn (): CollectionService => new CollectionService($this->pdo(), $this->collections(), $this->authorizer()));
+        return $this->once(CollectionService::class, fn (): CollectionService => new CollectionService($this->writeGuard(), $this->collections(), $this->editions(), $this->households(), $this->authorizer()));
     }
 
     /**
      * Whether the household feature (administration pages, explicit
      * household choice for copies, and household-scoped reads) is switched
-     * on. It is development-only: reads are scoped since phase H2, but the
-     * feature is incomplete until the write paths are too (phase H3), so
-     * it can never be on in production, whatever HOUSEHOLDS_ENABLED says
-     * (ConfigValidator also refuses it).
+     * on. It is development-only: reads are scoped since phase H2 and
+     * writes since phase H3, but the feature has not been released (that
+     * is the owner's decision, after phase H4), so it can never be on in
+     * production, whatever HOUSEHOLDS_ENABLED says (ConfigValidator also
+     * refuses it).
      */
     public function householdsEnabled(): bool
     {
@@ -399,9 +404,37 @@ final class Services
         return $this->once(HouseholdService::class, fn (): HouseholdService => new HouseholdService($this->pdo(), $this->households(), $this->authorizer()));
     }
 
+    public function locationService(): LocationService
+    {
+        return $this->once(LocationService::class, fn (): LocationService => new LocationService(
+            $this->writeGuard(),
+            $this->locations(),
+            $this->households(),
+            $this->authorizer(),
+        ));
+    }
+
     public function copyHousehold(): CopyHousehold
     {
         return $this->once(CopyHousehold::class, fn (): CopyHousehold => new CopyHousehold($this->households(), $this->authorizer(), $this->householdsEnabled()));
+    }
+
+    /**
+     * Transaction-level write authorization (phase H3): every write that
+     * depends on household access re-reads the actor and their memberships
+     * under the locks described in Households\WriteGuard.
+     */
+    public function writeGuard(): WriteGuard
+    {
+        return $this->once(WriteGuard::class, fn (): WriteGuard => new WriteGuard(
+            $this->pdo(),
+            $this->households(),
+            $this->users(),
+            $this->householdsEnabled(),
+            fn (\DigitalLibrary\Auth\User $user, HouseholdScope $scope): Visibility => $this->householdsEnabled()
+                ? Visibility::forUser($user, $scope)
+                : Visibility::unrestricted(),
+        ));
     }
 
     /**
@@ -497,11 +530,29 @@ final class Services
     {
         return $this->once(BookService::class, fn (): BookService => new BookService(
             $this->pdo(),
+            $this->writeGuard(),
             $this->works(),
             $this->editions(),
             $this->authors(),
             $this->publishers(),
+            $this->coverRecords(),
+            $this->copyService(),
+            $this->authorizer(),
+        ));
+    }
+
+    public function copyService(): CopyService
+    {
+        return $this->once(CopyService::class, fn (): CopyService => new CopyService(
+            $this->writeGuard(),
             $this->copies(),
+            $this->editions(),
+            $this->works(),
+            $this->locations(),
+            $this->loans(),
+            $this->users(),
+            $this->copyHousehold(),
+            $this->authorizer(),
         ));
     }
 

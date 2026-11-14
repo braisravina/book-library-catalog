@@ -6,6 +6,7 @@ namespace DigitalLibrary\Http\Controllers\Admin;
 
 use DigitalLibrary\Auth\User;
 use DigitalLibrary\Auth\UserAdminException;
+use DigitalLibrary\Households\HouseholdRepository;
 use DigitalLibrary\Http\Controllers\Controller;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Http\Response;
@@ -55,24 +56,46 @@ final class UserController extends Controller
         if (!$validator->fails() && $this->services->users()->emailExists($input['email'])) {
             $validator->addError('email', 'validation.email_taken');
         }
+        // Optional household memberships (only while households are in use).
+        $selected = $this->services->householdsEnabled() ? $request->inputList('household_ids') : [];
+        $householdIds = HouseholdRepository::idList($selected);
+        if ($householdIds === null) {
+            $validator->addError('household_ids', 'validation.in');
+        }
         if ($validator->fails()) {
             unset($input['password']);
 
-            return $this->form($input, $validator->errors(), 422);
+            return $this->form($input, $validator->errors(), 422, $selected);
         }
 
-        $id = $this->services->users()->create(
-            $input['email'],
-            $input['display_name'],
-            Role::from($input['role']),
-            $this->services->hasher()->hash($input['password']),
-            $input['locale'],
-            $admin->id,
-        );
+        try {
+            $created = $this->services->userAdministration()->create(
+                $admin,
+                $input['email'],
+                $input['display_name'],
+                Role::from($input['role']),
+                $this->services->hasher()->hash($input['password']),
+                $input['locale'],
+                $householdIds ?? [],
+            );
+        } catch (UserAdminException $e) {
+            if ($e->getMessage() === 'errors.403.message') {
+                throw \DigitalLibrary\Http\HttpException::forbidden();
+            }
+            unset($input['password']);
+            $field = $e->getMessage() === 'validation.email_taken' ? 'email' : 'household_ids';
+
+            return $this->form($input, [$field => [$e->getMessage()]], 422, $selected);
+        }
+        $id = $created['id'];
         $this->services->audit()->log('user.created', $admin->id, 'user', $id, [
             'email' => $input['email'],
             'role' => $input['role'],
         ], $request->remoteAddress(), $request->userAgent());
+        // Each membership is recorded on its household, by account id only.
+        foreach ($created['household_ids'] as $householdId) {
+            $this->audit($request, 'household.member_added', 'household', $householdId, ['member_user_id' => $id, 'via' => 'user_creation']);
+        }
         $this->flash('success', 'admin.users.created');
 
         return Response::redirect('/admin/users');
@@ -226,10 +249,14 @@ final class UserController extends Controller
     /**
      * @param array<string, string>       $old
      * @param array<string, list<string>> $errors
+     * @param list<mixed>                 $selectedHouseholds submitted household ids
      */
-    private function form(array $old, array $errors, int $status = 200): Response
+    private function form(array $old, array $errors, int $status = 200, array $selectedHouseholds = []): Response
     {
         return $this->render('admin/users/create', [
+            // Offered only while households are in use; nothing is ticked by default.
+            'households' => $this->services->householdsEnabled() ? $this->services->households()->names() : [],
+            'selected_households' => array_values(array_filter($selectedHouseholds, 'is_string')),
             'page_title' => 'admin.users.new',
             'old' => $old + ['email' => '', 'display_name' => '', 'role' => Role::Member->value, 'locale' => $this->services->defaultLocale()],
             'errors' => $errors,

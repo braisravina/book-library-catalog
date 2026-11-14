@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Core;
 
+use DigitalLibrary\Households\WriteBusyException;
+use DigitalLibrary\Households\WriteDeniedException;
 use DigitalLibrary\Http\HostPolicy;
 use DigitalLibrary\Http\HttpException;
 use DigitalLibrary\Http\Middleware\Authenticate;
@@ -141,6 +143,14 @@ final class Application
 
     public function renderError(\Throwable $e, Request $request, bool $withLayout = true): Response
     {
+        // Refusals from a guarded write (Households\WriteGuard): a record out
+        // of the user's households is answered exactly like a missing one.
+        $busy = $e instanceof WriteBusyException;
+        if ($e instanceof WriteDeniedException) {
+            $e = $e->notFound ? HttpException::notFound() : HttpException::forbidden();
+        } elseif ($busy) {
+            $e = new HttpException(409, WriteBusyException::MESSAGE);
+        }
         $status = $e instanceof HttpException ? $e->status() : 500;
         if ($status >= 500 && $status !== 503) {
             // Full detail goes to the server log only.
@@ -166,6 +176,9 @@ final class Application
         }
         if ($status === 405) {
             $response->setHeader('Allow', 'GET, POST');
+        }
+        if ($busy) {
+            $response->setHeader('Retry-After', '2');
         }
 
         return (new SecurityHeaders())->process($request, static fn (): Response => $response);

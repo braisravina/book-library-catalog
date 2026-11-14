@@ -23,6 +23,9 @@ use DigitalLibrary\Database\Params;
  *  - author    visible when credited on a visible work or edition.
  *  - publisher visible when it publishes a visible edition.
  *  - user      known when it is the viewer or shares a household with them.
+ *  - shared collection
+ *              visible when the household it is shared with is in the
+ *              viewer's scope (phase H3).
  *
  * Creating a bibliographic record keeps it in view for its creator even
  * when only other households hold copies of it, but never shows those
@@ -86,6 +89,35 @@ final class Visibility
     }
 
     public function copy(string $alias, Params $params): string
+    {
+        return $this->household($alias . '.household_id', $params);
+    }
+
+    /**
+     * The opposite of copy(): a copy the viewer does NOT reach (another
+     * household's, or one without a household). It is used only to decide
+     * whether a shared bibliographic record is held outside the viewer's
+     * households (the editing rule of phase H3); what it matches is never
+     * shown, counted or listed.
+     */
+    public function copyOutside(string $alias, Params $params): string
+    {
+        if ($this->scope->unrestricted) {
+            return self::NOTHING;
+        }
+        if ($this->scope->isEmpty()) {
+            return self::ALL;
+        }
+
+        return '(' . $alias . '.household_id IS NULL OR ' . $alias . '.household_id NOT IN (' . $params->in($this->scope->ids()) . '))';
+    }
+
+    /**
+     * A shared collection: visible when the household it is shared with is
+     * in the viewer's scope. (The owner's own collections and the
+     * administrator override are decided by the Authorizer.)
+     */
+    public function sharedCollection(string $alias, Params $params): string
     {
         return $this->household($alias . '.household_id', $params);
     }

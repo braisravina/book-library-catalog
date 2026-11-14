@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Http\Controllers\Catalogue;
 
+use DigitalLibrary\Auth\User;
 use DigitalLibrary\Http\Controllers\Controller;
 use DigitalLibrary\Validation\Validator;
 
@@ -38,6 +39,46 @@ abstract class CatalogueBaseController extends Controller
     }
 
     /**
+     * Whether the user may change the edition (and its covers): the editing
+     * rule for shared records (Authorizer::canEditSharedRecord()). This is
+     * what the pages use to offer the action and what the edit forms
+     * answer 403 from; BookService decides again inside the transaction.
+     */
+    protected function mayEditEdition(User $user, int $editionId, ?int $createdBy): bool
+    {
+        $authorizer = $this->services->authorizer();
+        // Asked only when it can matter: for someone who could edit their own record.
+        if (!$authorizer->canEditRecord($user, $createdBy)) {
+            return false;
+        }
+
+        return $authorizer->canEditSharedRecord($user, $createdBy, $this->services->editions()->heldOutsideView($editionId, $this->visibility()));
+    }
+
+    /**
+     * Whether the user may change the work (see mayEditEdition()).
+     */
+    protected function mayEditWork(User $user, int $workId, ?int $createdBy): bool
+    {
+        $authorizer = $this->services->authorizer();
+        if (!$authorizer->canEditRecord($user, $createdBy)) {
+            return false;
+        }
+
+        return $authorizer->canEditSharedRecord($user, $createdBy, $this->services->works()->sharedBeyondView($workId, $this->visibility()));
+    }
+
+    /**
+     * Whether to tell the user that a record they catalogued is now part
+     * of the shared catalogue and is changed by an administrator. It says
+     * only that; never who else holds the book, where, or how many copies.
+     */
+    protected function sharedRecordNotice(User $user, ?int $createdBy, bool $mayEdit): bool
+    {
+        return !$mayEdit && $this->services->authorizer()->canEditRecord($user, $createdBy);
+    }
+
+    /**
      * @param list<int> $ids
      */
     protected function validateCategories(array $ids, Validator $validator): void
@@ -60,21 +101,5 @@ abstract class CatalogueBaseController extends Controller
         $value = (string) $request->input('row_version', '');
 
         return preg_match('/^[1-9]\d{0,9}$/', $value) ? (int) $value : 0;
-    }
-
-    /**
-     * A location may be chosen only when it is one the user can see: a
-     * location of another household is refused exactly like one that does
-     * not exist.
-     */
-    protected function validateLocation(?int $locationId, Validator $validator, string $field = 'location_id'): void
-    {
-        if ($locationId === null) {
-            return;
-        }
-        $visible = array_map(static fn (array $l): int => (int) $l['id'], $this->services->locations()->visible($this->visibility()));
-        if (!in_array($locationId, $visible, true)) {
-            $validator->addError($field, 'validation.in');
-        }
     }
 }

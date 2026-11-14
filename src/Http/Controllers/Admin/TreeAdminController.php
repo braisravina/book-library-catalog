@@ -43,6 +43,18 @@ abstract class TreeAdminController extends Controller
     }
 
     /**
+     * Extra template data for the page (locations: the household choice).
+     *
+     * @param array<string, mixed>|null $node the node being edited
+     *
+     * @return array<string, mixed>
+     */
+    protected function pageExtras(?array $node): array
+    {
+        return [];
+    }
+
+    /**
      * @return array<string, string>
      */
     protected function defaults(): array
@@ -147,7 +159,7 @@ abstract class TreeAdminController extends Controller
      * @param array<string, list<string>> $errors
      * @param array<string, mixed>|null   $node
      */
-    private function page(array $old, array $errors, ?array $node, int $status = 200): Response
+    protected function page(array $old, array $errors, ?array $node, int $status = 200): Response
     {
         $tree = $this->repository()->tree();
         foreach ($tree as &$row) {
@@ -166,6 +178,6 @@ abstract class TreeAdminController extends Controller
             'old' => $old,
             'errors' => $errors,
             'node' => $node,
-        ], $status);
+        ] + $this->pageExtras($node), $status);
     }
 }

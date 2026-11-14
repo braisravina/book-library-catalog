@@ -19,9 +19,10 @@ use DigitalLibrary\Auth\User;
  * session, so adding or removing a membership applies to the member's next
  * request without signing out.
  *
- * Phase H1 introduces the scope and uses it for copy assignment only.
- * Read paths are filtered with it in phases H2/H3 (see
- * config/household_access.php for the per-route plan).
+ * Reads are filtered with it through Security\Visibility (phase H2);
+ * writes read it again inside their transaction through
+ * Households\WriteGuard (phase H3). config/household_access.php states the
+ * rule of every route.
  */
 final class HouseholdScope
 {

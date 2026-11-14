@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DigitalLibrary\Auth;
 
 use DigitalLibrary\Database\Transaction;
+use DigitalLibrary\Households\HouseholdRepository;
 use DigitalLibrary\Security\Role;
 use PDO;
 
@@ -21,7 +22,52 @@ final class UserAdministration
     public function __construct(
         private readonly PDO $pdo,
         private readonly UserRepository $users,
+        private readonly ?HouseholdRepository $households = null,
+        private readonly bool $householdsEnabled = false,
     ) {
+    }
+
+    /**
+     * Creates an account and, optionally, its household memberships, in
+     * one transaction (phase H3). An account belongs to no household
+     * unless the administrator names some: nothing is assigned by default.
+     * The households are locked (in id order) before the account is
+     * written, so a household deleted at that moment refuses the whole
+     * creation instead of leaving an account without the access that was
+     * intended. While the household feature is disabled no membership is
+     * created, whatever was submitted.
+     *
+     * @param list<int> $householdIds distinct, ascending (HouseholdRepository::idList())
+     *
+     * @return array{id: int, household_ids: list<int>}
+     *
+     * @throws UserAdminException
+     */
+    public function create(User $actor, string $email, string $displayName, Role $role, string $passwordHash, string $locale, array $householdIds = []): array
+    {
+        if ($actor->role !== Role::Admin || !$actor->isActive) {
+            throw new UserAdminException('errors.403.message');
+        }
+        if (!$this->householdsEnabled || $this->households === null) {
+            $householdIds = [];
+        }
+
+        return Transaction::run($this->pdo, function () use ($actor, $email, $displayName, $role, $passwordHash, $locale, $householdIds): array {
+            foreach ($householdIds as $householdId) {
+                if ($this->households->lock($householdId) === null) {
+                    throw new UserAdminException('households.error.assign_unknown');
+                }
+            }
+            if ($this->users->emailExists($email)) {
+                throw new UserAdminException('validation.email_taken');
+            }
+            $id = $this->users->create($email, $displayName, $role, $passwordHash, $locale, $actor->id);
+            foreach ($householdIds as $householdId) {
+                $this->households->addMember($householdId, $id, $actor->id);
+            }
+
+            return ['id' => $id, 'household_ids' => $householdIds];
+        });
     }
 
     /**
