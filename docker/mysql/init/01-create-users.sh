@@ -4,7 +4,9 @@
 # local socket, as the image's "mysql" user).
 # Creates two least-privilege accounts instead of using MYSQL_USER (which
 # would receive ALL PRIVILEGES on the database):
-#   - application account: data manipulation only (no DDL)
+#   - application account: SELECT bootstrap only (no writes or DDL)
+# After migrations the OWNER applies bin/runtime-grants, not this one-time init.
+# MySQL refuses table write grants before the tables exist. See the runbook.
 #   - migration account:   schema changes, used only by `bin/console migrate`
 # An optional test database gets the same split for the integration suite.
 # With DB_TEST_USERNAME/DB_TEST_MIGRATION_USERNAME set, the test database is
@@ -84,7 +86,8 @@ fi
 # grant_pair <database> <app user> <migration user>
 grant_pair() {
     echo "CREATE DATABASE IF NOT EXISTS \`$1\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
-    echo "GRANT SELECT, INSERT, UPDATE, DELETE ON \`$1\`.* TO '$2'@'%';"
+    local select_database="${1//_/\\_}"
+    echo "GRANT SELECT ON \`$select_database\`.* TO '$2'@'%';"
     echo "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES ON \`$1\`.* TO '$3'@'%';"
 }
 
@@ -96,6 +99,12 @@ grant_pair() {
         echo "CREATE USER IF NOT EXISTS '${DB_TEST_USERNAME}'@'%' IDENTIFIED BY '${TEST_APP_PW}';"
         echo "CREATE USER IF NOT EXISTS '${DB_TEST_MIGRATION_USERNAME}'@'%' IDENTIFIED BY '${TEST_MIG_PW}';"
         grant_pair "$DB_TEST_DATABASE" "$DB_TEST_USERNAME" "$DB_TEST_MIGRATION_USERNAME"
+        # Negative-permission fixture, test database only; post-migration grants
+        # are applied separately, then audit INSERT is revoked on this account.
+        ident_ok "${DB_TEST_USERNAME}_no_audit"
+        echo "CREATE USER IF NOT EXISTS '${DB_TEST_USERNAME}_no_audit'@'%' IDENTIFIED BY '${TEST_APP_PW}';"
+        select_test_database="${DB_TEST_DATABASE//_/\\_}"
+        echo "GRANT SELECT ON \`$select_test_database\`.* TO '${DB_TEST_USERNAME}_no_audit'@'%';"
     elif [[ -n "${DB_TEST_DATABASE:-}" ]]; then
         grant_pair "$DB_TEST_DATABASE" "$DB_USERNAME" "$DB_MIGRATION_USERNAME"
     fi

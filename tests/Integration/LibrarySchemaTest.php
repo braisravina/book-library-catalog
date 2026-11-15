@@ -99,7 +99,7 @@ final class LibrarySchemaTest extends IntegrationTestCase
             VALUES ({$copy}, {$borrower}, '2026-01-10', {$owner}, UTC_TIMESTAMP(), UTC_TIMESTAMP())");
         foreach (["DELETE FROM copies WHERE id = {$copy}", "DELETE FROM users WHERE id = {$borrower}"] as $sql) {
             try {
-                $this->pdo()->exec($sql);
+                $this->migrationPdo()->exec($sql); // Exercise the FK, not runtime user DELETE denial.
                 self::fail('Deleted a row referenced by loan history: ' . $sql);
             } catch (PDOException $e) {
                 self::assertSame(1451, $e->errorInfo[1]);
@@ -118,7 +118,7 @@ final class LibrarySchemaTest extends IntegrationTestCase
         $row = $this->pdo()->query('SELECT edition_id, work_id, title FROM wishlist_items')->fetch();
         self::assertSame([null, null, 'Soon gone'], [$row['edition_id'], $row['work_id'], $row['title']]);
 
-        $this->pdo()->exec("DELETE FROM users WHERE id = {$user}");
+        $this->migrationPdo()->exec("DELETE FROM users WHERE id = {$user}"); // Privileged fixture deletion.
         self::assertSame(0, $this->countRows('SELECT COUNT(*) FROM wishlist_items'), 'Private data goes with its owner');
     }
 }

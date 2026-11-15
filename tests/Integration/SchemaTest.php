@@ -74,7 +74,7 @@ final class SchemaTest extends IntegrationTestCase
             ->execute([$edition, $owner]);
 
         $this->expectException(PDOException::class);
-        $this->pdo()->exec("DELETE FROM users WHERE id = {$owner}");
+        $this->migrationPdo()->exec("DELETE FROM users WHERE id = {$owner}"); // Explicit privileged fixture, not a runtime workflow.
     }
 
     public function testOnlyOnePrimaryCoverPerEdition(): void

@@ -207,7 +207,7 @@ final class BackupTest extends IntegrationTestCase
         $before = $this->fingerprint();
 
         // Damage the data after the backup.
-        $this->pdo()->exec('DELETE FROM loans');
+        $this->migrationPdo()->exec('DELETE FROM loans'); // Deliberate damage fixture, not a runtime workflow.
         $this->pdo()->exec('DELETE FROM wishlist_items');
         $this->pdo()->exec("UPDATE works SET title = 'vandalised'");
         self::assertNotSame($before, $this->fingerprint());

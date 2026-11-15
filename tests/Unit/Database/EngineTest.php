@@ -75,6 +75,14 @@ final class EngineTest extends TestCase
         self::assertSame([3819, 4025], Engine::CHECK_VIOLATION_ERRORS);
     }
 
+    public function testLocksDoNotRequireWritePermissionsOnMysqlReadOnlyLookups(): void
+    {
+        self::assertSame('FOR UPDATE OF u', Engine::exclusiveAliasLock($this->pdo('8.4.13'), 'u'));
+        self::assertSame('FOR UPDATE', Engine::exclusiveAliasLock($this->pdo('11.4.13-MariaDB'), 'u'));
+        $this->expectException(\InvalidArgumentException::class);
+        Engine::exclusiveAliasLock($this->pdo('8.4.13'), 'u; DROP');
+    }
+
     public function testTheMigratorSelectsOneVariantPerEngine(): void
     {
         $this->dir = sys_get_temp_dir() . '/dla-variants-' . bin2hex(random_bytes(4));
