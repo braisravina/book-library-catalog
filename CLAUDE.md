@@ -148,6 +148,11 @@ These rules apply to every commit, in every phase, with no exceptions.
   inside the mutation transaction on the same PDO (`AuditLogger::log()` or
   `WriteGuard::audit()`), never from a controller after service commit. Never
   pass secrets in details. Keep retry callbacks database-only.
+- Runtime write permissions are reviewed in `Database\RuntimeGrants`. New tables
+  need an explicit write/read-only decision and owner provisioning after migration.
+  Never grant schema-wide runtime writes, audit UPDATE/DELETE, user DELETE or
+  provisioning authority. Preserve audit/domain transaction atomicity. Logout
+  invalidation must precede audit and must survive audit failure.
 - Keep ISBNs normalised through `Catalogue\Isbn` (ISBN-13 is the duplicate key).
 - **Catalogue layering:**
   - Controllers handle HTTP and preliminary permissions; domain audit belongs

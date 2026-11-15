@@ -160,7 +160,7 @@ roles ─< users >─ invitations
   A stored generated column enforces at most one primary cover per edition.
 - **metadata_records** cache raw provider payloads (Open Library, Google
   Books) per ISBN, so entries can be reviewed and stay available offline.
-- **audit_log** is append-only by convention: who did what, to which entity,
+- **audit_log** is append-only for the restricted runtime account: who did what, to which entity,
   from where, with redacted JSON details.
 - **login_attempts** stores a SHA-256 of the normalised e-mail and the client
   IP, never the e-mail itself.
@@ -991,8 +991,8 @@ no automatic down migration; an older backup loses subsequent writes.
 
 | Account | Privileges | Used by |
 |---|---|---|
-| `DB_USERNAME` (`library_app`) | `SELECT, INSERT, UPDATE, DELETE` | Web application |
-| `DB_MIGRATION_USERNAME` (`library_migrator`) | the above plus `CREATE, ALTER, DROP, INDEX, REFERENCES` | `bin/console migrate` only |
+| `DB_USERNAME` (`library_app`) | Schema SELECT; reviewed per-table writes (`RuntimeGrants`); audit INSERT only, users INSERT/UPDATE only | Web application and backup reads |
+| `DB_MIGRATION_USERNAME` (`library_migrator`) | Schema DML plus `CREATE, ALTER, DROP, INDEX, REFERENCES`; no GRANT OPTION | Explicit ops migrations/restores and privileged retention |
 | `root` | everything | database container only (`root@localhost`; initialisation, `mariadb-upgrade`) |
 | `healthcheck` (image) | `USAGE` only, `localhost`/`127.0.0.1`/`::1` | created by the MariaDB image; unused by this project |
 
@@ -1000,6 +1000,26 @@ Connections use native prepared statements (`ATTR_EMULATE_PREPARES=false`),
 exceptions, `utf8mb4`, UTC and a strict `sql_mode`. Connection errors are
 reduced to a SQLSTATE before they can reach any output. Multi-step writes use
 `Database\Transaction::run()`.
+
+The MySQL active-administrator join uses FOR UPDATE OF u to lock administrator
+accounts without requiring roles write permissions. MariaDB retains FOR UPDATE
+through Database\Engine. Shared reads retain LOCK IN SHARE MODE on both engines;
+account locks and transaction lifetimes are unchanged.
+
+Runtime grants are a separate owner-provisioning step after migration, not
+SQL applied by the migrator or application startup. First-init grants SELECT
+only; `php bin/runtime-grants DATABASE USER [HOST]` emits the reviewed manifest
+without connecting or reading configuration/secrets. Unknown/new tables get no
+runtime writes. Schema SELECT keeps dump enumeration complete. Runtime user
+DELETE is denied because the released audit FK would otherwise SET NULL an
+existing actor reference. Migrations and authorized restore retain their separate
+credentials. Existing broad grants must be removed/reconciled by the owner;
+see docs/AUDIT_GRANTS_LOGOUT_HARDENING.md. No released migration changes.
+
+Logout invalidates the session/identifier and rotates CSRF before attempting
+its event. Audit failure is reported with a fixed server warning and translated
+user notice; it cannot retain the authenticated session. This is a narrow failure
+policy, not a transactional session store or exactly-once session/event contract.
 
 ### Migrations
 

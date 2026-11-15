@@ -695,3 +695,17 @@ to DROP it or mark the file applied. The new migrator will retain an intent on
 that failed attempt. Neither engine is treated as supporting atomic multi-DDL
 files. Disposable fault-injection tests cover later-DDL and history-insert
 failure; they do not simulate power loss or certify a real-data recovery.
+
+
+## Runtime audit grants and logout hardening
+
+See [AUDIT_GRANTS_LOGOUT_HARDENING.md](AUDIT_GRANTS_LOGOUT_HARDENING.md) for
+post-migration provisioning and existing-account reconciliation. Runtime backups
+retain schema SELECT, including audit and migration metadata. Runtime audit writes
+are INSERT-only; users cannot be deleted through runtime credentials. Migrations,
+restore (including historical audit replacement) and approved retention remain
+separate privileged owner operations. Table grants survive table recreation on
+the tested engines; verify the manifest and reconnect workers after changes.
+Never grant runtime audit DELETE to implement retention. No audit pruning job is
+introduced. A failed explicit-logout audit cannot keep the session authenticated;
+monitor the fixed server warning, without claiming a missing event was durable.

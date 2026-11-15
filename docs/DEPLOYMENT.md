@@ -722,6 +722,7 @@ sudo rm /opt/digital-library-data/mysql-init-guard/allow-empty-init        # wit
 dc run --rm ops php bin/console config:check --strict
 dc run --rm ops php bin/console migrate
 dc run --rm ops php bin/console migrate:status        # "Database engine: MariaDB"; nothing pending, MODIFIED or OTHER-ENGINE
+# STOP: apply the owner-reviewed post-migration runtime grants first (procedure below).
 dc run --rm ops php bin/console user:create --email=<you> --name="<name>" --role=admin   # password from STDIN
 sudo /usr/local/sbin/digital-library-preflight --env-file /opt/digital-library/.env.production --existing-installation   # from now on, always this mode
 ```
@@ -736,6 +737,15 @@ dc run --rm ops php bin/console config:check --strict
 dc run --rm ops php bin/console migrate
 dc run --rm ops php bin/console migrate:status        # nothing pending, MODIFIED or OTHER-ENGINE
 ```
+
+**Runtime grant gate (new and existing installations):** initialization now
+grants SELECT only. After migration and before `user:create` or starting web
+writers, follow [AUDIT_GRANTS_LOGOUT_HARDENING.md](AUDIT_GRANTS_LOGOUT_HARDENING.md)
+to generate/review/apply runtime table writes using owner/DBA authority. Existing
+broad grants require explicit replacement/reconciliation; init scripts do not
+rerun and table grants do not override broad grants. Reapply/review the manifest
+after future migrations introduce tables, and verify effective grants after a
+restore. The application/migrator cannot provision its own privileges.
 
 The guard in the db container (`docker/mysql/db-guard.sh`) is the safety
 net. If `/opt/digital-library-data/mysql` is empty and no authorisation file is
