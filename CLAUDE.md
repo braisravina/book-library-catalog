@@ -144,11 +144,14 @@ These rules apply to every commit, in every phase, with no exceptions.
 - **Text:** every user-facing string is a translation key present in
   `lang/en.php`, `lang/es.php` **and** `lang/gl.php` (a test enforces parity).
 - **Forms:** include `<?= $view->csrfField() ?>` in every POST form.
-- **Audit:** record security-relevant and catalogue-changing actions with
-  `AuditLogger::log()`. Never pass secrets in details.
+- **Audit:** record security-relevant and catalogue-changing domain actions
+  inside the mutation transaction on the same PDO (`AuditLogger::log()` or
+  `WriteGuard::audit()`), never from a controller after service commit. Never
+  pass secrets in details. Keep retry callbacks database-only.
 - Keep ISBNs normalised through `Catalogue\Isbn` (ISBN-13 is the duplicate key).
 - **Catalogue layering:**
-  - Controllers handle HTTP, permissions and audit.
+  - Controllers handle HTTP and preliminary permissions; domain audit belongs
+    inside the service transaction.
   - `Catalogue\Input\*` parse and validate request data.
   - `Catalogue\BookService` runs multi-table writes in one transaction.
   - `Catalogue\Repository\*` hold all SQL.
@@ -272,7 +275,12 @@ These rules apply to every commit, in every phase, with no exceptions.
   and added to the crawl in `HouseholdReadIsolationTest`. With the feature
   disabled nothing may change (`Visibility` is then `1 = 1`).
 - Administrative account changes go through `Auth\UserAdministration`
-  (lock-out safeguards).
+  (lock-out safeguards). Administrative writes use `Auth\AdministratorGuard`:
+  households before sorted accounts, fresh active Admin inside READ COMMITTED,
+  locks held through domain/audit commit. Account administration locks all
+  existing accounts exclusively before the actor/target/admin-set checks; do
+  not add target-first or shared-to-exclusive account upgrades. See
+  docs/H1_H4_REMEDIATION.md for the complete transaction and recovery boundaries.
 - Loans change `copies.status` only through `Loans\LoanService` (copy lock,
   one active loan per copy via the `active_copy_id` unique index); never set
   `on_loan` from other code. Copies with loan history are withdrawn, not deleted.

@@ -950,3 +950,26 @@ and a compatible household-aware application recovery. Retaining an additive
 schema permits older named-column SQL but does not preserve all behavior or new
 location version guarantees. Restoring a backup is not atomic and loses writes
 after its recovery point. Consult HOUSEHOLD_INVENTORY.md before any rollback.
+
+
+## H1–H4 remediation artifact requirements
+
+The production PHP image now bakes in root-owned, read-only
+`config/production-image`. Config treats that artifact as production even with
+APP_ENV=testing/development or a hostile APP_ENV_FILE. The production Compose php
+and ops services also pin APP_ENV=production and clear APP_ENV_FILE, overriding
+env_file values. Both household prohibitions remain; HOUSEHOLDS_ENABLED stays
+false. Local household testing uses the development checkout/image and explicit
+testing configuration, never an environment override in the production image.
+
+These protections require the owner to build/review the new production image
+and Compose artifact in a later authorized deployment. They do not retrofit an
+already running old image. Do not mount over config or edit the image marker to
+activate households. No actual production configuration was changed here.
+
+Before an owner-run upgrade, check migrate:status before pending DDL as well as
+after it, keep all writers stopped, retain a verified same-engine backup, and
+follow OPERATIONS.md's interrupted-migration procedure on any checksum/history or
+incomplete-attempt refusal. Review docs/H1_H4_REMEDIATION.md and the preserved audit
+for remaining release gates. Merge, deployment and household activation remain
+separate decisions; production activation is still prohibited.

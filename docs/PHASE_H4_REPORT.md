@@ -521,3 +521,9 @@ report; no staged changes. No commit, push, merge, reset, stash, branch/worktree
 operation, Git remote access, identity/signing/hook edit or deployment occurred.
 The owner performs all commits and releases. H4 ends here for owner review;
 media expansion and production activation have not begun.
+
+
+Supersession note (2026-11-15): test counts and delivery/Git statements above are
+historical phase evidence. The owner's later audit baseline was 984 tests; the
+current remediation results and merge/activation verdicts are in
+H1_H4_REMEDIATION.md and FINAL_H1_H4_AUDIT.md. No remote CI verification is implied.

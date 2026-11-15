@@ -291,9 +291,9 @@ defeat any heuristic.
     sessions (`auth_version` is incremented).
 - `Auth\UserAdministration` enforces the safeguards in a transaction:
   - administrators can't change their own role or deactivate themselves;
-  - demoting or deactivating an active administrator first locks all
-    active admin rows (`SELECT … FOR UPDATE`) and refuses if none would
-    remain, so concurrent requests can't remove the last admin;
+  - account administration locks all existing account rows in ascending id
+    order before reading the actor, target and active-admin set, and refuses
+    removing the last active administrator;
   - admins reset their own password and sign themselves out through their
     own account pages.
 
@@ -753,10 +753,12 @@ and produces SQL conditions, every value bound through `Database\Params`:
   and results are those of the version before households.
   `Visibility::unrestricted()` is named only in `Services` (a unit test
   enforces it).
-- **Repositories require it.** Every method that reads works, editions,
+- **Data-facing repositories require it.** Methods listing or displaying works, editions,
   copies, covers, loans, authors, publishers, collection items or
   wishlist links takes a `Visibility` argument with no default; forgetting
-  it is a type error, not a leak. Methods that deliberately count across
+  it is a type error, not a leak. Internal lock/authorization helpers, explicit
+  admin diagnostics and bibliography-only ISBN lookup are deliberate exceptions
+  whose callers must enforce authorization. Methods that deliberately count across
   households are deletion guards (`editionCount`, `copyCount`,
   `countItems`) and are never shown.
 - **404, for GET and POST alike.** Controllers load records through
@@ -1032,8 +1034,9 @@ reduced to a SQLSTATE before they can reach any output. Multi-step writes use
   by edition and owner). It applies cleanly to a database at the Phase 1
   schema, which was verified in the Phase 2 session.
 - MariaDB and MySQL commit DDL implicitly, so a migration can't be rolled back as a
-  unit. Keep each file small and focused. If one fails, fix forward with a
-  new migration, or repair manually and re-run.
+  unit. A durable schema_migration_attempts record precedes execution. Failure
+  or interruption blocks replay until owner-reviewed recovery; never blindly
+  rerun partial DDL. See docs/OPERATIONS.md, migration recovery.
 
 ## Internationalisation
 
@@ -1532,3 +1535,61 @@ See docs/HOUSEHOLD_INVENTORY.md for limits, UI, idempotency, diagnostics and
 rollback limitations. Future media transfers must keep copy IDs as physical
 identities rather than treating ISBN as an inventory identifier. No new media
 feature is included.
+
+
+## H1–H4 remediation transaction boundaries (2026-11-15)
+
+Auth\AdministratorGuard is the transaction boundary for account, household,
+invitation and legacy administrative vocabulary writes. It refuses nesting,
+uses READ COMMITTED, takes household rows first (exclusive for household and
+vocabulary mutations), then account rows in numeric id order. Account
+administration locks the complete existing account set exclusively, avoiding
+actor/target lock upgrades and protecting the last-active-admin calculation.
+Other operations lock the actor and required accounts shared. Authority is the
+fresh active global Admin role, whose current permissions are defined by Role;
+there are no mutable per-account permission grants. A database-only deadlock
+victim retries at most three times; timeout/exhaustion rolls back and gives 409.
+The broad locks trade administrative concurrency for a simple common order.
+
+InventoryTransferService, BookService, CopyService, LoanService,
+CollectionService and LocationService continue to authorize through WriteGuard.
+Copy creation/update and first-book copies now include the chosen owner in its
+sorted account locks; lending includes the borrower. Invitation redemption
+pre-reads the immutable issuer id, locks that account after households and before
+the invitation, and verifies the id again under the invitation lock. This
+protects FK/audit references without requiring the original issuer still to be
+an administrator: an issued invitation remains a durable grant until revoked.
+
+AuditLogger is shared on the same PDO. Domain services insert their events
+before commit (WriteGuard::audit for guarded catalogue services). Controllers no
+longer append those events after service return. HTTP context is supplied to the
+shared logger without changing event redaction. Vocabulary controllers place DB
+work and audit together inside AdministratorGuard. Cover files are staged before
+the transaction and removed after DB failure; removal of old files remains an
+after-commit cleanup, so filesystem and database atomicity are not claimed.
+
+Catalogue exports preserve a repeatable-read snapshot. Their audit is a durable
+request event, committed under fresh admin authorization before streaming. The
+stream then uses a current locking account read (not the snapshot's cached user)
+and holds the shared account lock until the final batch; committed revocation
+before streaming refuses data, and revocation during streaming waits. Bytes
+already delivered cannot be rolled back. Personal exports retain their existing
+read-only snapshots. Long administrative exports may delay account revocation.
+
+Migration bookkeeping adds schema_migration_attempts outside the versioned domain
+schema, like schema_migrations itself, without editing any released SQL or pinned
+checksum. Intent commits before the first statement; successful history INSERT and
+intent removal share one DML transaction. A crash before, during or after DDL,
+or failure to record history, retains the intent. migrate and status refuse it.
+Applied history must match an available same-engine checksum before pending
+migrations run, including refusal for unknown recorded versions. Old interrupted
+runs made before this journal have no intent record: inspect pending schema
+objects and use the manual recovery procedure. There is no automatic repair or
+object deletion. Backups include the metadata table normally.
+
+A root-owned config/production-image marker is baked into the prod image only.
+Config::isProduction checks it independently of environment classification;
+production Compose additionally pins APP_ENV and blanks APP_ENV_FILE. Neither
+household prohibition is removed. Rebuilding/deploying these safeguards is an
+owner action; local tests use explicit testing configuration outside the prod
+image. See docs/H1_H4_REMEDIATION.md for verified scope and remaining limitations.

@@ -366,18 +366,19 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   - Wishlist changes aren't audited by design (private, not catalogue
     data).
 
-### Households (phases H1 to H3, development-only)
+### Households (phases H1 to H4, development-only)
 
 Household-based access control is being built in phases. Reads are
 isolated since phase H2 and writes since phase H3. **It has not been
 released**: it stays development-only until the owner decides otherwise
-(phase H4 comes first), and production refuses to start with it enabled.
+(a separate activation release is required), and production refuses to start with it enabled.
 While the feature is disabled, every signed-in user with `catalogue.view`
 sees the whole catalogue and every rule is the one from before households.
 
 - **Fail closed.** `HOUSEHOLDS_ENABLED` defaults to `false`. In production
-  the application ignores it and `config:check` reports it as an error, so
-  the unreleased feature cannot be exposed by a configuration mistake.
+  the application ignores it and `config:check` reports it as an error, and the production image carries a root-owned production marker. The production
+  Compose services pin APP_ENV and clear APP_ENV_FILE. These protect against
+  env-file mistakes; changing the deployment artifact remains an owner action.
   While disabled, every `/admin/households` route answers 404 (also for
   administrators), the navigation entry is absent, and a `household_id`
   submitted with a copy is ignored.
@@ -406,7 +407,9 @@ sees the whole catalogue and every rule is the one from before households.
   the inventory of their own households (copies, locations, loans), the
   bibliographic records those households hold, and the ones they
   catalogued themselves. `Security\Visibility` is the single definition
-  and every repository read requires it. Administrators are unrestricted.
+  for data-facing inventory reads. Internal lock/authorization helpers,
+  explicit administrator diagnostics and bibliography-only ISBN lookup are
+  deliberate exceptions; their call-site authorization remains necessary. Administrators are unrestricted.
   - A record outside the user's view answers **404, identical to a record
     that does not exist**, for GET and POST, before any permission check,
     validation or write. 403 is only given for records the user can see.
@@ -503,9 +506,9 @@ sees the whole catalogue and every rule is the one from before households.
     removal in flight, real deadlock, parallel inventory codes, loan
     against removal), `HouseholdPhaseThreeMigrationTest`,
     `HouseholdFeatureDisabledTest`, `HouseholdAccessMatrixTest`.
-- **Not done (phase H4, not started):** moving inventory between
-  households in bulk, `household_id NOT NULL`, retiring the default
-  household, and the production release itself.
+- **H4 implemented in development:** reviewed bounded inventory transfers.
+  Nullable household columns and the default household remain intentionally;
+  production activation still requires a separate release.
 
 ### Request integrity
 
@@ -655,7 +658,7 @@ no automatic down migration; an older backup loses subsequent writes.
 
 ## Known limitations and follow-ups
 
-- Households (phases H1 to H3): development-only. Reads and writes are
+- Households (phases H1 to H4): development-only. Reads and writes are
   isolated per household; see "Households" above for the accepted
   residuals. Not released: do not enable in production (the application
   refuses) until the owner decides, after phase H4.
@@ -677,9 +680,9 @@ no automatic down migration; an older backup loses subsequent writes.
   production nginx refuses to start until an approved policy exists
   (docs/DEPLOYMENT.md, section 0;
   [ARCHITECTURE.md › Client IP behind a reverse proxy](ARCHITECTURE.md#client-ip-behind-a-reverse-proxy)).
-- The production images have never been built or run (CI has not executed).
-  **Blocker** until the `production-stack` CI job and a production-host
-  deployment have verified them.
+- The owner reports H1–H4 GitHub Actions CI passed. This remediation does not
+  independently inspect remote CI or production. Its local verification is
+  recorded in docs/H1_H4_REMEDIATION.md; a new owner-run CI pass is required.
 - PHP-FPM listens on port 9000 on all of the php container's networks,
   including `egress` (needed for ISBN lookups). Only containers of this
   Compose project share those networks, but FastCGI has no authentication:
@@ -716,8 +719,9 @@ no automatic down migration; an older backup loses subsequent writes.
   size error. Files between `UPLOAD_MAX_BYTES` (5 MB) and that limit get a
   proper size error.
 - Concurrent edits of works, editions and copies are detected since Phase 3
-  (`row_version`). Categories, locations, authors and publishers still use
-  last-write-wins; their edits are admin-only and audited.
+  (`row_version`). Categories, authors and publishers still use
+  last-write-wins; their edits are admin-only and audited. Locations carry
+  optimistic row versions since H4.
 - Search uses LIKE with leading wildcards, which scans the editions table.
   That's fine at personal-library scale; revisit beyond tens of thousands
   of editions.
@@ -872,3 +876,47 @@ is a read-only local rehearsal command with explicit environment, maintenance,
 operator acknowledgements and exclusive operations-lock checks; it has no apply
 or production mode. See docs/HOUSEHOLD_INVENTORY.md. Turning off enforcement is
 not a privacy-safe rollback: disabled mode reveals the catalogue installation-wide.
+
+
+## H1–H4 audit remediation (2026-11-15)
+
+Administrative domain writes now reload an active administrator inside a
+READ COMMITTED transaction and keep account locks until commit. Household locks
+precede sorted account locks. Account administration takes all existing account
+rows exclusively in id order before checking the active-administrator set;
+other administrative operations take shared actor/required-account locks.
+This broad account lock is deliberate for a small installation. The route check
+and a previously captured User never authorize the write on their own.
+An authorized write can commit before a blocked revocation; after revocation
+commits, a new guarded mutation is denied. Last-admin and self-change safeguards,
+CSRF and session auth_version behavior remain. Borrower and chosen-owner accounts
+are also locked before catalogue rows; invitation redemption locks its issuer
+account before the invitation to keep FK/audit references in the same order.
+
+Domain audit events now share the mutation's PDO and transaction: households,
+accounts (including password changes and CLI creation), invitations/redemption,
+works/editions/covers/copies, loans, collections, locations and administrative
+vocabulary changes. Audit insert failure rolls back the domain change. Deadlock
+retries roll back failed attempts and their audit events; they run DB-only work.
+H4 transfer audit/idempotency remains unchanged. This is atomic accountability,
+not tamper-proof logging or general request idempotency. Runtime audit UPDATE and
+DELETE grants still need the owner's separate integrity decision above.
+
+Session/cookie and filesystem effects cannot participate in an InnoDB transaction.
+Login/logout, backup/restore/cleanup and cover-file cleanup therefore retain the
+explicit limits assessed in docs/H1_H4_REMEDIATION.md. Export audit records a
+request, not proof of delivery: its attempt is durable before streaming, and
+catalogue streams revalidate and hold the account lock through the final batch.
+
+Production images now contain config/production-image (created only in the prod
+Docker build, root-owned and read-only). Its presence forces production behavior
+regardless of APP_ENV or APP_ENV_FILE, including both existing household guards.
+Production Compose also pins APP_ENV=production and clears APP_ENV_FILE. Local
+household tests require an explicit testing/development environment outside the
+production image. These repository changes require an owner-built new artifact;
+no running production configuration or functionality was changed.
+
+Migration checksums are checked by migrate itself. Durable migration-attempt
+metadata blocks replay after incomplete DDL or a failed history insert. DDL files
+remain non-atomic on both engines; see docs/OPERATIONS.md for manual recovery.
+The original findings remain in docs/FINAL_H1_H4_AUDIT.md, with their dispositions.
