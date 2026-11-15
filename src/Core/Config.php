@@ -116,11 +116,14 @@ final class Config
     /**
      * Fail-closed: only the exact values "development" and "testing" are
      * non-production. A missing, empty or unknown APP_ENV (e.g. "prod")
-     * is treated as production. ConfigValidator reports unknown values.
+     * is treated as production. A marker baked into the root-owned production
+     * image overrides environment classification. ConfigValidator reports
+     * unknown values.
      */
     public function isProduction(): bool
     {
-        return !in_array($this->get('APP_ENV'), ['development', 'testing'], true);
+        return is_file(dirname(__DIR__, 2) . '/config/production-image')
+            || !in_array($this->get('APP_ENV'), ['development', 'testing'], true);
     }
 
     /**

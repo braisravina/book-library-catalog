@@ -60,6 +60,8 @@ COPY docker/php/entrypoint-prod.sh /usr/local/bin/entrypoint-prod.sh
 # the owner with the same owner (www-data, uid/gid 82); these image
 # directories are then hidden by the mounts.
 RUN set -eux; \
+    touch /var/www/html/config/production-image; \
+    chmod 0444 /var/www/html/config/production-image; \
     chmod 0755 /usr/local/bin/entrypoint-prod.sh; \
     chmod -R go-w /var/www/html; \
     mkdir -p storage/covers storage/logs storage/cache storage/backups storage/tmp; \
