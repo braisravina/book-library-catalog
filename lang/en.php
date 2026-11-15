@@ -68,6 +68,7 @@ return [
         ],
         'session_expired' => 'Your session has expired. Please sign in again.',
         'logged_out' => 'You have been signed out.',
+        'logged_out_audit_failed' => 'You have been signed out, but the sign-out audit record could not be saved.',
     ],
     'fields' => [
         'email' => 'E-mail address',

@@ -47,8 +47,17 @@ final class AuthController extends Controller
     public function logout(Request $request): Response
     {
         $user = $this->user($request);
-        $this->services->audit()->log('auth.logout', $user->id, 'user', $user->id, [], $request->remoteAddress(), $request->userAgent());
+        // Invalidation must not depend on audit availability, even preparation.
         $this->services->auth()->logout();
+        try {
+            $this->services->audit()->log('auth.logout', $user->id, 'user', $user->id, [], $request->remoteAddress(), $request->userAgent());
+        } catch (\Throwable) {
+            // Fixed diagnostic: database exceptions may contain sensitive values.
+            error_log('[digital-library] auth.logout audit recording failed; session invalidated');
+            $this->flash('warning', 'auth.logged_out_audit_failed');
+
+            return Response::redirect('/login');
+        }
         $this->flash('success', 'auth.logged_out');
 
         return Response::redirect('/login');

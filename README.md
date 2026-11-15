@@ -16,6 +16,12 @@ a personal collection of physical books. Intended domain: `library.bravina.co.uk
 | [SECURITY.md](SECURITY.md) | Threat model, implemented controls, deployment checklist |
 | [CLAUDE.md](CLAUDE.md) | Persistent instructions for automated contributors, including Git rules |
 
+After database initialization/migration, the owner must apply the reviewed
+runtime table grants before account creation or writes. Initializer scripts grant
+SELECT only and do not retrofit existing accounts. See
+[the grant provisioning and existing-installation procedure](docs/AUDIT_GRANTS_LOGOUT_HARDENING.md).
+The full integration suite also needs the documented test-only negative-audit account.
+
 ## Features
 
 ### Foundation (Phase 1)
@@ -331,7 +337,7 @@ the full, commented list. Any variable can instead be supplied as a file via
 - `APP_ENV=production` disables all debug output, even if `APP_DEBUG=true`.
 - `SESSION_SECURE_COOKIE=true` is required behind HTTPS. It also switches the
   cookie to the `__Host-` prefix.
-- `DB_USERNAME` is the runtime account (DML only). `DB_MIGRATION_USERNAME` is
+- `DB_USERNAME` is the runtime account (schema SELECT and reviewed per-table writes). `DB_MIGRATION_USERNAME` is
   used only by `bin/console migrate`.
 - `APP_URL` is also the base of invitation links.
 - `BACKUP_PATH`, `TEMP_PATH` and `MAINTENANCE_FLAG_PATH` default to

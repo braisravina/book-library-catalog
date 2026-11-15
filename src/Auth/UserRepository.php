@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DigitalLibrary\Auth;
 
 use DigitalLibrary\Database\Params;
+use DigitalLibrary\Database\Engine;
 use DigitalLibrary\Security\Role;
 use DigitalLibrary\Security\Visibility;
 use PDO;
@@ -115,7 +116,7 @@ final class UserRepository
     {
         $stmt = $this->pdo->query(
             "SELECT u.id FROM users u JOIN roles r ON r.id = u.role_id
-             WHERE r.code = 'admin' AND u.is_active = 1 ORDER BY u.id FOR UPDATE"
+             WHERE r.code = 'admin' AND u.is_active = 1 ORDER BY u.id " . Engine::exclusiveAliasLock($this->pdo, 'u')
         );
 
         return array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));

@@ -68,6 +68,7 @@ return [
         ],
         'session_expired' => 'A túa sesión caducou. Inicia sesión de novo.',
         'logged_out' => 'Pechaches a sesión.',
+        'logged_out_audit_failed' => 'Pechaches a sesión, pero non se puido gardar o rexistro de auditoría do peche.',
     ],
     'fields' => [
         'email' => 'Enderezo electrónico',

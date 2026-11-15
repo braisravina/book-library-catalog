@@ -1,0 +1,17 @@
+<?php
+
+declare(strict_types=1);
+
+// Pure SQL generation. No Bootstrap/.env/connection and no credentials needed.
+require dirname(__DIR__) . '/vendor/autoload.php';
+
+if ($argc < 3 || $argc > 4) {
+    fwrite(STDERR, "Usage: php bin/runtime-grants DATABASE RUNTIME_USER [ACCOUNT_HOST]\nGenerates SQL only; review docs/AUDIT_GRANTS_LOGOUT_HARDENING.md before applying.\n");
+    exit(1);
+}
+try {
+    echo \DigitalLibrary\Database\RuntimeGrants::sql($argv[1], $argv[2], $argv[3] ?? '%');
+} catch (\InvalidArgumentException $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    exit(1);
+}

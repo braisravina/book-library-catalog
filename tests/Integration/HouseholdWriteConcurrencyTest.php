@@ -365,7 +365,7 @@ final class HouseholdWriteConcurrencyTest extends IntegrationTestCase
         $admin = $this->services()->users()->findById($this->adminId);
         $outcomes = [];
         foreach ([0.00, 0.02, 0.05, 0.10, 0.20, 0.00] as $round => $delay) {
-            $this->pdo()->exec('DELETE FROM loans');
+            $this->migrationPdo()->exec('DELETE FROM loans'); // Reset history between isolated race rounds.
             $this->pdo()->exec("UPDATE copies SET status = 'available' WHERE id = {$copy}");
             $this->pdo()->exec("INSERT INTO household_members (household_id, user_id, created_at) VALUES ({$this->casa}, {$this->veraId}, UTC_TIMESTAMP())");
             $start = microtime(true) + 0.5;

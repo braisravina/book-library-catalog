@@ -68,6 +68,7 @@ return [
         ],
         'session_expired' => 'Tu sesión ha caducado. Vuelve a iniciar sesión.',
         'logged_out' => 'Has cerrado la sesión.',
+        'logged_out_audit_failed' => 'Has cerrado la sesión, pero no se pudo guardar el registro de auditoría del cierre.',
     ],
     'fields' => [
         'email' => 'Correo electrónico',

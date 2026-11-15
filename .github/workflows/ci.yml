@@ -116,10 +116,18 @@ jobs:
         run: |
           mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password <<'SQL'
           CREATE USER 'library_test_app'@'%' IDENTIFIED BY 'ci_test_app_password';
+          CREATE USER 'library_test_app_no_audit'@'%' IDENTIFIED BY 'ci_test_app_password';
           CREATE USER 'library_test_migrator'@'%' IDENTIFIED BY 'ci_test_migration_password';
-          GRANT SELECT, INSERT, UPDATE, DELETE ON `library_test`.* TO 'library_test_app'@'%';
+          GRANT SELECT ON `library_test`.* TO 'library_test_app'@'%';
           GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES ON `library_test`.* TO 'library_test_migrator'@'%';
           SQL
+          # Tables must exist before table grants; migrate with the DDL account.
+          DB_DATABASE="$DB_TEST_DATABASE" DB_USERNAME="$DB_TEST_USERNAME" DB_PASSWORD="$DB_TEST_PASSWORD" DB_MIGRATION_USERNAME="$DB_TEST_MIGRATION_USERNAME" DB_MIGRATION_PASSWORD="$DB_TEST_MIGRATION_PASSWORD" php bin/console migrate
+          php bin/runtime-grants "$DB_TEST_DATABASE" "$DB_TEST_USERNAME" > "$RUNNER_TEMP/runtime-grants.sql"
+          mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password < "$RUNNER_TEMP/runtime-grants.sql"
+          php bin/runtime-grants "$DB_TEST_DATABASE" "${DB_TEST_USERNAME}_no_audit" > "$RUNNER_TEMP/no-audit-grants.sql"
+          mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password < "$RUNNER_TEMP/no-audit-grants.sql"
+          mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password -e "REVOKE INSERT ON \`$DB_TEST_DATABASE\`.audit_log FROM '${DB_TEST_USERNAME}_no_audit'@'%'"
 
       - name: Run the full test suite
         # --fail-on-skipped: GD cover tests and the database integration suite
@@ -200,10 +208,18 @@ jobs:
         run: |
           mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password <<'SQL'
           CREATE USER 'library_test_app'@'%' IDENTIFIED BY 'ci_test_app_password';
+          CREATE USER 'library_test_app_no_audit'@'%' IDENTIFIED BY 'ci_test_app_password';
           CREATE USER 'library_test_migrator'@'%' IDENTIFIED BY 'ci_test_migration_password';
-          GRANT SELECT, INSERT, UPDATE, DELETE ON `library_test`.* TO 'library_test_app'@'%';
+          GRANT SELECT ON `library_test`.* TO 'library_test_app'@'%';
           GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES ON `library_test`.* TO 'library_test_migrator'@'%';
           SQL
+          # Tables must exist before table grants; migrate with the DDL account.
+          DB_DATABASE="$DB_TEST_DATABASE" DB_USERNAME="$DB_TEST_USERNAME" DB_PASSWORD="$DB_TEST_PASSWORD" DB_MIGRATION_USERNAME="$DB_TEST_MIGRATION_USERNAME" DB_MIGRATION_PASSWORD="$DB_TEST_MIGRATION_PASSWORD" php bin/console migrate
+          php bin/runtime-grants "$DB_TEST_DATABASE" "$DB_TEST_USERNAME" > "$RUNNER_TEMP/runtime-grants.sql"
+          mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password < "$RUNNER_TEMP/runtime-grants.sql"
+          php bin/runtime-grants "$DB_TEST_DATABASE" "${DB_TEST_USERNAME}_no_audit" > "$RUNNER_TEMP/no-audit-grants.sql"
+          mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password < "$RUNNER_TEMP/no-audit-grants.sql"
+          mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password -e "REVOKE INSERT ON \`$DB_TEST_DATABASE\`.audit_log FROM '${DB_TEST_USERNAME}_no_audit'@'%'"
 
       - name: Run the full test suite
         run: vendor/bin/phpunit --fail-on-skipped --fail-on-warning
@@ -442,7 +458,7 @@ jobs:
           db=$(dc config --format json | jq -r '.services.db.environment.MARIADB_DATABASE')
           expect 'accounts' "$(rootsql "SELECT CONCAT(User, '@', Host) FROM mysql.user ORDER BY 1" | tr -d '\r' | paste -sd' ')" "healthcheck@127.0.0.1 healthcheck@::1 healthcheck@localhost $app@% $mig@% mariadb.sys@localhost root@localhost"
           grants() { rootsql "SHOW GRANTS FOR '$1'@'$2'" | tr -d '\r' | grep -v '^GRANT USAGE ON \*\.\* TO' | paste -sd'|'; }
-          expect 'application grants' "$(grants "$app" %)" "GRANT SELECT, INSERT, UPDATE, DELETE ON \`$db\`.* TO \`$app\`@\`%\`"
+          expect 'application grants' "$(grants "$app" %)" "GRANT SELECT ON \`$db\`.* TO \`$app\`@\`%\`"
           expect 'migration grants' "$(grants "$mig" %)" "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, REFERENCES, INDEX, ALTER ON \`$db\`.* TO \`$mig\`@\`%\`"
           for host in localhost 127.0.0.1 ::1; do expect "healthcheck@$host grants" "$(grants healthcheck "$host" || true)" ''; done
           # Root is refused over TCP (only root@localhost exists).
@@ -580,6 +596,15 @@ jobs:
           set -eux
           dc() { docker compose -f docker-compose.prod.yml --env-file .env.production "$@"; }
           dc run --rm -T ops php bin/console migrate
+          db=$(dc config --format json | jq -r '.services.db.environment.MARIADB_DATABASE')
+          app=$(dc config --format json | jq -r '.services.db.environment.DB_USERNAME')
+          dc run --rm -T ops php bin/runtime-grants "$db" "$app" > "$RUNNER_TEMP/runtime-grants.sql"
+          dc exec -T db sh -c 'MYSQL_PWD="$(cat /run/secrets/db_root_password)" exec mariadb --protocol=socket -uroot' < "$RUNNER_TEMP/runtime-grants.sql"
+          # Even after provisioning, runtime cannot change retained audit rows.
+          if dc exec -T db sh -c 'MYSQL_PWD="$(cat /run/secrets/db_password)" exec mariadb -h127.0.0.1 -u"$DB_USERNAME" "$MARIADB_DATABASE" -e "UPDATE audit_log SET action=action WHERE 1=0"'; then
+            echo "::error::runtime audit UPDATE unexpectedly allowed" >&2
+            exit 1
+          fi
           status=$(dc run --rm -T ops php bin/console migrate:status)
           printf '%s\n' "$status"
           printf '%s\n' "$status" | grep -F 'Database engine: MariaDB'

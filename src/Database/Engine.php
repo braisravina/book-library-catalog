@@ -47,6 +47,16 @@ final class Engine
         return preg_match('/^\d+\.\d+\.\d+-MariaDB(?:[-+.\w]*)$/', $version) === 1 ? self::MARIADB : self::MYSQL;
     }
 
+    /** Lock only a writable alias in a join to read-only lookup tables. */
+    public static function exclusiveAliasLock(PDO $pdo, string $alias): string
+    {
+        if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/D', $alias) !== 1) {
+            throw new \InvalidArgumentException('Invalid locking alias.');
+        }
+
+        return self::of($pdo) === self::MARIADB ? 'FOR UPDATE' : 'FOR UPDATE OF ' . $alias;
+    }
+
     /**
      * A SELECT bounded to $milliseconds of execution time. MySQL: the
      * MAX_EXECUTION_TIME optimizer hint (MariaDB ignores it as a comment).

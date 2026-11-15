@@ -158,7 +158,7 @@ final class ContainerScriptsTest extends TestCase
         $out = (string) file_get_contents($sql);
         self::assertStringContainsString("CREATE USER IF NOT EXISTS 'library_app'@'%' IDENTIFIED BY 'app''secret\\\\pw';", $out, 'File contents, trailing CR/LF removed, SQL-escaped');
         self::assertStringContainsString("CREATE USER IF NOT EXISTS 'library_migrator'@'%' IDENTIFIED BY 'migration-secret';", $out);
-        self::assertStringContainsString("GRANT SELECT, INSERT, UPDATE, DELETE ON `library`.* TO 'library_app'@'%';", $out, 'Application account: DML only');
+        self::assertStringContainsString("GRANT SELECT ON `library`.* TO 'library_app'@'%';", $out, 'Read-only bootstrap; table writes require explicit post-migration provisioning');
         self::assertStringContainsString('root password passed: root-pw', $out);
         self::assertStringNotContainsString('mysql client used', $out);
         self::assertStringNotContainsString($this->tmp, $out, 'Paths are not passwords');

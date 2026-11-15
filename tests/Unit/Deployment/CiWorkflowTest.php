@@ -227,7 +227,7 @@ final class CiWorkflowTest extends TestCase
 
             $runs = implode("\n", array_column($job['steps'], 'run'));
             preg_match_all('/\bmysql\s+-h\s+127\.0\.0\.1\b[^\n]*/', $runs, $clients);
-            self::assertCount(2, $clients[0], $name . ': engine verification and test-account creation');
+            self::assertCount(5, $clients[0], $name . ': engine verification, account creation, manifests and negative audit fixture');
             foreach ($clients[0] as $client) {
                 self::assertStringContainsString('-P "$DB_PORT"', $client, $name . ': every host-side client uses the configured port');
             }
