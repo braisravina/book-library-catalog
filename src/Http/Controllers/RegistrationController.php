@@ -169,13 +169,6 @@ final class RegistrationController extends Controller
             return $this->invalid($request, $e->reason);
         }
 
-        $this->services->audit()->log('invitation.accepted', $result['user_id'], 'invitation', $result['invitation_id'], ['user_id' => $result['user_id']], $ip, $request->userAgent());
-        $this->services->audit()->log('user.created', $result['user_id'], 'user', $result['user_id'], [
-            'role' => $result['role']->value,
-            'via' => 'invitation',
-            'invitation_id' => $result['invitation_id'],
-        ], $ip, $request->userAgent());
-
         $session = $this->services->session();
         $session->remove(self::SESSION_KEY);
         $session->regenerate();

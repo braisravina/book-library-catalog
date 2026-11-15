@@ -36,7 +36,6 @@ final class AccountController extends Controller
         }
 
         $this->services->auth()->changePassword($user, $new);
-        $this->services->audit()->log('user.password_changed', $user->id, 'user', $user->id, [], $request->remoteAddress(), $request->userAgent());
         $this->flash('success', 'account.password.updated');
 
         return Response::redirect('/');

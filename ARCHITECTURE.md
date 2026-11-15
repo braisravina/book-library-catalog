@@ -113,6 +113,7 @@ session or database work.
 | `collection.manage_any` (see and manage private collections) | ✔ | | |
 | `invitation.manage` (issue, revoke, replace invitations) | ✔ | | |
 | `catalogue.export` (whole-catalogue CSV/JSON export) | ✔ | | |
+| `household.manage` (households and their members; phase H1) | ✔ | | |
 
 Personal exports need no extra permission: they are always scoped to the
 signed-in user.
@@ -290,9 +291,9 @@ defeat any heuristic.
     sessions (`auth_version` is incremented).
 - `Auth\UserAdministration` enforces the safeguards in a transaction:
   - administrators can't change their own role or deactivate themselves;
-  - demoting or deactivating an active administrator first locks all
-    active admin rows (`SELECT … FOR UPDATE`) and refuses if none would
-    remain, so concurrent requests can't remove the last admin;
+  - account administration locks all existing account rows in ascending id
+    order before reading the actor, target and active-admin set, and refuses
+    removing the last active administrator;
   - admins reset their own password and sign themselves out through their
     own account pages.
 
@@ -643,6 +644,349 @@ See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the operator's view.
   `TEMP_PATH/operations.lock`; released by the kernel when the process
   exits, so locks never go stale).
 
+## Households (phases H1 to H3, development-only)
+
+Households are the access boundary for **physical inventory**. Phase H1
+added the schema, the membership infrastructure, administrator pages and
+the household of a copy. Phase H2 scopes every **read** to what the viewer
+may see ("Read isolation" below). Phase H3 scopes every **write** and the
+workflows around it ("Write authorization" below). The feature stays
+development-only: production refuses to start with it enabled until the
+owner releases it (phase H4 comes first), and while it is off nothing is
+filtered and nothing behaves differently.
+
+**Two layers.**
+
+| Layer | Tables | Household |
+|---|---|---|
+| Shared bibliographic metadata | `works`, `editions`, `authors`, `publishers`, `categories`, `covers`, `metadata_records` | none: one record per title, ISBN-13 stays globally unique |
+| Household inventory | `copies`, `locations` (and `loans` through their copy) | `household_id`: each row belongs to one household |
+| Personal | `wishlist_items`, `collections`, `collection_items` | wishlists: none (owner-only). Collections: none while private; a shared collection names the one household it is shared with (`household_id`). Collections are curated lists, never a permission boundary |
+
+Bibliographic visibility is *derived*: an edition is visible to the user
+who catalogued it and to everyone who reaches one of its copies, so the
+shared layer never reveals who holds a title, how many copies exist, where
+they are, or who borrowed them.
+
+**Schema** (`2026_11_13_180000` to `180002`, additive, portable, no MariaDB
+override):
+
+- `households` (`name` unique, `system_key` unique and NULL for ordinary
+  households, `row_version`) and `household_members` (`household_id`,
+  `user_id`, `added_by`). Users may belong to several households. There
+  are no per-household roles: the global Administrator, Member and Viewer
+  roles are unchanged.
+- `copies.household_id` and `locations.household_id`: **nullable**, indexed,
+  `ON DELETE RESTRICT`. NULL means "not assigned" and is reachable by
+  administrators only. `NOT NULL` is left to phase H4, after rollback
+  compatibility has been evaluated: with a nullable column the previous
+  application version keeps working on the new schema. (Inventory codes
+  became unique per household in phase H3; see "Schema of phase H3".)
+- Backfill (data only, idempotent): one temporary **default household**
+  (`system_key = 'default'`) receives every existing copy and location.
+  Accounts that are active **and** have signed in at least once become its
+  members, which preserves the access they have today. Disabled accounts
+  and accounts that never signed in are not added. Accounts created later
+  belong to no household until an administrator assigns one.
+
+**Code.**
+
+- `Security\HouseholdScope`: the households a user reaches, built from the
+  database on every request and never stored in the session, so a
+  membership change applies to the member's next request. Administrators
+  are unrestricted; a deactivated or signed-out user reaches nothing.
+  `Services::householdScope()`.
+- `Households\HouseholdRepository` (all SQL), `HouseholdService`
+  (transactions under a household row lock; refuses non-administrators,
+  deleting the default household, deleting a household with members,
+  copies or locations, and adding a deactivated account),
+  `HouseholdInput`.
+- `Households\CopyHousehold`: the only place that decides a copy's
+  household. Feature disabled: new copies go to the default household,
+  edits keep the household, and a submitted `household_id` is ignored.
+  Feature enabled: administrators choose any household; other users only
+  households they belong to (a single membership is used without asking);
+  an unknown household and a forbidden one give the same error; the owner
+  must be an administrator or a member of the household; the location
+  must belong to it. `CopyRepository::update()` changes the household only
+  when the caller names it.
+- Editing a copy stays **owner-only** for members (`copy.manage_own`) plus
+  administrators. Membership gives visibility, not the right to modify
+  other members' copies.
+- `Admin\HouseholdController` (`/admin/households`): `household.manage`
+  route guard, 404 for everyone while the feature is disabled, and the
+  service checks the permission again. Audit events: `household.created`,
+  `household.updated`, `household.deleted`, `household.member_added`,
+  `household.member_removed` (members by id only), and `copy.created` /
+  `copy.updated` carry `household_id` / `household_changed`.
+- New locations inherit their parent's household; a new root goes to the
+  household chosen for it (the default household while the feature is
+  disabled). See "Locations" under "Write authorization".
+
+**Feature switch.** `HOUSEHOLDS_ENABLED` (default `false`) shows the
+administration pages and the household choices (copies, shared
+collections, root locations, new accounts and invitations), and turns
+read isolation and the household write rules on. `Services::householdsEnabled()` is always false in
+production and `ConfigValidator` makes production refuse to start with it
+on.
+
+**Read isolation (phase H2).** `Security\Visibility` is the single
+definition of what a viewer may read. It is built per request from the
+user's `HouseholdScope` (`Services::visibility()`, `Controller::visibility()`)
+and produces SQL conditions, every value bound through `Database\Params`:
+
+| Record | Visible when |
+|---|---|
+| copy, location | its household is in the viewer's scope (none assigned: administrators only) |
+| edition | the viewer catalogued it, or it has a visible copy |
+| work | the viewer catalogued it, or it has a visible edition |
+| author, publisher | credited on / publishing a visible work or edition |
+| user (by name) | the viewer, or someone sharing a household with them |
+
+- **Creators keep their records.** Cataloguing a work or edition keeps it
+  in view for its creator even when only other households hold copies of
+  it. It never shows those copies: inventory is reached through the copy
+  rule alone, so the creator sees the description with their own
+  households' copies, or none.
+- **Unrestricted** for administrators, and for everyone while the feature
+  is disabled: the conditions are then the constant `1 = 1`, so queries
+  and results are those of the version before households.
+  `Visibility::unrestricted()` is named only in `Services` (a unit test
+  enforces it).
+- **Data-facing repositories require it.** Methods listing or displaying works, editions,
+  copies, covers, loans, authors, publishers, collection items or
+  wishlist links takes a `Visibility` argument with no default; forgetting
+  it is a type error, not a leak. Internal lock/authorization helpers, explicit
+  admin diagnostics and bibliography-only ISBN lookup are deliberate exceptions
+  whose callers must enforce authorization. Methods that deliberately count across
+  households are deletion guards (`editionCount`, `copyCount`,
+  `countItems`) and are never shown.
+- **404, for GET and POST alike.** Controllers load records through
+  `visibility()`, so a record outside the viewer's view is answered
+  exactly like one that does not exist (same status and page), before any
+  permission check (403 is only ever given for a record the user can
+  see), validation, error page or write. This is why routes whose write
+  rules are phase H3 already carry `'read' => 'H2'` in the matrix.
+- **Counts and options.** Dashboard figures (`StatsRepository`), search
+  totals and pages, copy counts, author and publisher counts and
+  collection item counts are computed over visible records. Filters and
+  forms offer only visible locations, household co-members as owners,
+  languages of visible editions, and visible author and publisher names.
+- **ISBN.** ISBN-13 stays unique across the shared catalogue, so entering
+  an ISBN that another household holds must say so. It shows the shared
+  bibliographic description (`EditionRepository::bibliographic()`) and
+  nothing else: no copy count, owner, household, location or link. The
+  "ISBN already used" error on edition forms links to the other edition
+  only when it is visible. Same-title warnings and similar-work
+  suggestions come from visible records.
+- **Loans.** Lists show loans of visible copies. A user's own borrowings
+  are always listed (their data) but, for a copy no longer in view, with
+  the title and dates only. Lending offers and accepts only the active
+  members of the copy's household besides a free-text name (every active
+  user only while the feature is disabled).
+- **Collections and wishlists.** A shared collection is visible to the
+  members of the household it is shared with (phase H3), a private one to
+  its owner; administrators see all. Items are filtered per viewer and the
+  owner's name is given only to household co-members. A wishlist entry
+  linked to an edition out of view is listed without the link.
+- **Covers.** 404 unless the edition is visible, checked before the ETag
+  comparison; with the feature enabled they are served `private, no-cache`
+  so a revoked membership applies to the next request.
+- **Personal export** follows the same rules (`PersonalExport`).
+- **No schema change.** The conditions use the composite indexes on
+  `copies` added in H1.
+
+**Route/access matrix.** `config/household_access.php` classifies every
+route (kind, phase, rule, and `'read' => 'H2'` where the record lookup is
+scoped separately from the write rule). `HouseholdAccessMatrixTest` fails when a route is not
+classified, when an "administrators only" entry is not behind an
+administrator-only permission, when a catalogue or inventory route claims
+to need no household rule, or when a route that returns record data is not
+read-enforced. `HouseholdReadIsolationTest` requests every such GET route
+as users of another household and fails if any of their data is sent, and
+fails if a new GET route is not added to that crawl. Nothing reads the
+matrix at runtime.
+
+**Write authorization (phase H3).** A controller decides from what it
+read when the request started; between that read and the write a
+membership can be removed, an account deactivated, a copy moved or a first
+copy added by another household. Every write that depends on household
+access therefore runs in a **guarded transaction**,
+`Households\WriteGuard::run()`:
+
+1. it opens the transaction (it refuses to join one that is already open)
+   at `READ COMMITTED`, for that transaction only, so a check made after a
+   lock was granted reads what the previous holder committed (at the
+   default `REPEATABLE READ` it could read an older snapshot);
+2. it takes a **shared lock on every household row**, in id order (only
+   while the feature is enabled). `HouseholdService` changes memberships
+   and deletes households under the *exclusive* lock of the household row,
+   so a removal waits for the writes in flight and every write that starts
+   after it sees it: once an administrator has been told a member was
+   removed, no write authorized by that membership can still be committed.
+   Writes do not block each other on it, and an installation has a handful
+   of household rows;
+3. it locks the acting account's row and reads the account and its
+   memberships **from the database** into a `WriteActor` (user, scope,
+   visibility); a deactivated account is refused;
+4. the service repeats its authorization against that actor and the rows
+   it locks, and only then writes.
+
+Lock order (a service skips levels, it never goes back up): households
+(all, shared) → users (the actor; exclusively for wishlists, which
+serialise on the account) → collections → editions → works → copies →
+loans → locations. Metadata edits take the edition or work row
+exclusively and inventory writes take them shared, so "no other household
+holds it" cannot be overtaken by a copy that another household is adding.
+
+Failures: a deadlock victim is run again (up to three attempts; the work
+is database-only); a lock wait timeout, or a deadlock on every attempt,
+rolls back and becomes `WriteBusyException`, answered with a "try again"
+page (409, `Retry-After`) or the form's own message. A record outside the
+actor's households is `WriteDeniedException::notFound()`, rendered exactly
+like `HttpException::notFound()`; a record they see but may not change is
+`forbidden()`. Nothing is ever half-written.
+
+The rules, each stated per route in `config/household_access.php`:
+
+- **Shared bibliographic records** (`Catalogue\BookService`,
+  `Authorizer::canEditSharedRecord()`). Administrators change any work or
+  edition. A member changes a record they created only while it is
+  *exclusive to their households*: no copy of the edition is held by a
+  household they are not a member of (a copy without a household counts
+  as held elsewhere), and for a work no edition is out of their view.
+  Otherwise it is an administrator's to change. Covers (upload, import and
+  deletion) follow their edition. Authors and publishers stay
+  administrator-managed. Seeing a record never implies editing it. The
+  refusal is the ordinary 403 page: it necessarily tells the creator that
+  the record is now shared, and nothing else (no household, owner, count
+  or location). Optimistic locking is unchanged and is evaluated after
+  the authorization.
+- **Copies** (`Catalogue\CopyService`). Creation, editing and deletion
+  lock the edition and work shared and the copy exclusively. The copy must
+  be in the actor's households (404 otherwise) and theirs to manage (owner
+  or administrator). The household comes from `Households\CopyHousehold`;
+  the owner must be an administrator or a member of it; the location must
+  belong to it (locked shared, so it cannot be deleted or moved under the
+  copy); giving a copy to another owner needs `copy.manage_any`. A copy
+  with an open loan cannot change household. Moving inventory in bulk is
+  phase H4.
+- **Inventory codes** are unique within a household (see the schema
+  below). The "already in use" check looks only inside the copy's
+  household, so it never reports, or reveals, another household's code.
+  While the feature is disabled the check covers every copy, as before.
+- **Add a copy by ISBN** (`books.copies.create` / `books.copies.store`,
+  `CopyService::createByIsbn()`). ISBN-13 is unique across the shared
+  catalogue, so a book that only another household holds cannot be
+  entered again; the user adds their own copy to the existing edition
+  instead. The edition is found from the ISBN inside the transaction,
+  never from an id in the request, and the form shows only the shared
+  description (`EditionRepository::bibliographic()`). The copy is placed
+  by the ordinary copy rules. `POST /editions/{id}/copies` still requires
+  the edition to be visible.
+- **Loans** (`Loans\LoanService`). The lender must still reach the copy's
+  household at that moment (404 otherwise) and be its owner or an
+  administrator. A borrower with an account must be an active member of
+  the copy's household, whoever records the loan (administrators
+  included); a free-text borrower is always possible. Loans are never
+  rewritten when memberships change.
+- **Collections** (`Collections\CollectionService`). A shared collection
+  is shared with one household chosen explicitly (administrators any;
+  others only one they belong to; a single membership is used without
+  asking). It never becomes shared, or changes household, on its own. An
+  owner who left the household can open, delete or re-home their
+  collection but not change what that household sees. Adding needs an
+  edition the actor can see; an item out of their view is answered like
+  one that is not there; reordering moves a book among the visible items
+  and leaves the others in place.
+- **Wishlists** (`Wishlist\WishlistService`). An entry is linked to a
+  catalogue edition only when the user can see that edition at the moment
+  of saving; a link whose edition left their view is dropped on the next
+  save.
+- **Locations** (`Households\LocationService`, administrators). One
+  independent tree per household: a root belongs to the household chosen
+  for it, a child to its parent's household, and a location is never moved
+  under another household's tree or to another household. Copy forms group
+  locations by household and show those of the chosen one.
+- **Accounts and invitations.** A new account has no membership unless an
+  administrator ticks households (`Auth\UserAdministration::create()`,
+  one transaction). An invitation may carry households
+  (`invitation_households`); the memberships are created in the redeeming
+  transaction, only for households that still exist, so a revoked,
+  expired or used invitation grants nothing. Replacing an invitation
+  keeps its remaining assignments. Each membership is audited on its
+  household by account id (`household.member_added`, with `via`).
+- **Exports.** The administrator export gains `household_id` and
+  `household` for copies, locations and shared collections while the
+  feature is enabled; memberships are never exported. The personal export
+  is unchanged.
+- **Console.** No console command changes inventory: `user:create` creates
+  an account without memberships, `cleanup` prunes old invitations (their
+  household assignments go with them) and a restore replaces the whole
+  database.
+
+**Schema of phase H3** (`2026_11_14_100000` to `100003`, portable, no
+MariaDB override):
+
+- `copies.inventory_scope_id`: a stored generated column,
+  `COALESCE(household_id, 0)`, and `uq_copies_scope_inventory_code
+  (inventory_scope_id, inventory_code)` in place of
+  `uq_copies_inventory_code`. Copies without a household form scope 0, so
+  uniqueness among them is enforced by the index itself and never depends
+  on how NULLs compare. One atomic `ALTER`; existing codes, which were
+  unique across the installation, are unique in every scope. This is the
+  only migration that removes an index (`MigrationFilesTest` allows
+  exactly that statement).
+- `collections.household_id` (nullable, `ON DELETE RESTRICT`), and a
+  data-only, idempotent backfill that gives existing **shared**
+  collections the default household. Private collections are not touched.
+- `invitation_households` (`ON DELETE CASCADE` on both sides).
+- Rollback compatibility: the previous application version keeps working
+  on this schema. Its statements name their columns (never the generated
+  one), its own inventory-code check is stricter than the index, and a
+  shared collection it creates has no household, which is visible to its
+  owner and administrators only once households are enabled. `household_id`
+  stays nullable everywhere.
+
+**Feature disabled.** `WriteGuard` takes no household lock and the actor
+is unrestricted; shared records follow the old rule (the creator or an
+administrator); inventory codes are checked across all copies; new copies
+and shared collections go to the default household and a submitted
+household is ignored; every active account can borrow; there is one
+location tree; accounts and invitations carry no households
+(`HouseholdFeatureDisabledTest`).
+
+**H4 follow-up:** reviewed bulk and subtree transfers are now implemented in
+development (see the H4 section below). NOT NULL constraints and default
+retirement are deliberately deferred. The production release decision remains
+separate.
+Known limits until then: a location, and the copies in it, cannot change
+household through the location pages; cross-household moves require the administrator H4 workflow; a creator learns that a record of theirs is held elsewhere (and
+nothing more) from losing the right to edit it.
+
+
+
+Invitation replacement and redemption take shared household locks before
+invitation/account locks, avoiding an inverse order with household deletion.
+With the feature disabled, pending assignments are ignored during redemption
+and are not carried into replacement invitations.
+
+Location tree mutations take exclusive household locks in id order before
+account and location locks, including with the feature disabled. This
+serialises root-name checks and disjoint subtree moves: the nullable
+parent unique index alone cannot prevent duplicate roots or concurrent cycles.
+Ordinary guarded writes retain shared household locks when enabled.
+
+Application rollback retains the H3 schema; it does not restore global
+inventory-code uniqueness. If H3 has allowed the same code in different
+households, the previous application's global pre-check can refuse edits
+of those copies, including an unchanged code. Review and resolve such
+collisions explicitly before reverting to global uniqueness; never drop
+copies or silently rewrite codes. Disabling the feature also restores the
+global application pre-check, with the same collision limitation. There is
+no automatic down migration; an older backup loses subsequent writes.
+
+
 ## Database access
 
 | Account | Privileges | Used by |
@@ -690,8 +1034,9 @@ reduced to a SQLSTATE before they can reach any output. Multi-step writes use
   by edition and owner). It applies cleanly to a database at the Phase 1
   schema, which was verified in the Phase 2 session.
 - MariaDB and MySQL commit DDL implicitly, so a migration can't be rolled back as a
-  unit. Keep each file small and focused. If one fails, fix forward with a
-  new migration, or repair manually and re-run.
+  unit. A durable schema_migration_attempts record precedes execution. Failure
+  or interruption blocks replay until owner-reviewed recovery; never blindly
+  rerun partial DDL. See docs/OPERATIONS.md, migration recovery.
 
 ## Internationalisation
 
@@ -1164,3 +1509,87 @@ where the application cannot see the port.
   database init script (run with stub binaries), and the discovery script
   (read-only commands only; planted tokens, e-mail addresses, password
   hashes and public client addresses never reach the report).
+
+
+## Household inventory transfers (H4, development-only)
+
+H4 adds administrator-only durable inventory transfer plans, atomic batches of
+1–100 copies, complete location subtrees (at most 100 nodes), and separately
+confirmed ownership reassignment only for copies without loan history.
+InventoryTransferService owns validation and transactional audit;
+TransferRepository contains bound SQL and narrow field updates. Read-only
+preview and explicit plan persistence are separate from application.
+
+New migrations create inventory_transfers/inventory_transfer_items and add
+locations.row_version; existing household columns remain nullable. Saved plans
+are not authorization: WriteGuard refreshes the administrator, locks all owner
+accounts in id order, then operation, editions, works, copies and locations. H4
+application serializes with H3 writers using exclusive household locks. It
+revalidates the entire saved copy/subtree state, destination placement, loans,
+owner eligibility and database-collation code conflicts before writing anything.
+Operation completion and audit share the inventory transaction.
+
+Default retention and nullable compatibility are deliberate H4 outcomes, not
+unfinished backfills. There is no production-enabling or finalization migration.
+See docs/HOUSEHOLD_INVENTORY.md for limits, UI, idempotency, diagnostics and
+rollback limitations. Future media transfers must keep copy IDs as physical
+identities rather than treating ISBN as an inventory identifier. No new media
+feature is included.
+
+
+## H1–H4 remediation transaction boundaries (2026-11-15)
+
+Auth\AdministratorGuard is the transaction boundary for account, household,
+invitation and legacy administrative vocabulary writes. It refuses nesting,
+uses READ COMMITTED, takes household rows first (exclusive for household and
+vocabulary mutations), then account rows in numeric id order. Account
+administration locks the complete existing account set exclusively, avoiding
+actor/target lock upgrades and protecting the last-active-admin calculation.
+Other operations lock the actor and required accounts shared. Authority is the
+fresh active global Admin role, whose current permissions are defined by Role;
+there are no mutable per-account permission grants. A database-only deadlock
+victim retries at most three times; timeout/exhaustion rolls back and gives 409.
+The broad locks trade administrative concurrency for a simple common order.
+
+InventoryTransferService, BookService, CopyService, LoanService,
+CollectionService and LocationService continue to authorize through WriteGuard.
+Copy creation/update and first-book copies now include the chosen owner in its
+sorted account locks; lending includes the borrower. Invitation redemption
+pre-reads the immutable issuer id, locks that account after households and before
+the invitation, and verifies the id again under the invitation lock. This
+protects FK/audit references without requiring the original issuer still to be
+an administrator: an issued invitation remains a durable grant until revoked.
+
+AuditLogger is shared on the same PDO. Domain services insert their events
+before commit (WriteGuard::audit for guarded catalogue services). Controllers no
+longer append those events after service return. HTTP context is supplied to the
+shared logger without changing event redaction. Vocabulary controllers place DB
+work and audit together inside AdministratorGuard. Cover files are staged before
+the transaction and removed after DB failure; removal of old files remains an
+after-commit cleanup, so filesystem and database atomicity are not claimed.
+
+Catalogue exports preserve a repeatable-read snapshot. Their audit is a durable
+request event, committed under fresh admin authorization before streaming. The
+stream then uses a current locking account read (not the snapshot's cached user)
+and holds the shared account lock until the final batch; committed revocation
+before streaming refuses data, and revocation during streaming waits. Bytes
+already delivered cannot be rolled back. Personal exports retain their existing
+read-only snapshots. Long administrative exports may delay account revocation.
+
+Migration bookkeeping adds schema_migration_attempts outside the versioned domain
+schema, like schema_migrations itself, without editing any released SQL or pinned
+checksum. Intent commits before the first statement; successful history INSERT and
+intent removal share one DML transaction. A crash before, during or after DDL,
+or failure to record history, retains the intent. migrate and status refuse it.
+Applied history must match an available same-engine checksum before pending
+migrations run, including refusal for unknown recorded versions. Old interrupted
+runs made before this journal have no intent record: inspect pending schema
+objects and use the manual recovery procedure. There is no automatic repair or
+object deletion. Backups include the metadata table normally.
+
+A root-owned config/production-image marker is baked into the prod image only.
+Config::isProduction checks it independently of environment classification;
+production Compose additionally pins APP_ENV and blanks APP_ENV_FILE. Neither
+household prohibition is removed. Rebuilding/deploying these safeguards is an
+owner action; local tests use explicit testing configuration outside the prod
+image. See docs/H1_H4_REMEDIATION.md for verified scope and remaining limitations.

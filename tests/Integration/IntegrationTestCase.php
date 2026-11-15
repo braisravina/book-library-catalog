@@ -246,7 +246,9 @@ abstract class IntegrationTestCase extends TestCase
     }
 
     /**
-     * Creates a book directly through the service layer.
+     * Creates a book directly through the repositories: a fixture, placed
+     * exactly where the test says (any owner, any household), without the
+     * rules a request is subject to.
      *
      * @param array<string, mixed> $edition overrides for the edition fields
      * @param list<string>         $authors
@@ -254,7 +256,7 @@ abstract class IntegrationTestCase extends TestCase
      *
      * @return array{work_id: int, edition_id: int, copy_id: ?int}
      */
-    protected function makeBook(int $userId, string $title, ?string $isbn = null, array $authors = [], array $edition = [], array $categories = [], ?int $copyOwner = null, ?int $locationId = null): array
+    protected function makeBook(int $userId, string $title, ?string $isbn = null, array $authors = [], array $edition = [], array $categories = [], ?int $copyOwner = null, ?int $locationId = null, ?int $householdId = null): array
     {
         $services = new Services(self::config(), dirname(__DIR__, 2));
         $services->set(PDO::class, $this->pdo());
@@ -263,9 +265,104 @@ abstract class IntegrationTestCase extends TestCase
             $edition['title'] ?? $title, '', $edition['publisher'] ?? '', (string) ($edition['year'] ?? ''), '', $edition['language'] ?? '',
             '', '', $isbn ?? '', '', '', [],
         );
-        $copy = $copyOwner === null ? null : new \DigitalLibrary\Catalogue\Input\CopyInput((string) $copyOwner, $locationId === null ? '' : (string) $locationId, '', '', 'available', false, '', '', '', '', '');
 
-        return $services->books()->createBook($work, $editionInput, $copy, $userId);
+        $workId = $services->works()->create($work->toRecord(), $userId);
+        $services->works()->setAuthors($workId, array_map(
+            static fn (array $a): array => ['author_id' => $services->authors()->findOrCreate($a['name'], $userId), 'role' => $a['role']],
+            $work->authors,
+        ));
+        $services->works()->setCategories($workId, $work->categoryIds);
+        $publisherId = $editionInput->publisher === '' ? null : $services->publishers()->findOrCreate($editionInput->publisher);
+        $editionId = $services->editions()->create($workId, $editionInput->toRecord($publisherId), $userId);
+
+        return ['work_id' => $workId, 'edition_id' => $editionId, 'copy_id' => $copyOwner === null ? null : $this->makeCopy($editionId, $copyOwner, $householdId, $locationId)];
+    }
+
+    /**
+     * A copy placed directly in a household (the default one unless the
+     * test names another); a fixture, like makeBook().
+     */
+    protected function makeCopy(int $editionId, int $ownerId, ?int $householdId = null, ?int $locationId = null, ?string $inventoryCode = null): int
+    {
+        // A copy belongs to a household: the default one unless the test names another.
+        $householdId ??= $this->defaultHouseholdId();
+        $this->pdo()->prepare(
+            "INSERT INTO copies (edition_id, owner_user_id, household_id, location_id, inventory_code, status, is_signed, created_by, updated_by, created_at, updated_at)
+             VALUES (:e, :o, :h, :l, :c, 'available', 0, :cb, :ub, UTC_TIMESTAMP(), UTC_TIMESTAMP())"
+        )->execute(['e' => $editionId, 'o' => $ownerId, 'h' => $householdId === 0 ? null : $householdId, 'l' => $locationId, 'c' => $inventoryCode, 'cb' => $ownerId, 'ub' => $ownerId]);
+
+        return (int) $this->pdo()->lastInsertId();
+    }
+
+    /**
+     * The temporary default household (re-created empty before every test,
+     * as the backfill migration leaves it on a new installation).
+     */
+    protected function defaultHouseholdId(): int
+    {
+        return (int) $this->pdo()->query("SELECT id FROM households WHERE system_key = 'default'")->fetchColumn();
+    }
+
+    /**
+     * @param list<int> $memberIds
+     */
+    protected function createHousehold(string $name, array $memberIds = []): int
+    {
+        $this->pdo()->prepare('INSERT INTO households (name, created_at, updated_at) VALUES (:n, UTC_TIMESTAMP(), UTC_TIMESTAMP())')->execute(['n' => $name]);
+        $id = (int) $this->pdo()->lastInsertId();
+        foreach ($memberIds as $userId) {
+            $this->addHouseholdMember($id, $userId);
+        }
+
+        return $id;
+    }
+
+    protected function addHouseholdMember(int $householdId, int $userId): void
+    {
+        $this->pdo()->prepare('INSERT INTO household_members (household_id, user_id, created_at) VALUES (:h, :u, UTC_TIMESTAMP())')->execute(['h' => $householdId, 'u' => $userId]);
+    }
+
+    /**
+     * A copy as stored before households existed (no household_id column
+     * is named), for upgrade tests that run against an older schema.
+     */
+    protected function insertLegacyCopy(int $editionId, int $ownerId, ?int $locationId = null): int
+    {
+        $this->pdo()->prepare(
+            'INSERT INTO copies (edition_id, owner_user_id, location_id, status, created_by, updated_by, created_at, updated_at)
+             VALUES (:e, :o, :l, \'available\', :c, :u, UTC_TIMESTAMP(), UTC_TIMESTAMP())'
+        )->execute(['e' => $editionId, 'o' => $ownerId, 'l' => $locationId, 'c' => $ownerId, 'u' => $ownerId]);
+
+        return (int) $this->pdo()->lastInsertId();
+    }
+
+    /**
+     * Applies the released migrations up to and including $last (and their
+     * MariaDB overrides), from a temporary copy of the migration directory.
+     *
+     * @return list<string> versions applied by this call
+     */
+    protected function migrateUpTo(PDO $pdo, string $last): array
+    {
+        $source = dirname(__DIR__, 2) . '/database/migrations';
+        $dir = sys_get_temp_dir() . '/dla-migrations-' . bin2hex(random_bytes(4));
+        mkdir($dir);
+        mkdir($dir . '/mariadb');
+        try {
+            foreach (['', '/mariadb'] as $variant) {
+                foreach (glob($source . $variant . '/*.sql') ?: [] as $file) {
+                    if (basename($file, '.sql') <= $last) {
+                        copy($file, $dir . $variant . '/' . basename($file));
+                    }
+                }
+            }
+
+            return (new Migrator($pdo, $dir))->migrate();
+        } finally {
+            array_map('unlink', array_merge(glob($dir . '/*.sql') ?: [], glob($dir . '/mariadb/*.sql') ?: []));
+            rmdir($dir . '/mariadb');
+            rmdir($dir);
+        }
     }
 
     /**
@@ -320,11 +417,16 @@ abstract class IntegrationTestCase extends TestCase
     {
         $pdo = $this->migrationPdo();
         $pdo->exec('SET FOREIGN_KEY_CHECKS = 0');
-        foreach ($pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $table) {
+        $tables = $pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+        foreach ($tables as $table) {
             if (!in_array($table, ['schema_migrations', 'roles', 'settings'], true)) {
                 $pdo->exec('TRUNCATE TABLE `' . $table . '`');
             }
         }
         $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
+        if (in_array('households', $tables, true)) {
+            // As on a new installation after the migrations: the default household exists, with no members.
+            $pdo->exec("INSERT INTO households (name, system_key, created_at, updated_at) VALUES ('Default household', 'default', UTC_TIMESTAMP(), UTC_TIMESTAMP())");
+        }
     }
 }

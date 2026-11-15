@@ -15,6 +15,8 @@ final class CollectionInput
         public readonly string $name,
         public readonly string $description,
         public readonly string $visibility,
+        /** The household a shared collection is shared with, as submitted ('' when absent). */
+        public readonly string $householdId = '',
     ) {
     }
 
@@ -24,6 +26,7 @@ final class CollectionInput
             trim((string) preg_replace('/\s+/u', ' ', (string) $request->input('name', ''))),
             trim((string) $request->input('description', '')),
             trim((string) $request->input('visibility', 'private')),
+            trim((string) $request->input('household_id', '')),
         );
     }
 
@@ -40,7 +43,12 @@ final class CollectionInput
      */
     public static function fromRecord(array $row): self
     {
-        return new self((string) $row['name'], (string) ($row['description'] ?? ''), (string) $row['visibility']);
+        return new self(
+            (string) $row['name'],
+            (string) ($row['description'] ?? ''),
+            (string) $row['visibility'],
+            ($row['household_id'] ?? null) === null ? '' : (string) $row['household_id'],
+        );
     }
 
     public function validate(Validator $validator): void

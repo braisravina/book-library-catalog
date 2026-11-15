@@ -283,5 +283,30 @@ var DigitalLibraryIsbn = (function () {
                 }
             });
         });
+
+        // Copy forms: each household has its own locations. Show only the
+        // locations of the household chosen in the form (the server checks
+        // the pair again; without JavaScript every group stays listed under
+        // its household's name).
+        document.querySelectorAll('select[data-household-locations]').forEach(function (locations) {
+            var household = document.getElementById(locations.getAttribute('data-household-locations'));
+            if (!household) {
+                return;
+            }
+            var sync = function () {
+                var chosen = household.value;
+                locations.querySelectorAll('optgroup[data-household]').forEach(function (group) {
+                    var other = chosen !== '' && group.getAttribute('data-household') !== chosen;
+                    group.hidden = other;
+                    group.disabled = other;
+                });
+                var selected = locations.options[locations.selectedIndex];
+                if (selected && selected.parentNode && selected.parentNode.disabled) {
+                    locations.value = '';
+                }
+            };
+            household.addEventListener('change', sync);
+            sync();
+        });
     });
 })();

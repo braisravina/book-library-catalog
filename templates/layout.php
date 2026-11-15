@@ -55,6 +55,9 @@ $can = static fn (\DigitalLibrary\Security\Permission $p): bool => $user !== nul
                     <?php if ($can(\DigitalLibrary\Security\Permission::UserManage)): ?>
                         <li><a href="/admin/users"><?= $view->t('nav.users') ?></a></li>
                     <?php endif; ?>
+                    <?php if ($view->shared('households_enabled', false) && $can(\DigitalLibrary\Security\Permission::HouseholdManage)): ?>
+                        <li><a href="/admin/households"><?= $view->t('nav.households') ?></a></li>
+                    <?php endif; ?>
                     <?php if ($can(\DigitalLibrary\Security\Permission::InvitationManage)): ?>
                         <li><a href="/admin/invitations"><?= $view->t('nav.invitations') ?></a></li>
                     <?php endif; ?>

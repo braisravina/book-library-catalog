@@ -18,10 +18,13 @@ use DigitalLibrary\Validation\Validator;
  * Personal and shared collections of catalogue editions.
  *
  * Private collections are visible to their owner and to administrators
- * holding collection.manage_any; shared ones to every user who can view the
- * catalogue. Viewing never implies editing: changes need
- * Authorizer::canManageCollection(). A collection the user may not see is
- * answered with 404 so its existence is not revealed.
+ * holding collection.manage_any; shared ones to the members of the
+ * household they are shared with (every user who can view the catalogue
+ * while the household feature is disabled). Viewing never implies editing:
+ * changes need Authorizer::canManageCollection(). A collection the user
+ * may not see is answered with 404 so its existence is not revealed, and
+ * every change is checked again by CollectionService inside its
+ * transaction.
  */
 final class CollectionController extends Controller
 {
@@ -34,7 +37,7 @@ final class CollectionController extends Controller
         $scope = (string) $request->query('scope', $scopes[0]);
         $scope = in_array($scope, $scopes, true) ? $scope : $scopes[0];
         $page = max(1, min(10_000, (int) ($request->query('page') ?? '1')));
-        $result = $this->services->collections()->list($scope, $user->id, $page);
+        $result = $this->services->collections()->list($scope, $user->id, $page, $this->visibility());
 
         return $this->render('collections/index', [
             'page_title' => 'collections.title',
@@ -56,7 +59,7 @@ final class CollectionController extends Controller
     {
         $collection = $this->visible($request, $params);
         $page = max(1, min(10_000, (int) ($request->query('page') ?? '1')));
-        $items = $this->services->collections()->items((int) $collection['id'], $page);
+        $items = $this->services->collections()->items((int) $collection['id'], $page, $this->visibility());
 
         return $this->render('collections/show', [
             'page_title' => null,
@@ -74,7 +77,7 @@ final class CollectionController extends Controller
 
     public function create(Request $request): Response
     {
-        return $this->form(null, CollectionInput::blank(), []);
+        return $this->form($request, null, CollectionInput::blank(), []);
     }
 
     public function store(Request $request): Response
@@ -83,7 +86,7 @@ final class CollectionController extends Controller
         $validator = Validator::make([], []);
         $input->validate($validator);
         if ($validator->fails()) {
-            return $this->form(null, $input, $validator->errors(), 422);
+            return $this->form($request, null, $input, $validator->errors(), 422);
         }
         try {
             $id = $this->services->collectionService()->create($this->user($request), $input);
@@ -92,9 +95,9 @@ final class CollectionController extends Controller
                 throw HttpException::forbidden();
             }
 
-            return $this->form(null, $input, ['name' => [$e->getMessage()]], 422);
+            return $this->form($request, null, $input, [$e->field => [$e->getMessage()]], 422);
         }
-        $this->audit($request, 'collection.created', 'collection', $id, ['visibility' => $input->visibility]);
+        $created = $this->found($this->services->collections()->find($id, $this->visibility()));
         $this->flash('success', 'collections.created');
 
         return Response::redirect('/collections/' . $id);
@@ -107,7 +110,7 @@ final class CollectionController extends Controller
     {
         $collection = $this->manageable($request, $params);
 
-        return $this->form($collection, CollectionInput::fromRecord($collection), []);
+        return $this->form($request, $collection, CollectionInput::fromRecord($collection), []);
     }
 
     /**
@@ -120,19 +123,15 @@ final class CollectionController extends Controller
         $validator = Validator::make([], []);
         $input->validate($validator);
         if ($validator->fails()) {
-            return $this->form($collection, $input, $validator->errors(), 422);
+            return $this->form($request, $collection, $input, $validator->errors(), 422);
         }
         try {
-            $this->services->collectionService()->update($this->user($request), (int) $collection['id'], $input);
+            $saved = $this->services->collectionService()->update($this->user($request), (int) $collection['id'], $input);
         } catch (CollectionException $e) {
             $this->refuse($e);
 
-            return $this->form($collection, $input, ['name' => [$e->getMessage()]], 422);
+            return $this->form($request, $collection, $input, [$e->field => [$e->getMessage()]], 422);
         }
-        $this->audit($request, 'collection.updated', 'collection', (int) $collection['id'], [
-            'owner_user_id' => (int) $collection['owner_user_id'],
-            'visibility' => $input->visibility,
-        ]);
         $this->flash('success', 'collections.updated');
 
         return Response::redirect('/collections/' . (int) $collection['id']);
@@ -157,10 +156,6 @@ final class CollectionController extends Controller
             $this->refuse($e);
             throw $e;
         }
-        $this->audit($request, 'collection.deleted', 'collection', (int) $collection['id'], [
-            'owner_user_id' => (int) $collection['owner_user_id'],
-            'items' => (int) $collection['item_count'],
-        ]);
         $this->flash('success', 'collections.deleted');
 
         return Response::redirect('/collections');
@@ -173,7 +168,9 @@ final class CollectionController extends Controller
     {
         $collection = $this->manageable($request, $params);
         $raw = (string) $request->input('edition_id', '');
-        $edition = preg_match('/^[1-9]\d{0,9}$/', $raw) === 1 ? $this->services->editions()->find((int) $raw) : null;
+        // An edition outside the user's view is 404, like one that does not
+        // exist: a collection cannot be used to probe edition ids.
+        $edition = preg_match('/^[1-9]\d{0,9}$/', $raw) === 1 ? $this->services->editions()->find((int) $raw, $this->visibility()) : null;
         if ($edition === null) {
             throw HttpException::notFound();
         }
@@ -181,11 +178,14 @@ final class CollectionController extends Controller
             $this->services->collectionService()->addItem($this->user($request), (int) $collection['id'], (int) $edition['id']);
         } catch (CollectionException $e) {
             $this->refuse($e);
+            if ($e->getMessage() === 'collections.error.edition_not_found') {
+                // The edition left the user's view (or was deleted) meanwhile.
+                throw HttpException::notFound();
+            }
             $this->flash('error', $e->getMessage());
 
             return Response::redirect('/editions/' . (int) $edition['id']);
         }
-        $this->audit($request, 'collection.item_added', 'collection', (int) $collection['id'], ['edition_id' => (int) $edition['id']]);
         $this->flash('success', 'collections.item_added');
 
         return Response::redirect($request->input('return') === 'collection' ? '/collections/' . (int) $collection['id'] : '/editions/' . (int) $edition['id']);
@@ -210,9 +210,14 @@ final class CollectionController extends Controller
             $this->services->collectionService()->removeItem($this->user($request), (int) $collection['id'], $editionId);
         } catch (CollectionException $e) {
             $this->refuse($e);
-            throw HttpException::notFound();
+            if ($e->getMessage() !== 'collections.error.household_access') {
+                // Not in the collection, or not an item the user can see.
+                throw HttpException::notFound();
+            }
+            $this->flash('error', $e->getMessage());
+
+            return Response::redirect('/collections/' . (int) $collection['id']);
         }
-        $this->audit($request, 'collection.item_removed', 'collection', (int) $collection['id'], ['edition_id' => $editionId]);
         $this->flash('success', 'collections.item_removed');
 
         return Response::redirect('/collections/' . (int) $collection['id']);
@@ -258,8 +263,15 @@ final class CollectionController extends Controller
      */
     private function visible(Request $request, array $params): array
     {
-        $collection = $this->services->collections()->find($this->id($params));
-        if ($collection === null || !$this->services->authorizer()->canViewCollection($this->user($request), (int) $collection['owner_user_id'], (string) $collection['visibility'])) {
+        $visibility = $this->visibility();
+        $collection = $this->services->collections()->find($this->id($params), $visibility);
+        // A shared collection is seen by the members of the household it is shared with.
+        if ($collection === null || !$this->services->authorizer()->canViewCollection(
+            $this->user($request),
+            (int) $collection['owner_user_id'],
+            (string) $collection['visibility'],
+            $visibility->includesHousehold($collection['household_id'] === null ? null : (int) $collection['household_id']),
+        )) {
             throw HttpException::notFound();
         }
 
@@ -283,7 +295,7 @@ final class CollectionController extends Controller
      * @param array<string, mixed>|null   $collection
      * @param array<string, list<string>> $errors
      */
-    private function form(?array $collection, CollectionInput $input, array $errors, int $status = 200): Response
+    private function form(Request $request, ?array $collection, CollectionInput $input, array $errors, int $status = 200): Response
     {
         return $this->render('collections/form', [
             'page_title' => $collection === null ? 'collections.new' : 'collections.edit',
@@ -291,6 +303,8 @@ final class CollectionController extends Controller
             'input' => $input,
             'errors' => $errors,
             'visibilities' => CollectionInput::VISIBILITIES,
+            // The households the collection may be shared with (empty while households are not in use).
+            'household_options' => $this->services->collectionService()->householdOptions($this->user($request)),
         ], $status);
     }
 }

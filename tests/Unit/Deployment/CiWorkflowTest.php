@@ -217,6 +217,23 @@ final class CiWorkflowTest extends TestCase
         }
     }
 
+    public function testDatabaseJobsUseDedicatedHostPortsForEveryClient(): void
+    {
+        foreach (['test' => 'mariadb', 'test-mysql' => 'mysql'] as $name => $engine) {
+            $job = self::jobs()[$name];
+            self::assertSame(['33306:3306'], $job['services'][$engine]['ports'], $name . ': dedicated host port, standard container port');
+            self::assertSame('33306', $job['env']['DB_PORT'], $name . ': inventory:check refuses ordinary port 3306');
+            self::assertStringNotContainsString('33306', $job['services'][$engine]['options'], $name . ': health check runs inside the container');
+
+            $runs = implode("\n", array_column($job['steps'], 'run'));
+            preg_match_all('/\bmysql\s+-h\s+127\.0\.0\.1\b[^\n]*/', $runs, $clients);
+            self::assertCount(2, $clients[0], $name . ': engine verification and test-account creation');
+            foreach ($clients[0] as $client) {
+                self::assertStringContainsString('-P "$DB_PORT"', $client, $name . ': every host-side client uses the configured port');
+            }
+        }
+    }
+
     public function testShellBlocksParseAndNeverRelyOnNegatedCommands(): void
     {
         foreach (self::steps() as [$job, $step]) {

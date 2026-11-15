@@ -22,6 +22,7 @@ final class CopyInput
         public readonly string $price,
         public readonly string $currency,
         public readonly string $notes,
+        public readonly string $householdId = '',
     ) {
     }
 
@@ -32,7 +33,7 @@ final class CopyInput
         return new self(
             $s('owner_user_id'), $s('location_id'), $s('inventory_code'), $s('copy_condition'),
             $s('status') !== '' ? $s('status') : 'available', $request->input('is_signed') === '1',
-            $s('acquired_on'), $s('acquisition_source'), $s('price'), $s('currency'), $s('notes'),
+            $s('acquired_on'), $s('acquisition_source'), $s('price'), $s('currency'), $s('notes'), $s('household_id'),
         );
     }
 
@@ -48,7 +49,7 @@ final class CopyInput
             $str('owner_user_id'), $str('location_id'), $str('inventory_code'), $str('copy_condition'), $str('status'),
             (bool) ($copy['is_signed'] ?? false), $str('acquired_on'), $str('acquisition_source'),
             $cents === null ? '' : sprintf('%d.%02d', intdiv((int) $cents, 100), (int) $cents % 100),
-            $str('currency'), $str('notes'),
+            $str('currency'), $str('notes'), $str('household_id'),
         );
     }
 

@@ -9,6 +9,7 @@ use DigitalLibrary\Catalogue\EditConflictException;
 use DigitalLibrary\Catalogue\Input\EditionInput;
 use DigitalLibrary\Catalogue\Input\WorkInput;
 use DigitalLibrary\Catalogue\Isbn;
+use DigitalLibrary\Catalogue\RecordInUseException;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Http\Response;
 use DigitalLibrary\Metadata\MetadataPrefill;
@@ -23,8 +24,9 @@ final class WorkController extends CatalogueBaseController
     public function show(Request $request, array $params): Response
     {
         $user = $this->user($request);
-        $work = $this->found($this->services->works()->find($this->id($params)));
+        $work = $this->visibleWork($params);
         $id = (int) $work['id'];
+        $canEdit = $this->mayEditWork($user, $id, self::creator($work));
 
         return $this->render('catalogue/work_show', [
             'page_title' => null,
@@ -32,8 +34,9 @@ final class WorkController extends CatalogueBaseController
             'work' => $work,
             'authors' => $this->services->works()->authors($id),
             'categories' => $this->services->categories()->forWork($id),
-            'editions' => $this->services->works()->editions($id),
-            'can_edit' => $this->services->authorizer()->canEditRecord($user, $work['created_by'] === null ? null : (int) $work['created_by']),
+            'editions' => $this->services->works()->editions($id, $this->visibility()),
+            'can_edit' => $canEdit,
+            'shared_notice' => $this->sharedRecordNotice($user, self::creator($work), $canEdit),
             'can_add_edition' => $this->can($user, Permission::CatalogueCreate),
             'can_delete' => $this->can($user, Permission::CatalogueDelete),
         ]);
@@ -65,11 +68,10 @@ final class WorkController extends CatalogueBaseController
             return $this->form($work, $input, $validator->errors(), 422);
         }
         try {
-            $this->services->books()->updateWork((int) $work['id'], $input, $this->user($request)->id, $this->expectedVersion($request));
+            $this->services->books()->updateWork($this->user($request)->id, (int) $work['id'], $input, $this->expectedVersion($request));
         } catch (EditConflictException) {
             return $this->form(['row_version' => $this->expectedVersion($request)] + $work, $input, [], 409, true);
         }
-        $this->audit($request, 'work.updated', 'work', (int) $work['id']);
         $this->flash('success', 'catalogue.saved');
 
         return Response::redirect('/works/' . $work['id']);
@@ -80,7 +82,7 @@ final class WorkController extends CatalogueBaseController
      */
     public function createEdition(Request $request, array $params): Response
     {
-        $work = $this->found($this->services->works()->find($this->id($params)));
+        $work = $this->visibleWork($params);
         $input = EditionInput::blank('', (string) $work['title']);
         $prefilled = false;
         // "Add as a new edition" from the add-a-book review: carry the ISBN
@@ -110,7 +112,7 @@ final class WorkController extends CatalogueBaseController
      */
     public function storeEdition(Request $request, array $params): Response
     {
-        $work = $this->found($this->services->works()->find($this->id($params)));
+        $work = $this->visibleWork($params);
         $input = EditionInput::fromRequest($request);
         $validator = Validator::make([], []);
         $input->validate($validator);
@@ -118,13 +120,12 @@ final class WorkController extends CatalogueBaseController
             return $this->editionForm($work, $input, $validator->errors(), 422);
         }
         try {
-            $editionId = $this->services->books()->addEdition((int) $work['id'], $input, $this->user($request)->id);
+            $editionId = $this->services->books()->addEdition($this->user($request)->id, (int) $work['id'], $input);
         } catch (DuplicateIsbnException $e) {
             $validator->addError('isbn', 'validation.isbn_taken');
 
-            return $this->editionForm($work, $input, $validator->errors(), 409, $e->existingEditionId);
+            return $this->editionForm($work, $input, $validator->errors(), 409, $this->linkable($e->existingEditionId));
         }
-        $this->audit($request, 'edition.created', 'edition', $editionId, ['work_id' => (int) $work['id'], 'isbn_13' => $input->parsedIsbn()?->isbn13]);
         $this->flash('success', 'catalogue.add.created');
 
         return Response::redirect('/editions/' . $editionId);
@@ -137,18 +138,30 @@ final class WorkController extends CatalogueBaseController
      */
     public function destroy(Request $request, array $params): Response
     {
-        $work = $this->found($this->services->works()->find($this->id($params)));
+        $work = $this->visibleWork($params);
         $id = (int) $work['id'];
-        if ($this->services->works()->editionCount($id) > 0) {
+        try {
+            $this->services->books()->deleteWork($this->user($request)->id, $id);
+        } catch (RecordInUseException) {
             $this->flash('error', 'catalogue.work.delete_has_editions');
 
             return Response::redirect('/works/' . $id);
         }
-        $this->services->works()->delete($id);
-        $this->audit($request, 'work.deleted', 'work', $id, ['title' => $work['title']]);
         $this->flash('success', 'catalogue.work.deleted');
 
         return Response::redirect('/books');
+    }
+
+    /**
+     * The work, or 404 when it does not exist or is outside the user's view.
+     *
+     * @param array<string, string> $params
+     *
+     * @return array<string, mixed>
+     */
+    private function visibleWork(array $params): array
+    {
+        return $this->found($this->services->works()->find($this->id($params), $this->visibility()));
     }
 
     /**
@@ -158,13 +171,19 @@ final class WorkController extends CatalogueBaseController
      */
     private function editableWork(Request $request, array $params): array
     {
-        $work = $this->found($this->services->works()->find($this->id($params)));
-        $this->authorize($this->services->authorizer()->canEditRecord(
-            $this->user($request),
-            $work['created_by'] === null ? null : (int) $work['created_by'],
-        ));
+        $work = $this->visibleWork($params);
+        // The creator, while no other household holds the work; otherwise administrators.
+        $this->authorize($this->mayEditWork($this->user($request), (int) $work['id'], self::creator($work)));
 
         return $work;
+    }
+
+    /**
+     * @param array<string, mixed> $work
+     */
+    private static function creator(array $work): ?int
+    {
+        return $work['created_by'] === null ? null : (int) $work['created_by'];
     }
 
     /**

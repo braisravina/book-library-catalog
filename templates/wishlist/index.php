@@ -40,7 +40,8 @@ $statusActions = [
                 <?php $id = (int) $item['id']; $itemStatus = (string) $item['status']; ?>
                 <tr id="item-<?= $id ?>">
                     <td>
-                        <?php if ($item['edition_id'] !== null): ?>
+                        <?php $linked = $item['edition_id'] !== null && (int) $item['edition_visible'] === 1; ?>
+                        <?php if ($linked): ?>
                             <a href="/editions/<?= (int) $item['edition_id'] ?>"><?= $view->e($item['title']) ?></a>
                         <?php else: ?>
                             <span class="label"><?= $view->e($item['title']) ?></span>
@@ -56,7 +57,7 @@ $statusActions = [
                         <div class="inline-actions">
                             <?php if ($itemStatus === 'acquired'): ?>
                                 <?php
-                                $addUrl = $item['edition_id'] !== null
+                                $addUrl = $linked
                                     ? '/editions/' . (int) $item['edition_id'] . '/copies/new'
                                     : ($item['isbn_13'] !== null ? $view->url('/books/new', ['isbn' => (string) $item['isbn_13']]) : '/books/new?manual=1');
                                 ?>

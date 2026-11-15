@@ -131,14 +131,77 @@ final class MigrationFilesTest extends TestCase
 
     /**
      * Migrations are forward-only and additive: no destructive statements.
+     * The single exception is documented below: phase H3 replaces the
+     * global inventory-code index by a household-scoped one in one atomic
+     * ALTER (no data is removed).
      */
     public function testMigrationsAreForwardOnlyAndNonDestructive(): void
     {
+        $allowed = ['2026_11_14_100000_scope_inventory_codes_to_households.sql' => 'DROP INDEX uq_copies_inventory_code'];
+        $used = [];
         foreach (self::migrations() as $name => $sql) {
             foreach (SqlSplitter::split($sql) as $statement) {
+                if (isset($allowed[$name])) {
+                    // Match the complete identifier, never an index whose
+                    // name merely starts with the permitted exception.
+                    $pattern = '/\\b' . preg_quote($allowed[$name], '/') . '\\b/';
+                    if (preg_match_all($pattern, $statement) === 1) {
+                        $statement = (string) preg_replace($pattern, '', $statement);
+                        $used[$name] = true;
+                    }
+                }
                 self::assertDoesNotMatchRegularExpression('/^\s*(DROP|TRUNCATE|RENAME|DELETE)\b|\bDROP\s+(COLUMN|INDEX|KEY|FOREIGN|CONSTRAINT|CHECK|PRIMARY)\b/i', $statement, $name);
             }
         }
+        self::assertSame(array_keys($allowed), array_keys($used), 'The documented exception is used exactly where it is documented');
+    }
+
+    /**
+     * Household phase H3: inventory codes become unique per household,
+     * shared collections get a household and invitations may carry
+     * household assignments. Additive, portable, household_id stays
+     * nullable, and data is backfilled in a file of its own.
+     */
+    public function testPhaseThreeHouseholdMigrations(): void
+    {
+        $files = self::migrations();
+        $names = ['2026_11_14_100000_scope_inventory_codes_to_households.sql', '2026_11_14_100001_add_household_to_collections.sql',
+            '2026_11_14_100002_backfill_shared_collection_households.sql', '2026_11_14_100003_create_invitation_households.sql'];
+        foreach ($names as $name) {
+            self::assertArrayHasKey($name, $files);
+            // Nothing that MariaDB 11.4 and MySQL 8.4 treat differently (an integer generated column is fine on both).
+            self::assertDoesNotMatchRegularExpression('/\/\*\+|->>?|JSON_|\bAS\s+new\b|ON DUPLICATE|INSERT\s+IGNORE|REPLACE\s+INTO|FOR SHARE/i', (string) preg_replace('/^--.*$/m', '', $files[$name]), $name);
+            self::assertFileDoesNotExist(dirname(__DIR__, 3) . '/database/migrations/mariadb/' . $name, $name . ' needs no MariaDB override');
+            self::assertDoesNotMatchRegularExpression('/NOT NULL[^,]*household_id|household_id[^,\n]*NOT NULL(?!.*PRIMARY)/i', $name === $names[3] ? '' : $files[$name], $name . ': household_id stays nullable');
+        }
+
+        $codes = SqlSplitter::split($files[$names[0]]);
+        self::assertCount(1, $codes, 'One atomic ALTER: the new index exists before the old one is gone');
+        self::assertStringStartsWith('ALTER TABLE copies', $codes[0]);
+        self::assertStringContainsString('ADD COLUMN inventory_scope_id INT UNSIGNED GENERATED ALWAYS AS (COALESCE(household_id, 0)) STORED', $codes[0], 'Copies without a household share scope 0: NULL never reaches the unique index');
+        self::assertStringContainsString('ADD UNIQUE KEY uq_copies_scope_inventory_code (inventory_scope_id, inventory_code)', $codes[0]);
+        self::assertStringContainsString('DROP INDEX uq_copies_inventory_code', $codes[0]);
+        self::assertDoesNotMatchRegularExpression('/\b(MODIFY|CHANGE|RENAME|DROP\s+COLUMN)\b|UPDATE|DELETE/i', $codes[0], 'No existing column or row is touched');
+
+        $collections = SqlSplitter::split($files[$names[1]]);
+        self::assertCount(1, $collections);
+        self::assertStringStartsWith('ALTER TABLE collections', $collections[0]);
+        self::assertStringContainsString('ADD COLUMN household_id INT UNSIGNED NULL', $collections[0]);
+        self::assertStringContainsString('REFERENCES households (id) ON DELETE RESTRICT', $collections[0]);
+        self::assertDoesNotMatchRegularExpression('/\b(MODIFY|CHANGE|DROP|RENAME)\b|UNIQUE/i', $collections[0]);
+
+        $backfill = SqlSplitter::split($files[$names[2]]);
+        self::assertCount(1, $backfill);
+        self::assertStringStartsWith('UPDATE collections', $backfill[0]);
+        self::assertStringEndsWith("WHERE visibility = 'shared' AND household_id IS NULL", $backfill[0], 'Only shared collections without a household; private ones are never touched');
+        self::assertStringNotContainsString('visibility =', (string) preg_replace('/WHERE.*/s', '', $backfill[0]), 'No visibility is rewritten');
+
+        $invitations = SqlSplitter::split($files[$names[3]]);
+        self::assertCount(1, $invitations);
+        self::assertStringStartsWith('CREATE TABLE invitation_households (', $invitations[0]);
+        self::assertStringContainsString('PRIMARY KEY (invitation_id, household_id)', $invitations[0]);
+        self::assertStringContainsString('REFERENCES invitations (id) ON DELETE CASCADE', $invitations[0]);
+        self::assertStringContainsString('REFERENCES households (id) ON DELETE CASCADE', $invitations[0], 'A deleted household disappears from pending invitations');
     }
 
     public function testPhase4bInvitationMigrationOnlyAddsConstraints(): void
@@ -150,6 +213,52 @@ final class MigrationFilesTest extends TestCase
         self::assertStringContainsString('CHECK (role_id IN (2, 3))', $statements[0], 'No administrator invitations');
         self::assertStringContainsString('UNIQUE KEY uq_invitations_open_email', $statements[0]);
         self::assertDoesNotMatchRegularExpression('/\b(DROP|MODIFY|CHANGE|RENAME)\b/i', $statements[0]);
+    }
+
+    /**
+     * Household phase H1: additive schema (new tables, nullable columns),
+     * then an idempotent, data-only backfill. NOT NULL and uniqueness
+     * changes are deliberately left to a later phase.
+     */
+    public function testHouseholdMigrationsAreAdditiveNullableAndPortable(): void
+    {
+        $files = self::migrations();
+        $names = ['2026_11_13_180000_create_households.sql', '2026_11_13_180001_add_household_to_inventory.sql', '2026_11_13_180002_backfill_default_household.sql'];
+        foreach ($names as $name) {
+            self::assertArrayHasKey($name, $files);
+            // Nothing that MariaDB 11.4 and MySQL 8.4 treat differently.
+            self::assertDoesNotMatchRegularExpression('/GENERATED|\/\*\+|->>?|JSON_|\bAS\s+new\b|ON DUPLICATE|INSERT\s+IGNORE|REPLACE\s+INTO/i', (string) preg_replace('/^--.*$/m', '', $files[$name]), $name);
+            self::assertFileDoesNotExist(dirname(__DIR__, 3) . '/database/migrations/mariadb/' . $name, $name . ' needs no MariaDB override');
+        }
+
+        $create = SqlSplitter::split($files[$names[0]]);
+        self::assertCount(2, $create);
+        self::assertStringStartsWith('CREATE TABLE households (', $create[0]);
+        self::assertStringStartsWith('CREATE TABLE household_members (', $create[1]);
+        self::assertStringContainsString('UNIQUE KEY uq_households_system_key (system_key)', $create[0]);
+        self::assertStringContainsString('PRIMARY KEY (household_id, user_id)', $create[1]);
+        self::assertStringContainsString('REFERENCES households (id) ON DELETE RESTRICT', $create[1]);
+
+        $alter = SqlSplitter::split($files[$names[1]]);
+        self::assertCount(2, $alter);
+        foreach (['copies', 'locations'] as $i => $table) {
+            self::assertStringStartsWith('ALTER TABLE ' . $table, $alter[$i]);
+            self::assertStringContainsString('ADD COLUMN household_id INT UNSIGNED NULL', $alter[$i], 'Nullable: the previous application version keeps working');
+            self::assertStringContainsString('REFERENCES households (id) ON DELETE RESTRICT', $alter[$i]);
+            self::assertDoesNotMatchRegularExpression('/\b(MODIFY|CHANGE|DROP|RENAME)\b|NOT NULL|UNIQUE/i', $alter[$i], 'Only additions; no constraint that would break a rollback');
+        }
+
+        $backfill = SqlSplitter::split($files[$names[2]]);
+        self::assertCount(4, $backfill);
+        foreach ($backfill as $statement) {
+            self::assertMatchesRegularExpression('/^(INSERT INTO|UPDATE) /', $statement, 'Data only: no DDL in the backfill');
+        }
+        self::assertStringContainsString("WHERE NOT EXISTS (SELECT 1 FROM households WHERE system_key = 'default')", $backfill[0], 'Creates the default household once');
+        self::assertStringEndsWith('WHERE household_id IS NULL', $backfill[1], 'Never reassigns a copy that has a household');
+        self::assertStringEndsWith('WHERE household_id IS NULL', $backfill[2]);
+        self::assertStringContainsString('u.is_active = 1', $backfill[3], 'Disabled accounts gain no access');
+        self::assertStringContainsString('u.last_login_at IS NOT NULL', $backfill[3], 'Accounts that never signed in gain no access');
+        self::assertStringContainsString('NOT EXISTS (SELECT 1 FROM household_members m', $backfill[3], 'No duplicate memberships');
     }
 
     public function testPhase4aTablesAreDefined(): void

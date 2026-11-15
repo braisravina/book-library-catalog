@@ -27,9 +27,9 @@ final class Console
      * create accounts: only the ops role may run them in production, and
      * never a container with APP_ROLE=web (in any environment).
      */
-    public const OPS_COMMANDS = ['migrate', 'user:create', 'backup:create', 'backup:restore', 'maintenance:on', 'maintenance:off', 'cleanup', 'metadata:refresh'];
+    public const OPS_COMMANDS = ['migrate', 'user:create', 'backup:create', 'backup:restore', 'maintenance:on', 'maintenance:off', 'cleanup', 'metadata:refresh', 'inventory:check'];
     /** Commands that must not overlap (OperationLock). */
-    public const EXCLUSIVE_COMMANDS = ['migrate', 'backup:create', 'backup:restore', 'maintenance:off', 'cleanup'];
+    public const EXCLUSIVE_COMMANDS = ['migrate', 'backup:create', 'backup:restore', 'maintenance:off', 'cleanup', 'inventory:check'];
 
     /** @var resource */
     private $out;
@@ -72,6 +72,7 @@ final class Console
                 'migrate:status' => $this->migrateStatus(),
                 'user:create' => $this->createUser($options),
                 'metadata:refresh' => $this->metadataRefresh($options),
+                'inventory:check' => $this->inventoryCheck($options),
                 'backup:create' => $this->operations()->backupCreate($options),
                 'backup:verify' => $this->operations()->backupVerify($options),
                 'backup:restore' => $this->operations()->backupRestore($options),
@@ -244,15 +245,19 @@ final class Console
             return $this->fail('Password rejected: ' . implode(', ', $violations));
         }
 
-        $id = $users->create(
-            (string) $input['email'],
-            (string) $input['display_name'],
-            Role::from((string) $input['role']),
-            $this->services->hasher()->hash($password),
-            (string) $input['locale'],
-            null,
-        );
-        $this->services->audit()->log('user.created', null, 'user', $id, ['email' => $input['email'], 'role' => $input['role'], 'via' => 'cli']);
+        $hash = $this->services->hasher()->hash($password);
+        $id = \DigitalLibrary\Database\Transaction::run($this->services->pdo(), function () use ($users, $input, $hash): int {
+            $id = $users->create(
+                (string) $input['email'],
+                (string) $input['display_name'],
+                Role::from((string) $input['role']),
+                $hash,
+                (string) $input['locale'],
+                null,
+            );
+            $this->services->audit()->log('user.created', null, 'user', $id, ['email' => $input['email'], 'role' => $input['role'], 'via' => 'cli']);
+            return $id;
+        });
         $this->line(sprintf('Created %s user #%d (%s).', $input['role'], $id, $input['email']));
 
         return 0;
@@ -281,12 +286,33 @@ final class Console
         return 0;
     }
 
+    /** Read-only local rehearsal tool: deliberately has no production or apply mode. */
+    private function inventoryCheck(array $options): int
+    {
+        $config = $this->services->config;
+        if ($config->isProduction() || !in_array($config->get('DB_HOST'), ['127.0.0.1', '::1'], true)
+            || $config->int('DB_PORT', 3306) === 3306 || !preg_match('/_(test|rehearsal)$/D', (string) $config->get('DB_DATABASE'))
+            || ($options['confirm'] ?? '') !== 'LOCAL-INVENTORY-CHECK' || ($options['writers-stopped'] ?? false) !== true
+            || !$this->services->maintenance()->isActive()) {
+            return $this->fail('Refused: inventory:check requires a local *_test or *_rehearsal database on a dedicated port, development/testing environment, maintenance mode, --writers-stopped and --confirm=LOCAL-INVENTORY-CHECK. No production or apply mode exists.');
+        }
+        $actor = $options['actor'] ?? '';
+        if (!is_string($actor) || !preg_match('/^[1-9]\d{0,9}$/D', $actor)) {
+            return $this->fail('Refused: specify --actor with an active administrator account id.');
+        }
+        $report = $this->services->inventoryTransfers()->overview((int) $actor, null);
+        fwrite($this->out, json_encode($report['diagnostics'], JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n");
+        return 0;
+    }
+
     private function usage(): string
     {
         return <<<TXT
             Digital Library Archive console
 
             Commands:
+              inventory:check   Read-only local rehearsal diagnostics (no production/apply mode)
+                                --actor=ID --writers-stopped --confirm=LOCAL-INVENTORY-CHECK
               config:check      Validate the configuration (read-only; secrets are never shown)
                                 [--strict]  also fail on warnings
               migrate           Apply pending database migrations

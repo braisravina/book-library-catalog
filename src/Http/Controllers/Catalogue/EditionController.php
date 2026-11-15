@@ -8,8 +8,7 @@ use DigitalLibrary\Catalogue\DuplicateIsbnException;
 use DigitalLibrary\Catalogue\EditConflictException;
 use DigitalLibrary\Catalogue\Input\EditionInput;
 use DigitalLibrary\Catalogue\Isbn;
-use DigitalLibrary\Catalogue\Tree;
-use DigitalLibrary\Database\Transaction;
+use DigitalLibrary\Catalogue\RecordInUseException;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Http\Response;
 use DigitalLibrary\Metadata\OpenLibraryContribution;
@@ -25,9 +24,12 @@ final class EditionController extends CatalogueBaseController
     {
         $user = $this->user($request);
         $id = $this->id($params);
-        $edition = $this->found($this->services->editions()->find($id));
+        $visibility = $this->visibility();
+        $edition = $this->visibleEdition($id);
         $authorizer = $this->services->authorizer();
-        $copies = $this->services->copies()->forEdition($id);
+        // Only copies of the user's households: an edition seen because the
+        // user catalogued it shows nothing of what other households hold.
+        $copies = $this->services->copies()->forEdition($id, $visibility);
         $activeLoans = $this->services->loans()->activeForCopies(array_map(static fn (array $c): int => (int) $c['id'], $copies));
         foreach ($copies as &$copy) {
             $ownerId = (int) $copy['owner_user_id'];
@@ -39,6 +41,10 @@ final class EditionController extends CatalogueBaseController
         }
         unset($copy);
         $canWishlist = $this->can($user, Permission::WishlistManageOwn);
+        $creator = $edition['created_by'] === null ? null : (int) $edition['created_by'];
+        $workCreator = $edition['work_created_by'] === null ? null : (int) $edition['work_created_by'];
+        $canEdit = $this->mayEditEdition($user, $id, $creator);
+        $canEditWork = $this->mayEditWork($user, (int) $edition['work_id'], $workCreator);
 
         return $this->render('catalogue/edition_show', [
             'page_title' => null,
@@ -48,19 +54,20 @@ final class EditionController extends CatalogueBaseController
             'contributors' => $this->services->editions()->contributors($id),
             'categories' => $this->services->categories()->forWork((int) $edition['work_id']),
             'other_editions' => array_values(array_filter(
-                $this->services->works()->editions((int) $edition['work_id']),
+                $this->services->works()->editions((int) $edition['work_id'], $visibility),
                 static fn (array $e): bool => (int) $e['id'] !== $id,
             )),
             'copies' => $copies,
             'covers' => $this->services->coverRecords()->forEdition($id),
-            'location_paths' => Tree::paths($this->services->locations()->all()),
-            'can_edit' => $authorizer->canEditRecord($user, $edition['created_by'] === null ? null : (int) $edition['created_by']),
-            'can_edit_work' => $authorizer->canEditRecord($user, $edition['work_created_by'] === null ? null : (int) $edition['work_created_by']),
+            'location_paths' => $this->services->locations()->visiblePaths($visibility),
+            'can_edit' => $canEdit,
+            'can_edit_work' => $canEditWork,
+            'shared_notice' => $this->sharedRecordNotice($user, $creator, $canEdit) || $this->sharedRecordNotice($user, $workCreator, $canEditWork),
             'can_delete' => $this->can($user, Permission::CatalogueDelete),
             'can_add_copy' => $this->can($user, Permission::CopyManageOwn),
             'max_upload_bytes' => $this->services->config->int('UPLOAD_MAX_BYTES', 5 * 1024 * 1024),
             'today' => \DigitalLibrary\Loans\LoanService::today(),
-            'in_collections' => $this->services->collections()->containing($id, $user->id, $this->can($user, Permission::CollectionManageAny)),
+            'in_collections' => $this->services->collections()->containing($id, $user->id, $this->can($user, Permission::CollectionManageAny), $visibility),
             'addable_collections' => $this->can($user, Permission::CollectionManageOwn) ? $this->services->collections()->addableFor($id, $user->id) : [],
             'can_wishlist' => $canWishlist,
             'wishlist_entry' => $canWishlist ? $this->services->wishlist()->wantedForEdition($user->id, $id, $edition['isbn_13']) : null,
@@ -80,7 +87,7 @@ final class EditionController extends CatalogueBaseController
      */
     public function openLibrary(Request $request, array $params): Response
     {
-        $edition = $this->found($this->services->editions()->find($this->id($params)));
+        $edition = $this->visibleEdition($this->id($params));
         $plan = $this->contribution($edition);
         if ($plan === null) {
             return Response::redirect('/editions/' . (int) $edition['id']);
@@ -144,16 +151,15 @@ final class EditionController extends CatalogueBaseController
         }
 
         try {
-            $this->services->books()->updateEdition((int) $edition['id'], $input, $this->user($request)->id, $this->expectedVersion($request));
+            $this->services->books()->updateEdition($this->user($request)->id, (int) $edition['id'], $input, $this->expectedVersion($request));
         } catch (DuplicateIsbnException $e) {
             $validator->addError('isbn', 'validation.isbn_taken');
 
-            return $this->form($edition, $input, $validator->errors(), 409, $e->existingEditionId);
+            return $this->form($edition, $input, $validator->errors(), 409, $this->linkable($e->existingEditionId));
         } catch (EditConflictException) {
             // Keep the stale version: saving again must not silently overwrite.
             return $this->form(['row_version' => $this->expectedVersion($request)] + $edition, $input, [], 409, null, true);
         }
-        $this->audit($request, 'edition.updated', 'edition', (int) $edition['id']);
         $this->flash('success', 'catalogue.saved');
 
         return Response::redirect('/editions/' . $edition['id']);
@@ -167,27 +173,30 @@ final class EditionController extends CatalogueBaseController
     public function destroy(Request $request, array $params): Response
     {
         $id = $this->id($params);
-        $edition = $this->found($this->services->editions()->find($id));
-        if ($this->services->editions()->copyCount($id) > 0) {
+        $edition = $this->visibleEdition($id);
+        try {
+            $deleted = $this->services->books()->deleteEdition($this->user($request)->id, $id);
+        } catch (RecordInUseException) {
             $this->flash('error', 'catalogue.edition.delete_has_copies');
 
             return Response::redirect('/editions/' . $id);
         }
-
-        $covers = $this->services->coverRecords()->forEdition($id);
-        Transaction::run($this->services->pdo(), function () use ($id, $covers): void {
-            foreach ($covers as $cover) {
-                $this->services->coverRecords()->delete((int) $cover['id'], $id);
-            }
-            $this->services->editions()->delete($id);
-        });
-        foreach ($covers as $cover) {
-            $this->services->covers()->delete((string) $cover['storage_key']);
+        foreach ($deleted['storage_keys'] as $key) {
+            $this->services->covers()->delete($key);
         }
-        $this->audit($request, 'edition.deleted', 'edition', $id, ['title' => $edition['title'], 'isbn_13' => $edition['isbn_13']]);
         $this->flash('success', 'catalogue.edition.deleted');
 
         return Response::redirect('/works/' . $edition['work_id']);
+    }
+
+    /**
+     * The edition, or 404 when it does not exist or is outside the user's view.
+     *
+     * @return array<string, mixed>
+     */
+    private function visibleEdition(int $id): array
+    {
+        return $this->found($this->services->editions()->find($id, $this->visibility()));
     }
 
     /**
@@ -199,9 +208,11 @@ final class EditionController extends CatalogueBaseController
      */
     private function editableEdition(Request $request, array $params): array
     {
-        $edition = $this->found($this->services->editions()->find($this->id($params)));
-        $this->authorize($this->services->authorizer()->canEditRecord(
+        $edition = $this->visibleEdition($this->id($params));
+        // The creator, while no other household holds the edition; otherwise administrators.
+        $this->authorize($this->mayEditEdition(
             $this->user($request),
+            (int) $edition['id'],
             $edition['created_by'] === null ? null : (int) $edition['created_by'],
         ));
 

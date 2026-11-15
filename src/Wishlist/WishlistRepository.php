@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace DigitalLibrary\Wishlist;
 
 use DigitalLibrary\Catalogue\Repository\Repository;
+use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
 
 /**
  * SQL for wishlist entries. Every read is scoped by user; callers pass the
@@ -15,25 +17,29 @@ final class WishlistRepository extends Repository
     public const PER_PAGE = 25;
     public const STATUSES = ['wanted', 'acquired', 'archived'];
 
-    private const SELECT = 'SELECT w.id, w.user_id, w.edition_id, w.work_id, w.title, w.author, w.isbn_13, w.priority, w.notes,
-            w.status, w.status_changed_at, w.created_at, w.updated_at,
-            (SELECT COUNT(*) FROM copies c WHERE c.edition_id = w.edition_id AND c.owner_user_id = w.user_id) AS own_copies
-        FROM wishlist_items w';
-
     /**
-     * Serialises wishlist changes of one user (duplicate checks run under it).
+     * Entry columns for the viewer (always the entry's owner): own_copies
+     * counts their copies that are in view, and edition_visible tells
+     * whether the linked catalogue edition may be linked to.
      */
-    public function lockOwner(int $userId): bool
+    private static function select(Visibility $visibility, Params $params): string
     {
-        return $this->scalar('SELECT id FROM users WHERE id = :id FOR UPDATE', ['id' => $userId]) !== null;
+        return 'SELECT w.id, w.user_id, w.edition_id, w.work_id, w.title, w.author, w.isbn_13, w.priority, w.notes,
+                w.status, w.status_changed_at, w.created_at, w.updated_at,
+                (SELECT COUNT(*) FROM copies c WHERE c.edition_id = w.edition_id AND c.owner_user_id = w.user_id
+                    AND ' . $visibility->copy('c', $params) . ') AS own_copies,
+                EXISTS (SELECT 1 FROM editions le WHERE le.id = w.edition_id AND ' . $visibility->edition('le', $params) . ') AS edition_visible
+            FROM wishlist_items w';
     }
 
     /**
      * @return array<string, mixed>|null
      */
-    public function find(int $id): ?array
+    public function find(int $id, Visibility $visibility): ?array
     {
-        return $this->one(self::SELECT . ' WHERE w.id = :id', ['id' => $id]);
+        $params = new Params();
+
+        return $this->one(self::select($visibility, $params) . ' WHERE w.id = ' . $params->add($id), $params->all());
     }
 
     /**
@@ -71,13 +77,37 @@ final class WishlistRepository extends Repository
     }
 
     /**
-     * Catalogue edition (and its work) holding this ISBN-13, if any.
+     * The catalogue edition (and its work) holding this ISBN-13, when the
+     * viewer may see it. An edition only other households hold is not
+     * linked: the entry keeps the ISBN and gains the link once the book is
+     * in the user's own library.
      *
      * @return array{id: int, work_id: int}|null
      */
-    public function editionForIsbn(string $isbn13): ?array
+    public function editionForIsbn(string $isbn13, Visibility $visibility): ?array
     {
-        $row = $this->one('SELECT id, work_id FROM editions WHERE isbn_13 = :isbn', ['isbn' => $isbn13]);
+        $params = new Params();
+        $row = $this->one(
+            'SELECT e.id, e.work_id FROM editions e WHERE e.isbn_13 = ' . $params->add($isbn13) . ' AND ' . $visibility->edition('e', $params),
+            $params->all(),
+        );
+
+        return $row === null ? null : ['id' => (int) $row['id'], 'work_id' => (int) $row['work_id']];
+    }
+
+    /**
+     * The edition (and its work) by id, when the viewer may see it: the
+     * only way an entry is linked to, or stays linked to, a catalogue record.
+     *
+     * @return array{id: int, work_id: int}|null
+     */
+    public function visibleEdition(int $editionId, Visibility $visibility): ?array
+    {
+        $params = new Params();
+        $row = $this->one(
+            'SELECT e.id, e.work_id FROM editions e WHERE e.id = ' . $params->add($editionId) . ' AND ' . $visibility->edition('e', $params),
+            $params->all(),
+        );
 
         return $row === null ? null : ['id' => (int) $row['id'], 'work_id' => (int) $row['work_id']];
     }
@@ -116,18 +146,24 @@ final class WishlistRepository extends Repository
      *
      * @return array{rows: list<array<string, mixed>>, total: int}
      */
-    public function forUser(int $userId, string $status, int $page): array
+    public function forUser(int $userId, string $status, int $page, Visibility $visibility): array
     {
-        $where = ' WHERE w.user_id = :user' . ($status === 'all' ? '' : ' AND w.status = :status');
-        $params = ['user' => $userId] + ($status === 'all' ? [] : ['status' => $status]);
+        $where = static fn (Params $params): string => ' WHERE w.user_id = ' . $params->add($userId)
+            . ($status === 'all' ? '' : ' AND w.status = ' . $params->add($status));
         $order = $status === 'wanted'
             ? " ORDER BY FIELD(w.priority, 'high', 'normal', 'low'), w.created_at DESC, w.id DESC"
             : ' ORDER BY COALESCE(w.status_changed_at, w.created_at) DESC, w.id DESC';
+        $params = new Params();
+        $rows = $this->many(
+            self::select($visibility, $params) . $where($params) . $order . ' LIMIT ' . $params->add(self::PER_PAGE)
+                . ' OFFSET ' . $params->add((max(1, $page) - 1) * self::PER_PAGE),
+            $params->all(),
+        );
+        $count = new Params();
 
         return [
-            'rows' => $this->many(self::SELECT . $where . $order . ' LIMIT :limit OFFSET :offset',
-                $params + ['limit' => self::PER_PAGE, 'offset' => (max(1, $page) - 1) * self::PER_PAGE]),
-            'total' => (int) $this->scalar('SELECT COUNT(*) FROM wishlist_items w' . $where, $params),
+            'rows' => $rows,
+            'total' => (int) $this->scalar('SELECT COUNT(*) FROM wishlist_items w' . $where($count), $count->all()),
         ];
     }
 

@@ -43,6 +43,18 @@ abstract class TreeAdminController extends Controller
     }
 
     /**
+     * Extra template data for the page (locations: the household choice).
+     *
+     * @param array<string, mixed>|null $node the node being edited
+     *
+     * @return array<string, mixed>
+     */
+    protected function pageExtras(?array $node): array
+    {
+        return [];
+    }
+
+    /**
      * @return array<string, string>
      */
     protected function defaults(): array
@@ -96,8 +108,10 @@ abstract class TreeAdminController extends Controller
         } elseif ($this->usage($id) > 0) {
             $this->flash('error', 'admin.' . $this->key() . '.delete_in_use');
         } else {
-            $this->repository()->delete($id);
-            $this->audit($request, $this->entity() . '.deleted', $this->entity(), $id, ['name' => $node['name']]);
+            $this->administrativeWrite($request, function () use ($request, $id, $node): void {
+                $this->repository()->delete($id);
+                $this->audit($request, $this->entity() . '.deleted', $this->entity(), $id, ['name' => $node['name']]);
+            });
             $this->flash('success', 'admin.tree.deleted');
         }
 
@@ -135,8 +149,10 @@ abstract class TreeAdminController extends Controller
             return $this->page($old, $validator->errors(), $node, 422);
         }
 
-        $savedId = $this->persist($id, $parentId, $old, $this->user($request)->id);
-        $this->audit($request, $this->entity() . ($id === null ? '.created' : '.updated'), $this->entity(), $savedId, ['name' => $old['name'], 'parent_id' => $parentId]);
+        $this->administrativeWrite($request, function () use ($request, $id, $parentId, $old): void {
+            $savedId = $this->persist($id, $parentId, $old, $this->user($request)->id);
+            $this->audit($request, $this->entity() . ($id === null ? '.created' : '.updated'), $this->entity(), $savedId, ['name' => $old['name'], 'parent_id' => $parentId]);
+        });
         $this->flash('success', $id === null ? 'admin.tree.created' : 'catalogue.saved');
 
         return Response::redirect($this->basePath());
@@ -147,7 +163,7 @@ abstract class TreeAdminController extends Controller
      * @param array<string, list<string>> $errors
      * @param array<string, mixed>|null   $node
      */
-    private function page(array $old, array $errors, ?array $node, int $status = 200): Response
+    protected function page(array $old, array $errors, ?array $node, int $status = 200): Response
     {
         $tree = $this->repository()->tree();
         foreach ($tree as &$row) {
@@ -166,6 +182,6 @@ abstract class TreeAdminController extends Controller
             'old' => $old,
             'errors' => $errors,
             'node' => $node,
-        ], $status);
+        ] + $this->pageExtras($node), $status);
     }
 }

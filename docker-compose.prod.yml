@@ -121,6 +121,8 @@ services:
     env_file:
       - .env.production
     environment:
+      APP_ENV: production
+      APP_ENV_FILE: ""
       APP_ROLE: web
       DB_HOST: db
       DB_PORT: "3306"
@@ -187,6 +189,8 @@ services:
     env_file:
       - .env.production
     environment:
+      APP_ENV: production
+      APP_ENV_FILE: ""
       APP_ROLE: ops
       DB_HOST: db
       DB_PORT: "3306"

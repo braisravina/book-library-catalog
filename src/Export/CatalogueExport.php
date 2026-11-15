@@ -17,17 +17,31 @@ namespace DigitalLibrary\Export;
  * audit log, the metadata cache, cover image files (covered by backups),
  * wishlists, loans and PRIVATE collections (personal data that only its
  * owner exports).
+ *
+ * Households (phase H3): while the household feature is enabled, copies,
+ * locations and shared collections carry the household they belong to
+ * (household_id and its name). Household memberships are never exported.
+ * With the feature disabled the columns are exactly those of earlier
+ * versions.
  */
 final class CatalogueExport extends ExportSource
 {
     public const DATASETS = ['works', 'editions', 'authors', 'work_authors', 'edition_contributors', 'publishers',
         'categories', 'locations', 'copies', 'collections', 'collection_items'];
 
+    private const HOUSEHOLD_COLUMNS = ['household_id', 'household'];
+
+    public function __construct(\PDO $pdo, private readonly bool $households = false)
+    {
+        parent::__construct($pdo);
+    }
+
     /**
      * @return array<string, Dataset>
      */
     public function datasets(): array
     {
+        $household = $this->households ? self::HOUSEHOLD_COLUMNS : [];
         $all = [
             new Dataset('works', ['id', 'title', 'subtitle', 'original_title', 'original_language', 'first_published_year', 'description',
                 'authors', 'author_ids', 'categories', 'category_ids', 'created_by', 'created_at', 'updated_at'], fn () => $this->works()),
@@ -39,9 +53,9 @@ final class CatalogueExport extends ExportSource
             new Dataset('edition_contributors', ['edition_id', 'author_id', 'author', 'role', 'position'], fn () => $this->creditRows('edition_contributors', 'edition_id')),
             new Dataset('publishers', ['id', 'name', 'created_at', 'updated_at'], fn () => $this->simple('publishers')),
             new Dataset('categories', ['id', 'parent_id', 'name', 'slug', 'path', 'description'], fn () => $this->tree('categories')),
-            new Dataset('locations', ['id', 'parent_id', 'name', 'kind', 'path', 'description'], fn () => $this->tree('locations')),
-            new Dataset('copies', self::COPY_COLUMNS, fn () => $this->copyRows('1 = 1', [], $this->treePaths('locations'))),
-            new Dataset('collections', self::COLLECTION_COLUMNS, fn () => $this->collectionRows("c.visibility = 'shared'", [])),
+            new Dataset('locations', [...['id', 'parent_id', 'name', 'kind', 'path', 'description'], ...$household], fn () => $this->tree('locations')),
+            new Dataset('copies', [...self::COPY_COLUMNS, ...$household], fn () => $this->copyRows('1 = 1', [], $this->treePaths('locations'))),
+            new Dataset('collections', [...self::COLLECTION_COLUMNS, ...$household], fn () => $this->collectionRows("c.visibility = 'shared'", [])),
             new Dataset('collection_items', self::COLLECTION_ITEM_COLUMNS, fn () => $this->collectionItemRows("c.visibility = 'shared'", [])),
         ];
         $out = [];
@@ -191,8 +205,17 @@ final class CatalogueExport extends ExportSource
     private function tree(string $table): \Generator
     {
         $paths = $this->treePaths($table);
+        $households = [];
+        if ($table === 'locations' && $this->households) {
+            foreach ($this->pdo->query('SELECT id, name FROM households')->fetchAll(\PDO::FETCH_ASSOC) as $h) {
+                $households[(int) $h['id']] = (string) $h['name'];
+            }
+        }
         foreach ($this->keyset("SELECT t.* FROM {$table} t", '1 = 1', [], [['t.id', 'id', 0]]) as $row) {
+            $householdId = ($row['household_id'] ?? null) === null ? null : (int) $row['household_id'];
             yield [
+                'household_id' => $householdId,
+                'household' => $householdId === null ? null : ($households[$householdId] ?? null),
                 'id' => (int) $row['id'],
                 'parent_id' => $row['parent_id'] === null ? null : (int) $row['parent_id'],
                 'name' => $row['name'],

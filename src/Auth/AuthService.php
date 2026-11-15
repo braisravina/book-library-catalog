@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace DigitalLibrary\Auth;
 
 use DigitalLibrary\Audit\AuditLogger;
+use DigitalLibrary\Database\Transaction;
+use DigitalLibrary\Households\WriteDeniedException;
+use PDO;
 use DigitalLibrary\Security\Csrf;
 use DigitalLibrary\Security\LoginThrottle;
 use DigitalLibrary\Security\PasswordHasher;
@@ -25,6 +28,7 @@ final class AuthService
         private readonly Session $session,
         private readonly Csrf $csrf,
         private readonly AuditLogger $audit,
+        private readonly PDO $pdo,
     ) {
     }
 
@@ -112,7 +116,15 @@ final class AuthService
 
     public function changePassword(User $user, #[\SensitiveParameter] string $newPassword): void
     {
-        $this->users->updatePassword($user->id, $this->hasher->hash($newPassword));
+        $hash = $this->hasher->hash($newPassword);
+        Transaction::run($this->pdo, function () use ($user, $hash): void {
+            $current = $this->users->findByIdLocked($user->id, true);
+            if ($current === null || !$current->isActive || $current->authVersion !== $user->authVersion) {
+                throw WriteDeniedException::forbidden();
+            }
+            $this->users->updatePassword($user->id, $hash);
+            $this->audit->log('user.password_changed', $user->id, 'user', $user->id);
+        });
         $fresh = $this->users->findById($user->id);
         if ($fresh !== null) {
             $this->login($fresh);

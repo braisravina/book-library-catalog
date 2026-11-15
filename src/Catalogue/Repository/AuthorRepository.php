@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Catalogue\Repository;
 
+use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
+
 final class AuthorRepository extends Repository
 {
     /**
@@ -25,65 +28,82 @@ final class AuthorRepository extends Repository
     }
 
     /**
+     * The author, when credited on a work or edition the viewer may see.
+     *
      * @return array<string, mixed>|null
      */
-    public function find(int $id): ?array
+    public function find(int $id, Visibility $visibility): ?array
     {
-        return $this->one('SELECT * FROM authors WHERE id = :id', ['id' => $id]);
+        $params = new Params();
+
+        return $this->one(
+            'SELECT a.* FROM authors a WHERE a.id = ' . $params->add($id) . ' AND ' . $visibility->author('a', $params),
+            $params->all(),
+        );
     }
 
     /**
+     * Authors credited on visible works or editions; work counts count
+     * visible works.
+     *
      * @return array{rows: list<array<string, mixed>>, total: int}
      */
-    public function paginate(string $query, int $page, int $perPage): array
+    public function paginate(string $query, int $page, int $perPage, Visibility $visibility): array
     {
-        $where = '';
-        $params = [];
-        if ($query !== '') {
-            $where = 'WHERE a.name LIKE :q';
-            $params['q'] = \DigitalLibrary\Database\Params::likeContains($query);
-        }
-        $total = (int) $this->scalar("SELECT COUNT(*) FROM authors a {$where}", $params);
+        $where = static fn (Params $params): string => 'WHERE ' . $visibility->author('a', $params)
+            . ($query === '' ? '' : ' AND a.name LIKE ' . $params->add(Params::likeContains($query)));
+
+        $count = new Params();
+        $total = (int) $this->scalar('SELECT COUNT(*) FROM authors a ' . $where($count), $count->all());
+
+        $params = new Params();
         $rows = $this->many(
-            "SELECT a.id, a.name, a.sort_name, a.birth_year, a.death_year,
-                    (SELECT COUNT(*) FROM work_authors wa WHERE wa.author_id = a.id) AS work_count
-             FROM authors a {$where}
+            'SELECT a.id, a.name, a.sort_name, a.birth_year, a.death_year,
+                    (SELECT COUNT(*) FROM work_authors wa JOIN works w ON w.id = wa.work_id
+                      WHERE wa.author_id = a.id AND ' . $visibility->work('w', $params) . ') AS work_count
+             FROM authors a ' . $where($params) . '
              ORDER BY a.sort_name, a.id
-             LIMIT :limit OFFSET :offset",
-            $params + ['limit' => $perPage, 'offset' => ($page - 1) * $perPage],
+             LIMIT ' . $params->add($perPage) . ' OFFSET ' . $params->add(($page - 1) * $perPage),
+            $params->all(),
         );
 
         return ['rows' => $rows, 'total' => $total];
     }
 
     /**
-     * Works credited to the author, with the role and edition counts.
+     * Visible works credited to the author, with the role and the count
+     * and first of their visible editions.
      *
      * @return list<array<string, mixed>>
      */
-    public function works(int $authorId): array
+    public function works(int $authorId, Visibility $visibility): array
     {
+        $params = new Params();
+
         return $this->many(
             'SELECT w.id, w.title, w.subtitle, w.first_published_year, wa.role,
-                    (SELECT COUNT(*) FROM editions e WHERE e.work_id = w.id) AS edition_count,
-                    (SELECT MIN(e.id) FROM editions e WHERE e.work_id = w.id) AS first_edition_id
+                    (SELECT COUNT(*) FROM editions e WHERE e.work_id = w.id AND ' . $visibility->edition('e', $params) . ') AS edition_count,
+                    (SELECT MIN(e.id) FROM editions e WHERE e.work_id = w.id AND ' . $visibility->edition('e', $params) . ') AS first_edition_id
              FROM work_authors wa JOIN works w ON w.id = wa.work_id
-             WHERE wa.author_id = :id
+             WHERE wa.author_id = ' . $params->add($authorId) . ' AND ' . $visibility->work('w', $params) . '
              ORDER BY w.title, w.id',
-            ['id' => $authorId],
+            $params->all(),
         );
     }
 
     /**
      * @return list<array<string, mixed>>
      */
-    public function contributions(int $authorId): array
+    public function contributions(int $authorId, Visibility $visibility): array
     {
+        $params = new Params();
+
         return $this->many(
             'SELECT e.id, e.title, e.publication_year, ec.role
              FROM edition_contributors ec JOIN editions e ON e.id = ec.edition_id
-             WHERE ec.author_id = :id ORDER BY e.title, e.id',
-            ['id' => $authorId],
+             WHERE ec.author_id = ' . $params->add($authorId) . ' AND ' . $visibility->edition('e', $params) . '
+             ORDER BY e.title, e.id',
+            $params->all(),
         );
     }
 
@@ -97,11 +117,18 @@ final class AuthorRepository extends Repository
     }
 
     /**
+     * Names offered while typing in the book forms: visible authors only.
+     *
      * @return list<string>
      */
-    public function names(int $limit = 500): array
+    public function names(Visibility $visibility, int $limit = 500): array
     {
-        return array_column($this->many('SELECT name FROM authors ORDER BY sort_name LIMIT :l', ['l' => $limit]), 'name');
+        $params = new Params();
+
+        return array_column($this->many(
+            'SELECT a.name FROM authors a WHERE ' . $visibility->author('a', $params) . ' ORDER BY a.sort_name LIMIT ' . $params->add($limit),
+            $params->all(),
+        ), 'name');
     }
 
     /**

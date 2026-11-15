@@ -55,7 +55,10 @@ final class Phase4bMigrationTest extends IntegrationTestCase
         // Representative Phase 4A data.
         $this->pdo()->exec("INSERT INTO users (email, display_name, password_hash, role_id, created_at, updated_at) VALUES
             ('admin@example.org', 'Admin', 'x', 1, UTC_TIMESTAMP(), UTC_TIMESTAMP()), ('member@example.org', 'Member', 'x', 2, UTC_TIMESTAMP(), UTC_TIMESTAMP())");
-        $book = $this->makeBook(2, 'Before the upgrade', '9788437604947', ['Author'], [], [], 2);
+        // The copy is inserted as Phase 4A stored it (the current application
+        // also writes copies.household_id, which this schema does not have yet).
+        $book = $this->makeBook(2, 'Before the upgrade', '9788437604947', ['Author']);
+        $book['copy_id'] = $this->insertLegacyCopy($book['edition_id'], 2);
         $this->pdo()->exec("INSERT INTO loans (copy_id, borrower_user_id, loaned_on, created_at, updated_at) VALUES ({$book['copy_id']}, 1, '2026-01-01', UTC_TIMESTAMP(), UTC_TIMESTAMP())");
         $this->pdo()->exec("INSERT INTO wishlist_items (user_id, title, created_at, updated_at) VALUES (2, 'Wish', UTC_TIMESTAMP(), UTC_TIMESTAMP())");
         $this->pdo()->exec("INSERT INTO collections (owner_user_id, name, created_at, updated_at) VALUES (2, 'Shelf', UTC_TIMESTAMP(), UTC_TIMESTAMP())");
@@ -66,7 +69,8 @@ final class Phase4bMigrationTest extends IntegrationTestCase
             ('revoked@example.org', 2, '" . str_repeat('c', 64) . "', 1, UTC_TIMESTAMP() + INTERVAL 3 DAY, NULL, NULL, UTC_TIMESTAMP(), UTC_TIMESTAMP())");
         $before = $this->snapshot();
 
-        $applied = (new Migrator($pdo, dirname(__DIR__, 2) . '/database/migrations'))->migrate();
+        // Only the Phase 4B migration: later migrations have their own upgrade tests.
+        $applied = $this->migrateUpTo($pdo, self::PHASE4B);
         self::assertSame([self::PHASE4B], $applied);
         self::assertSame($before, $this->snapshot(), 'Existing rows are unchanged');
 
@@ -92,8 +96,9 @@ final class Phase4bMigrationTest extends IntegrationTestCase
         $default = Engine::of($this->pdo()) === Engine::MARIADB ? 'RESTRICT' : 'NO ACTION';
         self::assertSame(['fk_invitations_accepted_user' => 'SET NULL', 'fk_invitations_invited_by' => 'SET NULL', 'fk_invitations_replaced_by' => 'SET NULL', 'fk_invitations_revoked_by' => 'SET NULL', 'fk_invitations_role' => $default], $rules);
 
-        // Re-running is a no-op and nothing is reported as modified.
+        // Later migrations apply on top; re-running is then a no-op and nothing is reported as modified.
         $migrator = new Migrator($pdo, dirname(__DIR__, 2) . '/database/migrations');
+        $migrator->migrate();
         self::assertSame([], $migrator->migrate());
         foreach ($migrator->status() as $row) {
             self::assertTrue($row['applied'] && !$row['modified'], $row['version']);

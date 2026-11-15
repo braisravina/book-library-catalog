@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Http\Controllers\Catalogue;
 
-use DigitalLibrary\Auth\User;
+use DigitalLibrary\Catalogue\CopyValidationException;
 use DigitalLibrary\Catalogue\DuplicateIsbnException;
 use DigitalLibrary\Catalogue\Input\CopyInput;
 use DigitalLibrary\Catalogue\Input\EditionInput;
@@ -26,7 +26,9 @@ use DigitalLibrary\Validation\Validator;
  *   1. ISBN step: an ISBN is validated (with a specific reason when it is
  *      not valid) and checked for duplicates first; "Look up book" queries
  *      the providers, "manual" skips them;
- *   2. duplicate: offer the existing record or "add another copy";
+ *   2. duplicate: offer the existing record or "add another copy"; for a
+ *      book only other households hold, "add your copy" by ISBN, showing
+ *      nothing but the shared description;
  *   3. full form: pre-filled for review (provider of each field, missing
  *      fields, conflicting values, possible existing works to add a new
  *      edition to), then creates work + edition (+ optional first copy).
@@ -35,17 +37,21 @@ final class CatalogueController extends CatalogueBaseController
 {
     public function index(Request $request): Response
     {
+        $visibility = $this->visibility();
         $criteria = SearchCriteria::fromRequest($request);
-        $result = $this->services->search()->search($criteria);
+        $result = $this->services->search()->search($criteria, $visibility);
 
         return $this->render('catalogue/index', [
             'page_title' => 'catalogue.title',
             'criteria' => $criteria,
             'result' => $result,
             'category_tree' => $this->services->categories()->tree(),
-            'location_tree' => $this->services->locations()->tree(),
-            'owners' => array_values(array_filter($this->services->users()->all(), static fn (User $u): bool => $u->isActive)),
-            'languages' => array_values(array_intersect(Vocabulary::LANGUAGES, $this->services->editions()->languagesInUse())),
+            // Filters offer only what the user can already see: locations of
+            // their households, people sharing a household with them, and
+            // languages of visible editions.
+            'location_tree' => $this->services->locations()->visibleTree($visibility),
+            'owners' => $this->services->users()->activeKnownTo($visibility),
+            'languages' => array_values(array_intersect(Vocabulary::LANGUAGES, $this->services->editions()->languagesInUse($visibility))),
         ]);
     }
 
@@ -99,6 +105,7 @@ final class CatalogueController extends CatalogueBaseController
             trim((string) $request->input('copy_condition', '')),
             'available',
             false, '', '', '', '', '',
+            trim((string) $request->input('copy_household_id', '')),
         ) : null;
 
         $validator = Validator::make([], []);
@@ -108,12 +115,7 @@ final class CatalogueController extends CatalogueBaseController
         if ($copy !== null) {
             $copyValidator = Validator::make([], []);
             $copy->validate($copyValidator);
-            foreach ($copyValidator->errors() as $field => $errors) {
-                foreach ($errors as $error) {
-                    $validator->addError('copy_' . $field, $error);
-                }
-            }
-            $this->validateLocation($copy->locationId(), $validator, 'copy_location_id');
+            self::addCopyErrors($validator, $copyValidator->errors());
         }
 
         // A cached provider record is only honoured for the same ISBN.
@@ -137,7 +139,7 @@ final class CatalogueController extends CatalogueBaseController
         // user has confirmed this is a different book.
         $titleMatches = [];
         if ($edition->parsedIsbn() === null && $edition->isbn === '' && $request->input('confirm_new') !== '1' && !$validator->fails()) {
-            $titleMatches = $this->services->editions()->titleMatches($work->title);
+            $titleMatches = $this->services->editions()->titleMatches($work->title, $this->visibility());
         }
         if ($validator->fails() || $titleMatches !== []) {
             $similar = $edition->parsedIsbn() !== null ? $this->similarWorks($work) : [];
@@ -146,21 +148,21 @@ final class CatalogueController extends CatalogueBaseController
         }
 
         try {
-            $ids = $this->services->books()->createBook($work, $edition, $copy, $user->id, $recordId);
+            // The first copy's household, owner and location are decided and
+            // checked like any other copy's, inside the same transaction.
+            $ids = $this->services->books()->createBook($user->id, $work, $edition, $copy, $recordId);
         } catch (DuplicateIsbnException $e) {
             return $this->duplicate($request, $e->existingEditionId, 409);
+        } catch (CopyValidationException $e) {
+            self::addCopyErrors($validator, $e->errors);
+            $similar = $edition->parsedIsbn() !== null ? $this->similarWorks($work) : [];
+
+            return $this->bookForm($request, $work, $edition, $validator->errors(), [], $addCopy, $copy, 422, $lookup, $similar);
         }
 
-        $this->audit($request, 'work.created', 'work', $ids['work_id'], ['title' => $work->title]);
-        $this->audit($request, 'edition.created', 'edition', $ids['edition_id'], ['isbn_13' => $edition->parsedIsbn()?->isbn13]);
-        if ($ids['copy_id'] !== null) {
-            $this->audit($request, 'copy.created', 'copy', $ids['copy_id'], ['edition_id' => $ids['edition_id']]);
-        }
         if ($importCover && $providerData instanceof BookMetadata) {
-            $coverId = $this->services->coverImporter()->import($ids['edition_id'], $providerData, $user->id);
-            if ($coverId !== null) {
-                $this->audit($request, 'cover.imported', 'cover', $coverId, ['edition_id' => $ids['edition_id'], 'metadata_record_id' => $recordId]);
-            } else {
+            $coverId = $this->services->coverImporter()->import($ids['edition_id'], $providerData, $user->id, $recordId);
+            if ($coverId === null) {
                 $this->flash('info', 'metadata.cover_failed');
             }
         }
@@ -169,17 +171,51 @@ final class CatalogueController extends CatalogueBaseController
         return Response::redirect('/editions/' . $ids['edition_id']);
     }
 
+    /**
+     * The ISBN is already catalogued. ISBN-13 is unique across the shared
+     * catalogue, so this must be said whoever holds the book, but it never
+     * says more than that: when the edition is outside the user's view
+     * only its bibliographic description is shown, with no copy count,
+     * owner, household or location and no link to the record.
+     */
     private function duplicate(Request $request, int $editionId, int $status): Response
     {
-        $edition = $this->found($this->services->editions()->find($editionId));
+        $user = $this->user($request);
+        $visibility = $this->visibility();
+        $edition = $this->services->editions()->find($editionId, $visibility);
+        $visible = $edition !== null;
+        $edition ??= $this->found($this->services->editions()->bibliographic($editionId));
+        $canAddCopy = $this->can($user, Permission::CopyManageOwn);
+        // A book held only by other households: the user may add their own
+        // copy of it (phase H3) when they have a household to put it in.
+        $canPlace = $visibility->isUnrestricted() || !$this->services->householdScope($user)->isEmpty();
 
         return $this->render('catalogue/duplicate', [
             'page_title' => 'catalogue.duplicate.title',
             'edition' => $edition,
+            'visible' => $visible,
             'authors' => $this->services->works()->authors((int) $edition['work_id']),
-            'copy_count' => $this->services->editions()->copyCount($editionId),
-            'can_add_copy' => $this->can($this->user($request), Permission::CopyManageOwn),
+            'copy_count' => $visible ? $this->services->editions()->visibleCopyCount($editionId, $visibility) : 0,
+            'can_add_copy' => $canAddCopy && ($visible || $canPlace),
+            // By ISBN, never by id, for an edition the user cannot see.
+            'add_copy_url' => $visible
+                ? '/editions/' . $editionId . '/copies/new'
+                : $this->services->view()->url('/books/copies/new', ['isbn' => (string) $edition['isbn_13']]),
         ], $status);
+    }
+
+    /**
+     * Errors of the first copy, under the field names of the book form.
+     *
+     * @param array<string, list<string>> $errors
+     */
+    private static function addCopyErrors(Validator $validator, array $errors): void
+    {
+        foreach ($errors as $field => $messages) {
+            foreach ($messages as $message) {
+                $validator->addError('copy_' . $field, $message);
+            }
+        }
     }
 
     /**
@@ -252,6 +288,7 @@ final class CatalogueController extends CatalogueBaseController
         return $this->services->works()->similar(
             $work->title,
             array_values(array_map(static fn (array $a): string => (string) $a['name'], $work->authors)),
+            $this->visibility(),
         );
     }
 
@@ -282,6 +319,7 @@ final class CatalogueController extends CatalogueBaseController
             'add_copy' => $addCopy,
             'copy' => $copy,
             'can_add_copy' => $this->can($this->user($request), Permission::CopyManageOwn),
+            'household_options' => $this->services->copyHousehold()->options($this->user($request), $this->services->householdScope($this->user($request)), null),
             'lookup' => $lookup,
             'similar_works' => $similar,
             'isbn13' => $edition->parsedIsbn()?->isbn13,

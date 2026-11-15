@@ -31,7 +31,7 @@ final class WishlistController extends Controller
         $status = (string) $request->query('status', 'wanted');
         $status = in_array($status, self::FILTERS, true) ? $status : 'wanted';
         $page = max(1, min(10_000, (int) ($request->query('page') ?? '1')));
-        $result = $this->services->wishlist()->forUser($user->id, $status, $page);
+        $result = $this->services->wishlist()->forUser($user->id, $status, $page, $this->visibility());
 
         return $this->render('wishlist/index', [
             'page_title' => 'wishlist.title',
@@ -69,14 +69,14 @@ final class WishlistController extends Controller
             return $this->form(null, $input, $validator->errors(), $edition, 422);
         }
         try {
-            $id = $this->services->wishlistService()->add(
-                $user,
-                $input,
-                $edition === null ? null : ['id' => (int) $edition['id'], 'work_id' => (int) $edition['work_id']],
-            );
+            $id = $this->services->wishlistService()->add($user, $input, $edition === null ? null : (int) $edition['id']);
         } catch (WishlistException $e) {
             if ($e->getMessage() === 'wishlist.error.forbidden') {
                 throw HttpException::forbidden();
+            }
+            if ($e->getMessage() === 'wishlist.error.edition_not_found') {
+                // The edition left the user's view (or was deleted) meanwhile.
+                throw HttpException::notFound();
             }
 
             return $this->form(null, $input, [], $edition, 409, $e->getMessage(), $e->existingId);
@@ -153,7 +153,7 @@ final class WishlistController extends Controller
      */
     private function ownItem(Request $request, array $params): array
     {
-        $item = $this->services->wishlist()->find($this->id($params));
+        $item = $this->services->wishlist()->find($this->id($params), $this->visibility());
         if ($item === null || !$this->services->authorizer()->canManageWishlistItem($this->user($request), (int) $item['user_id'])) {
             throw HttpException::notFound();
         }
@@ -176,7 +176,8 @@ final class WishlistController extends Controller
             throw HttpException::notFound();
         }
 
-        return $this->found($this->services->editions()->find((int) $raw));
+        // 404 unless the user may see the edition: its id alone opens nothing.
+        return $this->found($this->services->editions()->find((int) $raw, $this->visibility()));
     }
 
     /**

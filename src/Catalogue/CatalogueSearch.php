@@ -7,6 +7,7 @@ namespace DigitalLibrary\Catalogue;
 use DigitalLibrary\Catalogue\Repository\CategoryRepository;
 use DigitalLibrary\Catalogue\Repository\LocationRepository;
 use DigitalLibrary\Database\Params;
+use DigitalLibrary\Security\Visibility;
 use PDO;
 
 /**
@@ -33,10 +34,10 @@ final class CatalogueSearch
     /**
      * @return array{rows: list<array<string, mixed>>, total: int, page: int, pages: int}
      */
-    public function search(SearchCriteria $criteria): array
+    public function search(SearchCriteria $criteria, Visibility $visibility): array
     {
         $params = new Params();
-        $where = $this->conditions($criteria, $params);
+        $where = $this->conditions($criteria, $params, $visibility);
         $whereSql = $where === [] ? '' : 'WHERE ' . implode(' AND ', $where);
 
         $countStmt = $this->pdo->prepare("SELECT COUNT(*) FROM editions e JOIN works w ON w.id = e.work_id {$whereSql}");
@@ -57,7 +58,7 @@ final class CatalogueSearch
         $stmt = $this->pdo->prepare(
             "SELECT e.id, e.work_id, e.title, e.subtitle, e.publication_year, e.language, e.format, e.isbn_13,
                     p.name AS publisher_name,
-                    (SELECT COUNT(*) FROM copies c WHERE c.edition_id = e.id) AS copy_count,
+                    (SELECT COUNT(*) FROM copies c WHERE c.edition_id = e.id AND " . $visibility->copy('c', $params) . ") AS copy_count,
                     (SELECT cv.id FROM covers cv WHERE cv.edition_id = e.id AND cv.is_primary = 1) AS cover_id,
                     (SELECT GROUP_CONCAT(a.name ORDER BY wa.position SEPARATOR ', ')
                        FROM work_authors wa JOIN authors a ON a.id = wa.author_id
@@ -78,9 +79,10 @@ final class CatalogueSearch
     /**
      * @return list<string> SQL fragments; every value is a bound parameter
      */
-    private function conditions(SearchCriteria $c, Params $params): array
+    private function conditions(SearchCriteria $c, Params $params, Visibility $visibility): array
     {
-        $where = [];
+        // Only editions the viewer may see are searched, counted or paged.
+        $where = $visibility->isUnrestricted() ? [] : [$visibility->edition('e', $params)];
 
         if ($c->query !== '') {
             $isbn = Isbn::tryParse($c->query);
@@ -112,6 +114,9 @@ final class CatalogueSearch
             $copyConditions[] = 'c.location_id IN (' . $params->in($this->locations->descendantIds($c->locationId)) . ')';
         }
         if ($copyConditions !== []) {
+            // ...and that copy must itself be in view, so the filters never
+            // match on another household's inventory.
+            $copyConditions[] = $visibility->copy('c', $params);
             $where[] = 'EXISTS (SELECT 1 FROM copies c WHERE c.edition_id = e.id AND ' . implode(' AND ', $copyConditions) . ')';
         }
 

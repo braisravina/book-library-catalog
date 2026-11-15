@@ -437,6 +437,86 @@ database:
   migration: read MariaDB's upgrade notes, back up, test the restore on a
   copy first.
 
+## Households (phases H1 to H3, development-only)
+
+Not deployed to production yet (see DEPLOYMENT.md, section 11). For when it
+is, as part of the complete household release:
+
+- The migrations are additive. `2026_11_13_180002` moves existing copies
+  and locations into the default household and adds, as members, the
+  accounts that are active and have signed in. It deletes nothing and can
+  be run again safely. Take and verify a backup first, as for any
+  migration.
+- New tables `households` and `household_members` are included in backups
+  automatically (the dump covers every base table). A backup taken before
+  the migration restores the earlier schema; run `migrate` afterwards.
+  Backups restore only into the same engine, as before.
+- Before the migration, this read-only query shows which accounts will
+  become members of the default household:
+  `SELECT id, email FROM users WHERE is_active = 1 AND last_login_at IS NOT NULL;`
+  After it, these must both return 0:
+  `SELECT COUNT(*) FROM copies WHERE household_id IS NULL;`
+  `SELECT COUNT(*) FROM locations WHERE household_id IS NULL;`
+- Once the feature is enabled (phase H2 onwards), a copy or location with
+  no household is shown to administrators only, and an account that
+  belongs to no household sees only the records it catalogued itself. The
+  two counts above and the membership list are therefore the things to
+  check when a user reports missing books. Membership changes apply to
+  the member's next request; nobody has to sign in again.
+- Phase H2 adds no migration and no setting.
+- Phase H3 adds four migrations (`2026_11_14_100000` to `100003`), no
+  setting:
+  - `100000` makes inventory codes unique per household. It adds a
+    generated column to `copies` and replaces the unique index in one
+    `ALTER TABLE` (the table is rebuilt: with a large `copies` table allow
+    for the time and for free disk space of about the table's size). No
+    code, copy or household is changed. Before it, this must return no
+    row (it cannot, with the index that exists today, but it is the
+    condition the new index needs):
+    `SELECT COALESCE(household_id, 0) AS scope, inventory_code, COUNT(*) FROM copies WHERE inventory_code IS NOT NULL GROUP BY scope, inventory_code HAVING COUNT(*) > 1;`
+  - `100001` and `100002` add `collections.household_id` and give existing
+    **shared** collections the default household. Private collections are
+    not touched. Afterwards this returns 0:
+    `SELECT COUNT(*) FROM collections WHERE visibility = 'shared' AND household_id IS NULL;`
+  - `100003` adds `invitation_households` (empty).
+  - The previous application version runs on the migrated schema, so the
+    application can be rolled back without touching the database. A
+    backup taken before the migrations restores the earlier schema; run
+    `migrate` afterwards. Backups restore only into the same engine.
+- With the feature enabled, the things to check when a user cannot change
+  something they expect to: their memberships (a write is authorized by
+  the memberships at that moment), whether another household holds a copy
+  of the record (then an administrator edits its description), and the
+  household of the copy, location or collection concerned. A "try again"
+  page (HTTP 409) means two changes met on the same records; nothing was
+  saved and repeating the action is safe.
+- Deleting a household requires it to have no members, copies, locations
+  or shared collections. Pending invitations that named it simply lose
+  that assignment.
+
+
+
+Invitation replacement and redemption take shared household locks before
+invitation/account locks, avoiding an inverse order with household deletion.
+With the feature disabled, pending assignments are ignored during redemption
+and are not carried into replacement invitations.
+
+Location tree mutations take exclusive household locks in id order before
+account and location locks, including with the feature disabled. This
+serialises root-name checks and disjoint subtree moves: the nullable
+parent unique index alone cannot prevent duplicate roots or concurrent cycles.
+Ordinary guarded writes retain shared household locks when enabled.
+
+Application rollback retains the H3 schema; it does not restore global
+inventory-code uniqueness. If H3 has allowed the same code in different
+households, the previous application's global pre-check can refuse edits
+of those copies, including an unchanged code. Review and resolve such
+collisions explicitly before reverting to global uniqueness; never drop
+copies or silently rewrite codes. Disabling the feature also restores the
+global application pre-check, with the same collision limitation. There is
+no automatic down migration; an older backup loses subsequent writes.
+
+
 ## Metadata cache
 
 Online lookups are cached in `metadata_records` (one row per provider and
@@ -530,3 +610,88 @@ These steps are not done yet (see also DEPLOYMENT.md):
 3. Run one full restore drill on the production host and record how long it
    took (your measured recovery time).
 4. Decide the retention values and your recovery point objective.
+
+
+## H4 inventory assignment and rehearsal
+
+See HOUSEHOLD_INVENTORY.md for the complete administrator workflow and bounded
+atomicity model. Existing records are never automatically distributed to newly
+created households. Default inventory, NULL assignments, shared collections,
+memberships and pending invitations require separate administrator decisions.
+The default household remains protected and household columns stay nullable.
+
+The local-only inventory:check command prints read-only diagnostics. It requires
+a dedicated loopback *_test/*_rehearsal database on a non-system port, maintenance,
+explicit administrator id, stopped-writer acknowledgement and exclusive operation
+lock. It is not a production assignment tool; no mutating maintenance CLI or flag
+bypass is supplied. Saved plans can be resumed by operation id, but stale state
+requires a fresh preview. Each confirmed batch commits independently.
+
+Before any later owner-run production release, verify a same-engine backup and
+restore rehearsal, rehearse against an isolated restored database under owner
+control, record ids/counts and integrity checks, measure ALTER disk/time overhead,
+and stop all writers during migrations. Verify NULLs, copy/location and parent
+household alignment, cycles, code conflicts, loans, ownership and planned access
+for every role before returning service. Never silently resolve conflicts by
+changing inventory codes. Retain pre-release images and document the precise
+compatibility/recovery boundary.
+
+
+## Interrupted migration and checksum recovery (H1–H4 remediation)
+
+Owner-run procedure only. Never edit released migration SQL, pinned checksums or
+schema_migrations to make a refusal disappear. Do not delete/recreate production
+objects or automatically replay a partly executed file. MariaDB 11.4 and MySQL
+8.4 can commit each DDL statement while a later statement/history INSERT fails;
+file-level rollback is impossible, including after a client disconnect.
+
+The migrator writes schema_migration_attempts(version, checksum, started_at)
+before executing a file. Successful history insertion and intent removal commit
+together. An incomplete intent makes both migrate and migrate:status refuse and
+name the version. A checksum/history mismatch also prevents pending execution.
+The metadata table is created by the migrator itself; no released migration is
+changed. The runtime account still has no DDL privileges. Metadata/table creation
+is not a domain migration and does not make migration files atomic.
+
+1. Keep maintenance active and stop all web, CLI and scheduled writers. Retain
+   the exact failed release, server/client logs, backup, UTC failure time and
+   engine/version. Preserve a copy of the failed database for investigation.
+2. With the owner's migration/diagnostic account, inspect (do not modify):
+   `SELECT * FROM schema_migration_attempts ORDER BY version;`
+   `SELECT * FROM schema_migrations ORDER BY version;`
+   Compare SHA-256 of the selected engine's immutable release file with both
+   records. A MODIFIED/unknown-version/OTHER-ENGINE history is a stop condition.
+   Restore the verified original release files for accidental file edits; never
+   rewrite a correct recorded checksum. Unknown history requires release review.
+3. Inspect SHOW CREATE TABLE and information_schema.COLUMNS, STATISTICS and
+   REFERENTIAL_CONSTRAINTS for every table named by the incomplete file. Compare
+   column types/defaults/generated expressions, index order/uniqueness, FKs and
+   data effects with each ordered statement. For H1's two inventory ALTERs inspect
+   both copies and locations; for H4 inspect both transfer tables. An existing
+   index/column/table alone does not prove the whole statement or file completed.
+   Preserve counts, primary keys and fingerprints of existing records.
+4. Preferred recovery: restore a verified pre-migration **same-engine** backup
+   into an empty disposable target first, reconcile records/covers and rehearse
+   the exact release. Then follow the existing owner restore procedure with its
+   safety backup/incomplete-restore marker. Agree loss of subsequent writes and
+   measured restore time before replacing live data. Restore is not atomic.
+5. If preserving post-backup writes requires repair, stop for an explicit
+   owner-reviewed, version-specific SQL plan. That plan must prove which DDL and
+   data statements committed, preserve existing rows, complete only missing
+   effects, reconcile final schema/data, and specify the exact justified history
+   and intent reconciliation in one DML transaction. No generic repair command
+   is provided. Even an intent written before any DDL needs this proof; do not
+   simply clear it. A new migration cannot bypass an incomplete earlier file.
+6. On the recovered disposable target, run migrate:status, migrate, then
+   migrate:status; verify checksums, no incomplete intents, FKs and baseline
+   fingerprints. Perform application/read/write checks and backup/restore drill.
+   Only the owner can approve the corresponding production procedure and return
+   writers after reconciliation. Record evidence and recovery point explicitly.
+
+For an interruption made by an older migrator, the intent table may be empty even
+when a pending file partially changed schema. Inspect the pending file's objects
+before running it. A duplicate-object error is a stop condition, not permission
+to DROP it or mark the file applied. The new migrator will retain an intent on
+that failed attempt. Neither engine is treated as supporting atomic multi-DDL
+files. Disposable fault-injection tests cover later-DDL and history-insert
+failure; they do not simulate power loss or certify a real-data recovery.

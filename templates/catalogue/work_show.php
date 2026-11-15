@@ -19,6 +19,7 @@ $authorNames = implode(', ', array_column($authors, 'name'));
 <?php endif; ?>
 <?php if ($work['description'] !== null): ?><div class="description"><?= nl2br($view->e($work['description'])) ?></div><?php endif; ?>
 
+<?php if (!empty($shared_notice)): ?><p class="muted"><?= $view->t('catalogue.shared_record_notice') ?></p><?php endif; ?>
 <div class="form-actions">
     <?php if ($can_edit): ?><a class="button" href="/works/<?= (int) $work['id'] ?>/edit"><?= $view->t('catalogue.work.edit_title') ?></a><?php endif; ?>
     <?php if ($can_add_edition): ?><a class="button button-primary" href="/works/<?= (int) $work['id'] ?>/editions/new"><?= $view->t('catalogue.edition.new_title') ?></a><?php endif; ?>

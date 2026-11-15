@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Auth;
 
+use DigitalLibrary\Database\Params;
 use DigitalLibrary\Security\Role;
+use DigitalLibrary\Security\Visibility;
 use PDO;
 
 final class UserRepository
@@ -22,6 +24,26 @@ final class UserRepository
         $row = $this->fetchOne(self::SELECT . ' WHERE u.id = :id', ['id' => $id]);
 
         return $row ? User::fromRow($row) : null;
+    }
+
+    /**
+     * The account as it is now, with its row locked until the transaction
+     * ends (Households\WriteGuard): shared, so a deactivation or role change
+     * waits for the write in flight; exclusive for services that serialise
+     * a user's own changes on the account row.
+     *
+     * The lock is taken on the users row alone (a locking read of the join
+     * would lock the shared roles row as well), then the account is read.
+     */
+    public function findByIdLocked(int $id, bool $exclusive = false): ?User
+    {
+        $stmt = $this->pdo->prepare('SELECT id FROM users WHERE id = :id ' . ($exclusive ? 'FOR UPDATE' : 'LOCK IN SHARE MODE'));
+        $stmt->execute(['id' => $id]);
+        if ($stmt->fetchColumn() === false) {
+            return null;
+        }
+
+        return $this->findById($id);
     }
 
     /**
@@ -150,6 +172,40 @@ final class UserRepository
     public function all(): array
     {
         $stmt = $this->pdo->query(self::SELECT . ' ORDER BY u.display_name, u.id');
+
+        return array_map(User::fromRow(...), $stmt->fetchAll());
+    }
+
+    /**
+     * Active users the viewer may be shown by name: everyone when
+     * unrestricted, otherwise the viewer and the members of their
+     * households. Users of other households are never listed.
+     *
+     * @return list<User>
+     */
+    public function activeKnownTo(Visibility $visibility): array
+    {
+        $params = new Params();
+        $stmt = $this->pdo->prepare(self::SELECT . ' WHERE u.is_active = 1 AND ' . $visibility->user('u', $params) . ' ORDER BY u.display_name, u.id');
+        $params->bind($stmt);
+        $stmt->execute();
+
+        return array_map(User::fromRow(...), $stmt->fetchAll());
+    }
+
+    /**
+     * Active members of one household (the people a copy of that household
+     * may be lent to).
+     *
+     * @return list<User>
+     */
+    public function activeMembersOf(int $householdId): array
+    {
+        $stmt = $this->pdo->prepare(
+            self::SELECT . ' JOIN household_members hm ON hm.user_id = u.id
+             WHERE hm.household_id = :h AND u.is_active = 1 ORDER BY u.display_name, u.id'
+        );
+        $stmt->execute(['h' => $householdId]);
 
         return array_map(User::fromRow(...), $stmt->fetchAll());
     }

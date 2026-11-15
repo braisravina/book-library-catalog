@@ -2,7 +2,10 @@
 /**
  * @var \DigitalLibrary\View\View $view  @var array<string, mixed>|null $collection  @var \DigitalLibrary\Collections\CollectionInput $input
  * @var array<string, list<string>> $errors  @var list<string> $visibilities
+ * @var array<string, string> $household_options  id => name of the households a shared collection may go to;
+ *                                                empty while the household feature is disabled
  */
+$households = ($household_options ?? []) !== [];
 $action = $collection === null ? '/collections' : '/collections/' . (int) $collection['id'];
 ?>
 <section class="form-card">
@@ -16,10 +19,16 @@ $action = $collection === null ? '/collections' : '/collections/' . (int) $colle
             <legend><?= $view->t('collections.fields.visibility') ?></legend>
             <?php foreach ($visibilities as $v): ?>
                 <label class="checkbox"><input type="radio" name="visibility" value="<?= $v ?>"<?= $input->visibility === $v ? ' checked' : '' ?>> <?= $view->t('collections.visibility.' . $v) ?></label>
-                <p class="hint"><?= $view->t('collections.visibility_hint.' . $v) ?></p>
+                <p class="hint"><?= $view->t('collections.visibility_hint.' . ($v === 'shared' && $households ? 'shared_household' : $v)) ?></p>
             <?php endforeach; ?>
             <?= $view->partial('partials/field_errors', ['messages' => $errors['visibility'] ?? [], 'id' => 'visibility-errors']) ?>
         </fieldset>
+        <?php if ($households): ?>
+            <?= $view->partial('partials/select', ['name' => 'household_id', 'label' => 'collections.fields.household', 'value' => $input->householdId, 'options' => $household_options, 'errors' => $errors] + (count($household_options) > 1 ? ['blank' => 'households.choose'] : [])) ?>
+            <p class="hint"><?= $view->t('collections.household_hint') ?></p>
+        <?php elseif (isset($errors['household_id'])): ?>
+            <?= $view->partial('partials/field_errors', ['messages' => $errors['household_id'], 'id' => 'household_id-errors']) ?>
+        <?php endif; ?>
         <div class="form-actions">
             <button type="submit" class="button button-primary"><?= $view->t($collection === null ? 'actions.create' : 'actions.save') ?></button>
             <a class="button" href="<?= $collection === null ? '/collections' : '/collections/' . (int) $collection['id'] ?>"><?= $view->t('actions.cancel') ?></a>

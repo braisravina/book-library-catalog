@@ -4,24 +4,78 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Http\Controllers\Catalogue;
 
+use DigitalLibrary\Auth\User;
 use DigitalLibrary\Http\Controllers\Controller;
 use DigitalLibrary\Validation\Validator;
 
 abstract class CatalogueBaseController extends Controller
 {
     /**
-     * Option lists shared by the work/edition/copy forms.
+     * Option lists shared by the work/edition/copy forms: locations of the
+     * user's households and the names of authors and publishers they can
+     * already see (never the whole shared vocabulary).
      *
      * @return array<string, mixed>
      */
     protected function formOptions(): array
     {
+        $visibility = $this->visibility();
+
         return [
             'category_tree' => $this->services->categories()->tree(),
-            'location_tree' => $this->services->locations()->tree(),
-            'publisher_names' => $this->services->publishers()->names(),
-            'author_names' => $this->services->authors()->names(),
+            'location_tree' => $this->services->locations()->visibleTree($visibility),
+            'publisher_names' => $this->services->publishers()->names($visibility),
+            'author_names' => $this->services->authors()->names($visibility),
         ];
+    }
+
+    /**
+     * The edition that already holds a submitted ISBN, for the "already
+     * used" error: named (and linked) only when the user may see it.
+     */
+    protected function linkable(int $editionId): ?int
+    {
+        return $this->services->editions()->isVisible($editionId, $this->visibility()) ? $editionId : null;
+    }
+
+    /**
+     * Whether the user may change the edition (and its covers): the editing
+     * rule for shared records (Authorizer::canEditSharedRecord()). This is
+     * what the pages use to offer the action and what the edit forms
+     * answer 403 from; BookService decides again inside the transaction.
+     */
+    protected function mayEditEdition(User $user, int $editionId, ?int $createdBy): bool
+    {
+        $authorizer = $this->services->authorizer();
+        // Asked only when it can matter: for someone who could edit their own record.
+        if (!$authorizer->canEditRecord($user, $createdBy)) {
+            return false;
+        }
+
+        return $authorizer->canEditSharedRecord($user, $createdBy, $this->services->editions()->heldOutsideView($editionId, $this->visibility()));
+    }
+
+    /**
+     * Whether the user may change the work (see mayEditEdition()).
+     */
+    protected function mayEditWork(User $user, int $workId, ?int $createdBy): bool
+    {
+        $authorizer = $this->services->authorizer();
+        if (!$authorizer->canEditRecord($user, $createdBy)) {
+            return false;
+        }
+
+        return $authorizer->canEditSharedRecord($user, $createdBy, $this->services->works()->sharedBeyondView($workId, $this->visibility()));
+    }
+
+    /**
+     * Whether to tell the user that a record they catalogued is now part
+     * of the shared catalogue and is changed by an administrator. It says
+     * only that; never who else holds the book, where, or how many copies.
+     */
+    protected function sharedRecordNotice(User $user, ?int $createdBy, bool $mayEdit): bool
+    {
+        return !$mayEdit && $this->services->authorizer()->canEditRecord($user, $createdBy);
     }
 
     /**
@@ -47,12 +101,5 @@ abstract class CatalogueBaseController extends Controller
         $value = (string) $request->input('row_version', '');
 
         return preg_match('/^[1-9]\d{0,9}$/', $value) ? (int) $value : 0;
-    }
-
-    protected function validateLocation(?int $locationId, Validator $validator, string $field = 'location_id'): void
-    {
-        if ($locationId !== null && !$this->services->locations()->exists($locationId)) {
-            $validator->addError($field, 'validation.in');
-        }
     }
 }

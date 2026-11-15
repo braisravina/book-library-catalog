@@ -2,6 +2,8 @@
 /**
  * @var \DigitalLibrary\View\View $view  @var array<string, string> $input  @var array<string, list<string>> $errors
  * @var array<string, string> $roles  value => translated label  @var string $min_expiry  @var string $max_expiry
+ * @var array<string, string> $households  id => name; empty while the household feature is disabled
+ * @var list<string> $selected_households
  */
 ?>
 <section class="form-card">
@@ -18,6 +20,9 @@
             <p class="hint" id="expires_on-hint"><?= $view->t('invitations.admin.expiry_hint', ['max' => $max_expiry]) ?></p>
             <?= $view->partial('partials/field_errors', ['messages' => $errors['expires_on'] ?? [], 'id' => 'expires_on-errors']) ?>
         </div>
+        <?php if (($households ?? []) !== []): ?>
+            <?= $view->partial('partials/household_checkboxes', ['households' => $households, 'selected' => $selected_households ?? [], 'errors' => $errors, 'hint' => 'households.assign.invitation_hint']) ?>
+        <?php endif; ?>
         <div class="form-actions">
             <button type="submit" class="button button-primary"><?= $view->t('invitations.admin.create') ?></button>
             <a class="button" href="/admin/invitations"><?= $view->t('actions.cancel') ?></a>

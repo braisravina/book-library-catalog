@@ -366,6 +366,150 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   - Wishlist changes aren't audited by design (private, not catalogue
     data).
 
+### Households (phases H1 to H4, development-only)
+
+Household-based access control is being built in phases. Reads are
+isolated since phase H2 and writes since phase H3. **It has not been
+released**: it stays development-only until the owner decides otherwise
+(a separate activation release is required), and production refuses to start with it enabled.
+While the feature is disabled, every signed-in user with `catalogue.view`
+sees the whole catalogue and every rule is the one from before households.
+
+- **Fail closed.** `HOUSEHOLDS_ENABLED` defaults to `false`. In production
+  the application ignores it and `config:check` reports it as an error, and the production image carries a root-owned production marker. The production
+  Compose services pin APP_ENV and clear APP_ENV_FILE. These protect against
+  env-file mistakes; changing the deployment artifact remains an owner action.
+  While disabled, every `/admin/households` route answers 404 (also for
+  administrators), the navigation entry is absent, and a `household_id`
+  submitted with a copy is ignored.
+- **Administration is administrator-only**: `household.manage` on the
+  routes, re-checked in `HouseholdService`; CSRF on every POST; optimistic
+  locking on rename; all changes audited. Members are recorded in the
+  audit log by user id only (no names or e-mail addresses).
+- **Membership** is read from the database on every request
+  (`Security\HouseholdScope`), never cached in the session: adding or
+  removing a member applies to that member's next request. Administrators
+  reach every household. Deactivated accounts reach none and cannot be
+  added to a household. New accounts belong to no household unless an
+  administrator assigns one explicitly (on creation or on the invitation).
+- **Copy assignment** goes through `Households\CopyHousehold` only. A
+  non-administrator can place a copy only in a household they belong to;
+  a household they may not use and one that does not exist produce the
+  same response, so the form does not reveal household ids. Membership
+  does not allow editing another member's copy (owner-only, unchanged).
+- **Migration.** Existing copies and locations move to a temporary default
+  household; only accounts that are active and have signed in become
+  members. No row is deleted and no other column changes. The new columns
+  are nullable, so the previous application version runs on the migrated
+  schema; rows it writes have no household and are reachable by
+  administrators only once enforcement lands.
+- **Read isolation (H2).** With the feature enabled, a user reads only
+  the inventory of their own households (copies, locations, loans), the
+  bibliographic records those households hold, and the ones they
+  catalogued themselves. `Security\Visibility` is the single definition
+  for data-facing inventory reads. Internal lock/authorization helpers,
+  explicit administrator diagnostics and bibliography-only ISBN lookup are
+  deliberate exceptions; their call-site authorization remains necessary. Administrators are unrestricted.
+  - A record outside the user's view answers **404, identical to a record
+    that does not exist**, for GET and POST, before any permission check,
+    validation or write. 403 is only given for records the user can see.
+    This covers detail pages, edit and lending forms, covers and every
+    state-changing route that loads a record.
+  - Lists, search results, totals, page counts, dashboard figures, copy
+    counts, filters and option lists are computed over visible records
+    only. Users of other households are never listed or named (owner
+    filter, borrower choice, collection owners).
+  - Another household's holdings are never revealed: not its copies, copy
+    counts, owners, locations, notes, prices, inventory codes, loans or
+    borrowers. A user who catalogued a record keeps seeing its
+    description after another household adds a copy, without that copy.
+  - **Residual, accepted:** ISBN-13 is unique across the shared catalogue,
+    so entering an ISBN that only another household holds reveals that
+    the book is catalogued, with its bibliographic description and
+    nothing else. (Shared collections were visible to every user in H2;
+    since H3 they are visible to the household they are shared with.)
+  - **Revocation** applies to the next request in the existing session:
+    memberships are read from the database per request and never stored
+    in the session; covers are served `private, no-cache` and the
+    visibility check precedes the ETag comparison; exports are not cached.
+  - Tests: `HouseholdReadIsolationTest` (a leak canary over every GET route
+    that returns record data, identical-404 comparison, counts, revocation,
+    feature-off behaviour) on MariaDB and MySQL; `VisibilityTest`;
+    `HouseholdAccessMatrixTest`.
+- **Write authorization (H3).** Every write that depends on household
+  access runs in a guarded transaction (`Households\WriteGuard`): shared
+  locks on the household rows, then the acting account and its memberships
+  read again from the database, then the service's authorization repeated
+  against the rows it locks. The controller's check is never the only one.
+  - **Revocation and races.** `HouseholdService` removes a membership
+    under the exclusive lock of the household row, so a removal waits for
+    the writes in flight and every later write sees it: after an
+    administrator is told a member was removed, no write authorized by
+    that membership can still be committed. The same holds for a
+    deactivated account. A first copy added by another household and an
+    edit of the record lock the edition (and work) row against each other.
+  - **404 before 403, for writes too.** A copy, loan, edition, collection
+    or wishlist entry outside the actor's households is refused exactly
+    like one that does not exist, also when it left their view between
+    the form and the submit. Identifiers of another household's records
+    (copy, loan, edition, cover, location, collection, household) open
+    nothing and change nothing (`HouseholdWriteAuthorizationTest::
+    testUnauthorizedRequestsModifyNothing` compares every table).
+  - **Shared bibliographic records.** Administrators change any work or
+    edition. A member changes one they created only while no household
+    they do not belong to holds it; covers follow their edition; authors
+    and publishers stay with administrators; seeing never implies
+    editing.
+  - **Inventory.** A copy is placed only in a household the actor may use,
+    owned by someone who reaches it, in a location of that household.
+    Inventory codes are unique per household (a database index over
+    `COALESCE(household_id, 0)`, so copies without a household cannot
+    repeat a code either); the "already in use" error only ever concerns
+    the copy's own household. A copy on loan cannot change household.
+  - **Add a copy by ISBN.** The edition is resolved from the ISBN on the
+    server inside the transaction; an edition id from the request never
+    reaches an edition the user cannot see. Only the shared description
+    is shown.
+  - **Loans.** A borrower account must be an active member of the copy's
+    household at that moment, for administrators as well; a lender who no
+    longer reaches the household can neither lend nor return. Loan
+    history is never rewritten.
+  - **Collections.** Sharing is with one explicitly chosen household; a
+    collection never becomes shared or changes household on its own;
+    lists, totals, the edition page and direct URLs follow the household;
+    items out of the actor's view cannot be added, moved, removed or
+    detected.
+  - **Wishlists.** A link to a catalogue edition is stored only for an
+    edition the user can see when saving, and dropped on the next save
+    once it is out of view.
+  - **Locations** are administrator-only, one tree per household; a
+    location never moves to another household's tree.
+  - **Accounts and invitations.** No membership by default. Assignments on
+    an invitation are an intention only: memberships are created in the
+    redeeming transaction, for households that still exist, so a revoked,
+    expired, replaced or used link grants nothing. Membership changes are
+    audited by account id, never by name or address.
+  - **Lock failures.** A deadlock victim is run again; a lock wait timeout
+    rolls back and is answered with a "try again" page. No partial write.
+  - **Residual, accepted:**
+    - a member who catalogued a record learns that some other household
+      now holds it, because they can no longer edit it (the policy itself:
+      "once another household holds the record, an administrator edits
+      it"). The refusal is the generic 403 and the page shows a neutral
+      note; nothing identifies the household, owner, count or location;
+    - ISBN-13 stays unique across the shared catalogue, so an ISBN that
+      only another household holds is still reported as catalogued, with
+      its bibliographic description only (as in H2);
+    - authors, publishers and categories are one shared vocabulary.
+  - Tests, on MariaDB 11.4 and MySQL 8.4: `HouseholdWriteAuthorizationTest`,
+    `HouseholdWriteConcurrencyTest` (second connection and second process:
+    removal in flight, real deadlock, parallel inventory codes, loan
+    against removal), `HouseholdPhaseThreeMigrationTest`,
+    `HouseholdFeatureDisabledTest`, `HouseholdAccessMatrixTest`.
+- **H4 implemented in development:** reviewed bounded inventory transfers.
+  Nullable household columns and the default household remain intentionally;
+  production activation still requires a separate release.
+
 ### Request integrity
 
 - **CSRF:** a per-session synchroniser token (`hash_equals`) is required on
@@ -489,8 +633,35 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
 - Every dynamic response is sent with `Cache-Control: no-store` and
   `X-Robots-Tag: noindex`.
 
+
+Invitation replacement and redemption take shared household locks before
+invitation/account locks, avoiding an inverse order with household deletion.
+With the feature disabled, pending assignments are ignored during redemption
+and are not carried into replacement invitations.
+
+Location tree mutations take exclusive household locks in id order before
+account and location locks, including with the feature disabled. This
+serialises root-name checks and disjoint subtree moves: the nullable
+parent unique index alone cannot prevent duplicate roots or concurrent cycles.
+Ordinary guarded writes retain shared household locks when enabled.
+
+Application rollback retains the H3 schema; it does not restore global
+inventory-code uniqueness. If H3 has allowed the same code in different
+households, the previous application's global pre-check can refuse edits
+of those copies, including an unchanged code. Review and resolve such
+collisions explicitly before reverting to global uniqueness; never drop
+copies or silently rewrite codes. Disabling the feature also restores the
+global application pre-check, with the same collision limitation. There is
+no automatic down migration; an older backup loses subsequent writes.
+
+
+
 ## Known limitations and follow-ups
 
+- Households (phases H1 to H4): development-only. Reads and writes are
+  isolated per household; see "Households" above for the accepted
+  residuals. Not released: do not enable in production (the application
+  refuses) until the owner decides, after phase H4.
 - Phase 4B:
   - Without trusted-proxy configuration, the per-IP invitation limit applies
     to the proxy's address, as the login limit does.
@@ -509,9 +680,9 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   production nginx refuses to start until an approved policy exists
   (docs/DEPLOYMENT.md, section 0;
   [ARCHITECTURE.md › Client IP behind a reverse proxy](ARCHITECTURE.md#client-ip-behind-a-reverse-proxy)).
-- The production images have never been built or run (CI has not executed).
-  **Blocker** until the `production-stack` CI job and a production-host
-  deployment have verified them.
+- The owner reports H1–H4 GitHub Actions CI passed. This remediation does not
+  independently inspect remote CI or production. Its local verification is
+  recorded in docs/H1_H4_REMEDIATION.md; a new owner-run CI pass is required.
 - PHP-FPM listens on port 9000 on all of the php container's networks,
   including `egress` (needed for ISBN lookups). Only containers of this
   Compose project share those networks, but FastCGI has no authentication:
@@ -548,8 +719,9 @@ cover import, and only through `Metadata\Http\CurlHttpClient`:
   size error. Files between `UPLOAD_MAX_BYTES` (5 MB) and that limit get a
   proper size error.
 - Concurrent edits of works, editions and copies are detected since Phase 3
-  (`row_version`). Categories, locations, authors and publishers still use
-  last-write-wins; their edits are admin-only and audited.
+  (`row_version`). Categories, authors and publishers still use
+  last-write-wins; their edits are admin-only and audited. Locations carry
+  optimistic row versions since H4.
 - Search uses LIKE with leading wildcards, which scans the editions table.
   That's fine at personal-library scale; revisit beyond tens of thousands
   of editions.
@@ -676,3 +848,75 @@ done on the production host yet.
 - [ ] Audit-log integrity decision implemented (see review above)
 - [ ] PHP-FPM worker count and MariaDB memory settings measured and tuned
       (DEPLOYMENT.md, "Resource planning")
+
+
+## Household inventory management (H4, development-only)
+
+Cross-household movement is administrator-only, including the existing copy-edit
+endpoint, which now refuses household and owner changes while enabled. Members
+retain same-household own-copy editing. H4 GET/POST routes require household.manage
+and feature enablement, with fresh service-level administrator authorization.
+Plans, ids and digests confer no privileges. All POSTs retain CSRF. Selection
+ids/versions are exact and bounded; stale or invalid inputs reject the whole
+transaction. Destination owners/accounts are locked and revalidated.
+
+Transfers retain copy IDs and every loan relationship, reject active loans and
+never grant membership or change ownership implicitly. Separate ownership
+reassignment rejects any loan history to prevent newly exposing borrowers under
+the existing owner-based authorization model. Household transfers keep the same
+owner and preserve existing borrower/owner/admin history permissions.
+
+Application, immutable completion and audit writes commit together; retries are
+idempotent. Location subtrees are never split automatically. Default and NULL
+assignments stay distinct. New tables retain evidence rather than cascading it
+away when a household/location/copy changes or disappears.
+
+Production checks in ConfigValidator and Services remain intact. inventory:check
+is a read-only local rehearsal command with explicit environment, maintenance,
+operator acknowledgements and exclusive operations-lock checks; it has no apply
+or production mode. See docs/HOUSEHOLD_INVENTORY.md. Turning off enforcement is
+not a privacy-safe rollback: disabled mode reveals the catalogue installation-wide.
+
+
+## H1–H4 audit remediation (2026-11-15)
+
+Administrative domain writes now reload an active administrator inside a
+READ COMMITTED transaction and keep account locks until commit. Household locks
+precede sorted account locks. Account administration takes all existing account
+rows exclusively in id order before checking the active-administrator set;
+other administrative operations take shared actor/required-account locks.
+This broad account lock is deliberate for a small installation. The route check
+and a previously captured User never authorize the write on their own.
+An authorized write can commit before a blocked revocation; after revocation
+commits, a new guarded mutation is denied. Last-admin and self-change safeguards,
+CSRF and session auth_version behavior remain. Borrower and chosen-owner accounts
+are also locked before catalogue rows; invitation redemption locks its issuer
+account before the invitation to keep FK/audit references in the same order.
+
+Domain audit events now share the mutation's PDO and transaction: households,
+accounts (including password changes and CLI creation), invitations/redemption,
+works/editions/covers/copies, loans, collections, locations and administrative
+vocabulary changes. Audit insert failure rolls back the domain change. Deadlock
+retries roll back failed attempts and their audit events; they run DB-only work.
+H4 transfer audit/idempotency remains unchanged. This is atomic accountability,
+not tamper-proof logging or general request idempotency. Runtime audit UPDATE and
+DELETE grants still need the owner's separate integrity decision above.
+
+Session/cookie and filesystem effects cannot participate in an InnoDB transaction.
+Login/logout, backup/restore/cleanup and cover-file cleanup therefore retain the
+explicit limits assessed in docs/H1_H4_REMEDIATION.md. Export audit records a
+request, not proof of delivery: its attempt is durable before streaming, and
+catalogue streams revalidate and hold the account lock through the final batch.
+
+Production images now contain config/production-image (created only in the prod
+Docker build, root-owned and read-only). Its presence forces production behavior
+regardless of APP_ENV or APP_ENV_FILE, including both existing household guards.
+Production Compose also pins APP_ENV=production and clears APP_ENV_FILE. Local
+household tests require an explicit testing/development environment outside the
+production image. These repository changes require an owner-built new artifact;
+no running production configuration or functionality was changed.
+
+Migration checksums are checked by migrate itself. Durable migration-attempt
+metadata blocks replay after incomplete DDL or a failed history insert. DDL files
+remain non-atomic on both engines; see docs/OPERATIONS.md for manual recovery.
+The original findings remain in docs/FINAL_H1_H4_AUDIT.md, with their dispositions.

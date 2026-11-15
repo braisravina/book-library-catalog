@@ -79,6 +79,19 @@ These rules apply to every commit, in every phase, with no exceptions.
     `a1011219b94da04f18d75bc4093294107bc6739e` (tree
     `356e95b264f7e9025efef8a6d6671cb24e720ffe`). It supersedes the first
     delivery on `openlibrary-metadata` (based on `3f66a9e`).
+  - Households phase H1: branch `household-access-media` from `main` at the
+    merge of the Open Library metadata integration, commit
+    `aee3f3deb08c4791f9fde9cde9cc4f35363fd779` (tree
+    `c7739f1923b5c4d3d440a2f24e412efb809698f5`).
+  - Households phase H2: branch `household-access-h2` from the committed
+    phase H1, commit `9d613f3acca77e2bb605e18f887e551e3de7d82b` (tree
+    `534fb1d6d63fe180ec80c405f7ff416b0959c97a`). From this phase on, work
+    happens only in the main project directory on ordinary branches (no
+    extra worktrees or delivery directories); the owner commits.
+  - Households phase H3: on the same branch `household-access-h2`, from
+    the committed phase H2, commit
+    `5f1b8df12fb45eef245bb1cdc5e2de2ccb1d0b51` (tree
+    `bd1894d935e69e441010508104e909f181735aea`).
 - Never overwrite or invalidate an earlier phase's delivery artifacts.
 - **Never push to any remote without the owner's explicit approval.** Don't
   deploy to production or create production secrets. Don't start a new
@@ -131,11 +144,14 @@ These rules apply to every commit, in every phase, with no exceptions.
 - **Text:** every user-facing string is a translation key present in
   `lang/en.php`, `lang/es.php` **and** `lang/gl.php` (a test enforces parity).
 - **Forms:** include `<?= $view->csrfField() ?>` in every POST form.
-- **Audit:** record security-relevant and catalogue-changing actions with
-  `AuditLogger::log()`. Never pass secrets in details.
+- **Audit:** record security-relevant and catalogue-changing domain actions
+  inside the mutation transaction on the same PDO (`AuditLogger::log()` or
+  `WriteGuard::audit()`), never from a controller after service commit. Never
+  pass secrets in details. Keep retry callbacks database-only.
 - Keep ISBNs normalised through `Catalogue\Isbn` (ISBN-13 is the duplicate key).
 - **Catalogue layering:**
-  - Controllers handle HTTP, permissions and audit.
+  - Controllers handle HTTP and preliminary permissions; domain audit belongs
+    inside the service transaction.
   - `Catalogue\Input\*` parse and validate request data.
   - `Catalogue\BookService` runs multi-table writes in one transaction.
   - `Catalogue\Repository\*` hold all SQL.
@@ -180,8 +196,91 @@ These rules apply to every commit, in every phase, with no exceptions.
     server, no credentials, only allowlisted bibliographic fields the user
     selects, never private data.
   - Only the owner may set `METADATA_CONTACT`.
+- **Households** (phases H1 to H4 are development-only; ARCHITECTURE.md,
+  "Households"). Shared bibliographic records (works, editions, authors,
+  publishers, covers) have no household; inventory (`copies`, `locations`)
+  belongs to one. Never add per-household roles, never cache memberships
+  in the session (`Security\HouseholdScope` is rebuilt per request), and
+  never read a copy's household from the request: it comes only from
+  `Households\CopyHousehold`. Household changes go through
+  `Households\HouseholdService` and are audited (members by id only).
+  Membership never grants editing of another member's copy. Collections
+  stay curated lists, not permission boundaries. `HOUSEHOLDS_ENABLED` must
+  stay off in production until the owner releases the feature
+  (`ConfigValidator` enforces it; completing a phase never authorizes a
+  release); do not start DVD/CD or other media work without the owner's approval.
+  Every new route must be classified in `config/household_access.php`
+  (`HouseholdAccessMatrixTest`). Keep `household_id` nullable until H4 has
+  evaluated rollback compatibility. Inventory codes are unique per
+  household through `copies.inventory_scope_id` (generated,
+  `COALESCE(household_id, 0)`) and `uq_copies_scope_inventory_code`: never
+  write that column, never add a global unique index back, and never
+  report a code of another household.
+- **Household write authorization (H3).** Every write that depends on
+  household access runs in `Households\WriteGuard::run()` (it opens the
+  transaction itself, at READ COMMITTED, locks every household row shared
+  and re-reads the actor and their memberships from the database); the
+  service then repeats its authorization against the rows it locks. Never
+  authorize a write only in a controller, never pass a `User` or scope
+  from the request into the decision, and never start a guarded write
+  inside an open transaction. Keep the lock order documented in
+  `WriteGuard` (households, users, collections, editions, works, copies,
+  loans, locations); metadata edits lock the edition or work exclusively,
+  inventory writes lock them shared. The work passed to `run()` must be
+  database-only (a deadlock victim is run again). A record outside the
+  actor's households is `WriteDeniedException::notFound()` (404, like a
+  missing one); never 403 for something they cannot see. Rules:
+  - Works and editions: administrators, or the creator while the record
+    is exclusive to their households (`Authorizer::canEditSharedRecord()`,
+    `heldOutsideView()` / `sharedBeyondView()`); covers follow the
+    edition; authors and publishers stay administrator-only.
+  - Ordinary copies through `Catalogue\CopyService`, reviewed H4 transfers through
+    `Households\InventoryTransferService` (never
+    `CopyRepository::create/update/delete` from a controller); a copy on
+    loan never changes household; bulk transfers use the H4 workflow.
+  - A copy of a book another household holds is added by ISBN
+    (`CopyService::createByIsbn()`): never accept an edition id for an
+    edition the user cannot see, and show only
+    `EditionRepository::bibliographic()`.
+  - Borrowers with an account must be active members of the copy's
+    household, for administrators too.
+  - A shared collection has one explicit household
+    (`CollectionService`); never share one implicitly or with all of the
+    owner's households, and never make a private collection shared.
+  - Wishlist links only to editions visible when saving.
+  - Ordinary locations through `Households\LocationService`, H4 subtree transfers
+    through `Households\InventoryTransferService`: one tree per
+    household, a child takes its parent's household, no move across
+    households.
+  - Accounts and invitations get households only by an administrator's
+    explicit choice; memberships from an invitation are created in the
+    redeeming transaction.
+  - With the feature disabled none of this may be observable
+    (`HouseholdFeatureDisabledTest`).
+- **Household read isolation (H2).** `Security\Visibility` is the only
+  definition of what a viewer may read: copies and locations through the
+  household, editions and works when the viewer catalogued them or through
+  a visible copy/edition, authors/publishers/user names derived from
+  those. Every repository method that reads those records takes a
+  `Visibility` with no default; never add an optional one, never call
+  `Visibility::unrestricted()` outside `Services`, and never read record
+  data in a controller except through `$this->visibility()`. Load records
+  through it for GET **and** POST so an out-of-view record is 404 (never
+  403) before any check, form or write. Counts, totals, filters and
+  option lists use it too; cross-household counts are deletion guards
+  only and are never shown. Never show another household's copies,
+  counts, owners, locations, notes, loans, borrowers or user names; the
+  duplicate-ISBN notice shows the bibliographic description only. A new
+  GET route that returns record data must be read-enforced in the matrix
+  and added to the crawl in `HouseholdReadIsolationTest`. With the feature
+  disabled nothing may change (`Visibility` is then `1 = 1`).
 - Administrative account changes go through `Auth\UserAdministration`
-  (lock-out safeguards).
+  (lock-out safeguards). Administrative writes use `Auth\AdministratorGuard`:
+  households before sorted accounts, fresh active Admin inside READ COMMITTED,
+  locks held through domain/audit commit. Account administration locks all
+  existing accounts exclusively before the actor/target/admin-set checks; do
+  not add target-first or shared-to-exclusive account upgrades. See
+  docs/H1_H4_REMEDIATION.md for the complete transaction and recovery boundaries.
 - Loans change `copies.status` only through `Loans\LoanService` (copy lock,
   one active loan per copy via the `active_copy_id` unique index); never set
   `on_loan` from other code. Copies with loan history are withdrawn, not deleted.
@@ -258,6 +357,24 @@ These rules apply to every commit, in every phase, with no exceptions.
 - Cover files are only ever reached through `CoverImageProcessor::path()` /
   `delete()`, never by building paths from input.
 
+
+
+Location tree mutations take exclusive household locks in id order before
+account and location locks, including with the feature disabled. This
+serialises root-name checks and disjoint subtree moves: the nullable
+parent unique index alone cannot prevent duplicate roots or concurrent cycles.
+Ordinary guarded writes retain shared household locks when enabled.
+
+Application rollback retains the H3 schema; it does not restore global
+inventory-code uniqueness. If H3 has allowed the same code in different
+households, the previous application's global pre-check can refuse edits
+of those copies, including an unchanged code. Review and resolve such
+collisions explicitly before reverting to global uniqueness; never drop
+copies or silently rewrite codes. Disabling the feature also restores the
+global application pre-check, with the same collision limitation. There is
+no automatic down migration; an older backup loses subsequent writes.
+
+
 ## Commands
 
 ```bash
@@ -290,3 +407,26 @@ Before any infrastructure-related task, follow:
 
 This restriction applies to all tools, agents, delegated
 tasks, and future sessions.
+
+## Phase H4 inventory management
+
+Development branch household-access-h4, based on committed H3 a54a02b921dfb3a89412266a70e67a4d627edccb.
+Keep the main development-directory rule and Option B. H4 remains development-only.
+Cross-household/ownership changes go through InventoryTransferService; ordinary
+CopyService edits cannot bypass preview and confirmation. TransferRepository may
+perform narrow copy/location updates only inside that guarded service. Reuse
+CopyHousehold resolution and owner policy, preserve identifiers, nullable
+household columns, the default household and all released migrations. No media
+expansion or production-guard changes are authorized.
+
+H4 lock order: exclusive household rows, all required accounts sorted by id,
+transfer operation, all editions, all works, all copies, then locations. Loan
+checks follow copy locks; transfer does not rewrite loans. Audit uses the same
+transaction and PDO; no controller-after-commit audit for H4 application.
+Snapshot plans are immutable; completed confirmation must never repeat writes.
+Copy batches are 1–100 (config may lower the cap), subtrees at most 100 nodes
+and the same copy cap, never automatically chunked. Ownership reassignment with
+any loan history is refused to prevent historical borrower disclosure.
+
+Read docs/HOUSEHOLD_INVENTORY.md for operational details. inventory:check is only
+a read-only guarded local rehearsal tool, not a production or applying CLI.

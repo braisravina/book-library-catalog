@@ -57,7 +57,8 @@ final class InvitationTest extends IntegrationTestCase
         self::assertSame(0, $this->countRows("SELECT COUNT(*) FROM audit_log WHERE details LIKE '%" . $raw . "%'"));
         self::assertStringNotContainsString($raw, serialize($admin->get('_flash') ?? null));
         $audit = json_decode((string) $this->pdo()->query("SELECT details FROM audit_log WHERE action = 'invitation.created'")->fetchColumn(), true);
-        self::assertEqualsCanonicalizing(['email', 'role', 'expires_at'], array_keys($audit));
+        self::assertEqualsCanonicalizing(['email', 'role', 'expires_at', 'household_ids'], array_keys($audit));
+        self::assertSame([], $audit['household_ids'], 'No household is assigned unless the administrator chooses one');
 
         // The list page never shows the link again.
         $list = $this->request($admin, 'GET', '/admin/invitations')->body();

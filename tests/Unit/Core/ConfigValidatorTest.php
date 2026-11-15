@@ -86,6 +86,7 @@ final class ConfigValidatorTest extends TestCase
         yield 'unknown link format' => [['INVITATION_LINK_FORMAT' => 'path'], 'INVITATION_LINK_FORMAT', '"query" or "fragment"'];
         yield 'unknown metadata provider' => [['METADATA_PROVIDERS' => 'open_library,isbndb'], 'METADATA_PROVIDERS', 'unknown provider'];
         yield 'unknown APP_ENV' => [['APP_ENV' => 'prod'], 'APP_ENV', 'treated as production'];
+        yield 'households enabled' => [['HOUSEHOLDS_ENABLED' => 'true'], 'HOUSEHOLDS_ENABLED', 'must not be enabled in production'];
         yield 'relative storage path' => [['BACKUP_PATH' => 'storage/backups'], 'BACKUP_PATH', 'absolute'];
     }
 

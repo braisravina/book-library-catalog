@@ -27,6 +27,7 @@ final class ConfigValidator
     /** Positive integer settings: key => [min, max]. */
     private const INTEGERS = [
         'DB_PORT' => [1, 65535],
+        'HOUSEHOLD_TRANSFER_LIMIT' => [1, 100],
         'SESSION_IDLE_TIMEOUT' => [60, 86400],
         'SESSION_ABSOLUTE_TIMEOUT' => [300, 2592000],
         'LOGIN_MAX_ATTEMPTS' => [1, 1000],
@@ -88,6 +89,7 @@ final class ConfigValidator
         $this->database($config, $production);
         $this->integers($config, $production);
         $this->invitations($config, $production);
+        $this->households($config, $production);
         $this->metadata($config);
         $this->paths($config);
         if ($production && $config->bool('APP_DEBUG')) {
@@ -293,6 +295,25 @@ final class ConfigValidator
             if ($config->int('ARGON2_MEMORY_KIB', 65536) < 19456 || $config->int('ARGON2_TIME_COST', 3) < 2) {
                 $this->warning('ARGON2_MEMORY_KIB', 'Argon2id parameters are below the OWASP minimum (19456 KiB, time cost 2).');
             }
+        }
+    }
+
+    /**
+     * Household access control is development-only until the owner
+     * releases it: reads (phase H2) and writes (phase H3) are scoped, but
+     * the release also needs phase H4 and an explicit owner decision;
+     * completing H3 does not authorize one. Production therefore refuses to
+     * serve with the feature switched on (and Services::householdsEnabled()
+     * ignores the setting there as well).
+     */
+    private function households(Config $config, bool $production): void
+    {
+        $limit = $this->read($config, 'HOUSEHOLD_TRANSFER_LIMIT');
+        if ($limit !== null && (!preg_match('/^[0-9]+$/D', $limit) || (int) $limit < 1 || (int) $limit > 100)) {
+            $this->error('HOUSEHOLD_TRANSFER_LIMIT', 'must be a whole number between 1 and 100.');
+        }
+        if ($production && $config->bool('HOUSEHOLDS_ENABLED', false)) {
+            $this->error('HOUSEHOLDS_ENABLED', 'must not be enabled in production: household access control has not been released for production (reads and writes are isolated since phases H2 and H3, but the feature stays development-only until the owner releases it).');
         }
     }
 

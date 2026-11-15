@@ -10,6 +10,7 @@ use DigitalLibrary\Auth\UserAdministration;
 use DigitalLibrary\Auth\UserRepository;
 use DigitalLibrary\Catalogue\BookService;
 use DigitalLibrary\Catalogue\CatalogueSearch;
+use DigitalLibrary\Catalogue\CopyService;
 use DigitalLibrary\Catalogue\Repository\AuthorRepository;
 use DigitalLibrary\Catalogue\Repository\CategoryRepository;
 use DigitalLibrary\Catalogue\Repository\CopyRepository;
@@ -17,8 +18,14 @@ use DigitalLibrary\Catalogue\Repository\CoverRepository;
 use DigitalLibrary\Catalogue\Repository\EditionRepository;
 use DigitalLibrary\Catalogue\Repository\LocationRepository;
 use DigitalLibrary\Catalogue\Repository\PublisherRepository;
+use DigitalLibrary\Catalogue\Repository\StatsRepository;
 use DigitalLibrary\Catalogue\Repository\WorkRepository;
 use DigitalLibrary\Database\ConnectionFactory;
+use DigitalLibrary\Households\CopyHousehold;
+use DigitalLibrary\Households\HouseholdRepository;
+use DigitalLibrary\Households\HouseholdService;
+use DigitalLibrary\Households\LocationService;
+use DigitalLibrary\Households\WriteGuard;
 use DigitalLibrary\I18n\Translator;
 use DigitalLibrary\Audit\AuditLogRepository;
 use DigitalLibrary\Backup\BackupCreator;
@@ -47,10 +54,12 @@ use DigitalLibrary\Metadata\Provider\GoogleBooksProvider;
 use DigitalLibrary\Metadata\Provider\OpenLibraryProvider;
 use DigitalLibrary\Security\Authorizer;
 use DigitalLibrary\Security\Csrf;
+use DigitalLibrary\Security\HouseholdScope;
 use DigitalLibrary\Security\LoginThrottle;
 use DigitalLibrary\Security\PasswordHasher;
 use DigitalLibrary\Security\PasswordPolicy;
 use DigitalLibrary\Security\Session;
+use DigitalLibrary\Security\Visibility;
 use DigitalLibrary\Upload\CoverImageProcessor;
 use DigitalLibrary\View\View;
 use PDO;
@@ -209,6 +218,9 @@ final class Services
             $this->users(),
             $this->authorizer(),
             max(1, min(90, $this->config->int('INVITATION_MAX_DAYS', 30))),
+            $this->households(),
+            $this->householdsEnabled(),
+            $this->audit(),
         ));
     }
 
@@ -240,12 +252,18 @@ final class Services
             $this->session(),
             $this->csrf(),
             $this->audit(),
+            $this->pdo(),
         ));
+    }
+
+    public function administratorGuard(): \DigitalLibrary\Auth\AdministratorGuard
+    {
+        return $this->once(\DigitalLibrary\Auth\AdministratorGuard::class, fn () => new \DigitalLibrary\Auth\AdministratorGuard($this->pdo()));
     }
 
     public function userAdministration(): UserAdministration
     {
-        return $this->once(UserAdministration::class, fn (): UserAdministration => new UserAdministration($this->pdo(), $this->users()));
+        return $this->once(UserAdministration::class, fn (): UserAdministration => new UserAdministration($this->pdo(), $this->users(), $this->households(), $this->householdsEnabled(), $this->audit()));
     }
 
     public function httpClient(): HttpClient
@@ -327,10 +345,9 @@ final class Services
     public function coverImporter(): CoverImporter
     {
         return $this->once(CoverImporter::class, fn (): CoverImporter => new CoverImporter(
-            $this->pdo(),
             $this->httpClient(),
             $this->covers(),
-            $this->coverRecords(),
+            $this->books(),
             $this->config->int('UPLOAD_MAX_BYTES', 5 * 1024 * 1024),
         ));
     }
@@ -342,7 +359,7 @@ final class Services
 
     public function loanService(): LoanService
     {
-        return $this->once(LoanService::class, fn (): LoanService => new LoanService($this->pdo(), $this->loans(), $this->authorizer()));
+        return $this->once(LoanService::class, fn (): LoanService => new LoanService($this->writeGuard(), $this->loans(), $this->users(), $this->authorizer()));
     }
 
     public function wishlist(): WishlistRepository
@@ -352,7 +369,7 @@ final class Services
 
     public function wishlistService(): WishlistService
     {
-        return $this->once(WishlistService::class, fn (): WishlistService => new WishlistService($this->pdo(), $this->wishlist(), $this->authorizer()));
+        return $this->once(WishlistService::class, fn (): WishlistService => new WishlistService($this->writeGuard(), $this->wishlist(), $this->authorizer()));
     }
 
     public function auditLog(): AuditLogRepository
@@ -367,7 +384,109 @@ final class Services
 
     public function collectionService(): CollectionService
     {
-        return $this->once(CollectionService::class, fn (): CollectionService => new CollectionService($this->pdo(), $this->collections(), $this->authorizer()));
+        return $this->once(CollectionService::class, fn (): CollectionService => new CollectionService($this->writeGuard(), $this->collections(), $this->editions(), $this->households(), $this->authorizer()));
+    }
+
+    /**
+     * Whether the household feature (administration pages, explicit
+     * household choice for copies, and household-scoped reads) is switched
+     * on. It is development-only: reads are scoped since phase H2 and
+     * writes since phase H3, but the feature has not been released (that
+     * is the owner's decision, after phase H4), so it can never be on in
+     * production, whatever HOUSEHOLDS_ENABLED says (ConfigValidator also
+     * refuses it).
+     */
+    public function householdsEnabled(): bool
+    {
+        return !$this->config->isProduction() && $this->config->bool('HOUSEHOLDS_ENABLED', false);
+    }
+
+    public function households(): HouseholdRepository
+    {
+        return $this->once(HouseholdRepository::class, fn (): HouseholdRepository => new HouseholdRepository($this->pdo()));
+    }
+
+    public function householdService(): HouseholdService
+    {
+        return $this->once(HouseholdService::class, fn (): HouseholdService => new HouseholdService($this->pdo(), $this->households(), $this->authorizer(), $this->audit()));
+    }
+
+    public function inventoryTransfers(): \DigitalLibrary\Households\InventoryTransferService
+    {
+        $limit = $this->config->get('HOUSEHOLD_TRANSFER_LIMIT', '100');
+        if (!preg_match('/^[0-9]+$/D', $limit) || (int) $limit < 1 || (int) $limit > 100) {
+            throw new ConfigException('HOUSEHOLD_TRANSFER_LIMIT must be between 1 and 100.');
+        }
+        return $this->once(\DigitalLibrary\Households\InventoryTransferService::class, fn () => new \DigitalLibrary\Households\InventoryTransferService(
+            $this->writeGuard(), new \DigitalLibrary\Households\TransferRepository($this->pdo()), $this->households(),
+            $this->users(), $this->authorizer(), $this->editions(), $this->works(), $this->copies(), $this->locations(),
+            $this->copyHousehold(), $this->audit(), $this->config->int('HOUSEHOLD_TRANSFER_LIMIT', 100),
+        ));
+    }
+
+    public function locationService(): LocationService
+    {
+        return $this->once(LocationService::class, fn (): LocationService => new LocationService(
+            $this->writeGuard(),
+            $this->locations(),
+            $this->households(),
+            $this->authorizer(),
+        ));
+    }
+
+    public function copyHousehold(): CopyHousehold
+    {
+        return $this->once(CopyHousehold::class, fn (): CopyHousehold => new CopyHousehold($this->households(), $this->authorizer(), $this->householdsEnabled()));
+    }
+
+    /**
+     * Transaction-level write authorization (phase H3): every write that
+     * depends on household access re-reads the actor and their memberships
+     * under the locks described in Households\WriteGuard.
+     */
+    public function writeGuard(): WriteGuard
+    {
+        return $this->once(WriteGuard::class, fn (): WriteGuard => new WriteGuard(
+            $this->pdo(),
+            $this->households(),
+            $this->users(),
+            $this->householdsEnabled(),
+            fn (\DigitalLibrary\Auth\User $user, HouseholdScope $scope): Visibility => $this->householdsEnabled()
+                ? Visibility::forUser($user, $scope)
+                : Visibility::unrestricted(),
+            $this->audit(),
+        ));
+    }
+
+    /**
+     * The households the user may reach, read from the database now (it is
+     * deliberately not cached: membership changes apply immediately).
+     */
+    public function householdScope(?\DigitalLibrary\Auth\User $user): HouseholdScope
+    {
+        return HouseholdScope::forUser($user, fn (int $userId): array => $this->households()->idsForUser($userId));
+    }
+
+    /** @var array<int, Visibility> */
+    private array $visibilities = [];
+
+    /**
+     * What the user may see (phase H2). Unrestricted for everyone while
+     * the household feature is disabled, so nothing changes until it is
+     * switched on; otherwise built from the user's household scope, read
+     * from the database once per request (a Services instance lives for one
+     * request) and never from the session.
+     */
+    public function visibility(?\DigitalLibrary\Auth\User $user): Visibility
+    {
+        if ($user === null) {
+            return Visibility::nobody();
+        }
+        if (!$this->householdsEnabled()) {
+            return Visibility::unrestricted();
+        }
+
+        return $this->visibilities[$user->id] ??= Visibility::forUser($user, $this->householdScope($user));
     }
 
     public function authorizer(): Authorizer
@@ -413,6 +532,11 @@ final class Services
         return $this->once(CoverRepository::class, fn (): CoverRepository => new CoverRepository($this->pdo()));
     }
 
+    public function stats(): StatsRepository
+    {
+        return $this->once(StatsRepository::class, fn (): StatsRepository => new StatsRepository($this->pdo()));
+    }
+
     public function categories(): CategoryRepository
     {
         return $this->once(CategoryRepository::class, fn (): CategoryRepository => new CategoryRepository($this->pdo()));
@@ -427,11 +551,29 @@ final class Services
     {
         return $this->once(BookService::class, fn (): BookService => new BookService(
             $this->pdo(),
+            $this->writeGuard(),
             $this->works(),
             $this->editions(),
             $this->authors(),
             $this->publishers(),
+            $this->coverRecords(),
+            $this->copyService(),
+            $this->authorizer(),
+        ));
+    }
+
+    public function copyService(): CopyService
+    {
+        return $this->once(CopyService::class, fn (): CopyService => new CopyService(
+            $this->writeGuard(),
             $this->copies(),
+            $this->editions(),
+            $this->works(),
+            $this->locations(),
+            $this->loans(),
+            $this->users(),
+            $this->copyHousehold(),
+            $this->authorizer(),
         ));
     }
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Http\Controllers\Admin;
 
+use DigitalLibrary\Households\HouseholdRepository;
 use DigitalLibrary\Http\Controllers\Controller;
 use DigitalLibrary\Http\HttpException;
 use DigitalLibrary\Http\Request;
@@ -64,26 +65,31 @@ final class InvitationController extends Controller
             'role' => ['required', 'in:' . implode(',', array_map(static fn (Role $r): string => $r->value, InvitationService::INVITABLE_ROLES))],
             'expires_on' => ['required', 'date'],
         ]);
+        // Optional households for the invited account (only while households are in use).
+        $selected = $this->services->householdsEnabled() ? $request->inputList('household_ids') : [];
+        $householdIds = HouseholdRepository::idList($selected);
+        if ($householdIds === null) {
+            $validator->addError('household_ids', 'validation.in');
+        }
         if ($validator->fails()) {
-            return $this->form($input, $validator->errors(), 422);
+            return $this->form($input, $validator->errors(), 422, $selected);
         }
         // Fail on a bad INVITATION_LINK_FORMAT before a token is issued (it could not be shown).
         $this->services->invitationLink();
         try {
-            $issued = $this->services->invitationService()->issue($admin, $input['email'], Role::from($input['role']), $input['expires_on']);
+            $issued = $this->services->invitationService()->issue($admin, $input['email'], Role::from($input['role']), $input['expires_on'], $householdIds ?? []);
         } catch (InvitationException $e) {
             if ($e->getMessage() === 'invitations.error.forbidden') {
                 throw HttpException::forbidden();
             }
-            $field = $e->getMessage() === 'invitations.error.expiry' ? 'expires_on' : 'email';
+            $field = match ($e->getMessage()) {
+                'invitations.error.expiry' => 'expires_on',
+                'invitations.error.household' => 'household_ids',
+                default => 'email',
+            };
 
-            return $this->form($input, [$field => [$e->getMessage()]], 422);
+            return $this->form($input, [$field => [$e->getMessage()]], 422, $selected);
         }
-        $this->audit($request, 'invitation.created', 'invitation', $issued['id'], [
-            'email' => InvitationService::normaliseEmail($input['email']),
-            'role' => $input['role'],
-            'expires_at' => $issued['expires_at'],
-        ]);
 
         return $this->link($issued['id'], $issued['token'], InvitationService::normaliseEmail($input['email']), $input['role'], $issued['expires_at'], false);
     }
@@ -102,7 +108,6 @@ final class InvitationController extends Controller
 
             return Response::redirect('/admin/invitations?status=all');
         }
-        $this->audit($request, 'invitation.revoked', 'invitation', $id);
         $this->flash('success', 'invitations.admin.revoked');
 
         return Response::redirect('/admin/invitations');
@@ -126,12 +131,6 @@ final class InvitationController extends Controller
 
             return Response::redirect('/admin/invitations?status=all');
         }
-        $this->audit($request, 'invitation.replaced', 'invitation', $issued['id'], [
-            'replaces' => $id,
-            'email' => $issued['email'],
-            'role' => $issued['role']->value,
-            'expires_at' => $issued['expires_at'],
-        ]);
 
         return $this->link($issued['id'], $issued['token'], $issued['email'], $issued['role']->value, $issued['expires_at'], true);
     }
@@ -183,8 +182,9 @@ final class InvitationController extends Controller
     /**
      * @param array<string, string>       $input
      * @param array<string, list<string>> $errors
+     * @param list<string>                $selectedHouseholds submitted household ids
      */
-    private function form(array $input, array $errors, int $status = 200): Response
+    private function form(array $input, array $errors, int $status = 200, array $selectedHouseholds = []): Response
     {
         $roles = [];
         foreach (InvitationService::INVITABLE_ROLES as $role) {
@@ -198,6 +198,9 @@ final class InvitationController extends Controller
             'roles' => $roles,
             'min_expiry' => gmdate('Y-m-d'),
             'max_expiry' => $this->services->invitationService()->maxExpiryDate(gmdate('Y-m-d')),
+            // Offered only while households are in use; nothing is ticked by default.
+            'households' => $this->services->householdsEnabled() ? $this->services->households()->names() : [],
+            'selected_households' => $selectedHouseholds,
         ], $status);
     }
 }

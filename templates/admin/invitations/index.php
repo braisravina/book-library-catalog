@@ -34,7 +34,8 @@
                 <?php $id = (int) $row['id']; $open = in_array($row['status'], ['pending', 'expired'], true); ?>
                 <tr id="invitation-<?= $id ?>">
                     <td><?= $view->e($row['email']) ?></td>
-                    <td><?= $view->t('roles.' . $row['role']) ?></td>
+                    <td><?= $view->t('roles.' . $row['role']) ?>
+                        <?php if (!empty($households_enabled) && ($row['household_names'] ?? null) !== null): ?><br><span class="muted small"><?= $view->t('invitations.admin.households', ['names' => (string) $row['household_names']]) ?></span><?php endif; ?></td>
                     <td>
                         <span class="badge<?= $row['status'] === 'pending' ? ' badge-success' : ($row['status'] === 'expired' ? ' badge-warning' : '') ?>"><?= $view->t('invitations.status.' . $row['status']) ?></span>
                         <?php if ($row['status'] === 'accepted' && $row['accepted_user_name'] !== null): ?><br><span class="muted small"><?= $view->e($row['accepted_user_name']) ?></span><?php endif; ?>

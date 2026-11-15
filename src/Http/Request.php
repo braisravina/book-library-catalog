@@ -90,6 +90,19 @@ final class Request
      *
      * @return list<string>
      */
+    /** Raw form value for strict parsers that must reject arrays rather than treating them as absent. */
+    public function rawInput(string $key): mixed
+    {
+        return $this->body[$key] ?? null;
+    }
+
+    /** Raw list for workflows that must reject malformed entries rather than dropping them. */
+    public function strictInputList(string $key): array
+    {
+        $value = $this->body[$key] ?? [];
+        return is_array($value) && array_is_list($value) ? $value : [null];
+    }
+
     public function inputList(string $key): array
     {
         $value = $this->body[$key] ?? [];

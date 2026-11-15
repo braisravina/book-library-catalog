@@ -59,12 +59,13 @@ jobs:
           MARIADB_ROOT_PASSWORD: ci_root_password
           MARIADB_DATABASE: library_test
         ports:
-          - 3306:3306
+          # Dedicated runner port; inventory:check deliberately refuses 3306.
+          - 33306:3306
         options: --health-cmd="mariadb-admin ping -h 127.0.0.1 --silent" --health-interval=5s --health-timeout=5s --health-retries=30
     env:
       APP_ENV: testing
       DB_HOST: 127.0.0.1
-      DB_PORT: "3306"
+      DB_PORT: "33306"
       # The application database is never created in CI; the integration
       # suite refuses to run unless DB_TEST_DATABASE ends in "_test", differs
       # from DB_DATABASE and is reached through dedicated test accounts.
@@ -107,13 +108,13 @@ jobs:
 
       - name: Confirm the database engine
         run: |
-          version=$(mysql -h 127.0.0.1 -uroot -pci_root_password -N -e 'SELECT VERSION()')
+          version=$(mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password -N -e 'SELECT VERSION()')
           echo "server: $version"
           case "$version" in 11.4.*-MariaDB*) ;; *) echo "::error::expected MariaDB 11.4, got $version" >&2; exit 1 ;; esac
 
       - name: Create least-privilege test database accounts
         run: |
-          mysql -h 127.0.0.1 -uroot -pci_root_password <<'SQL'
+          mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password <<'SQL'
           CREATE USER 'library_test_app'@'%' IDENTIFIED BY 'ci_test_app_password';
           CREATE USER 'library_test_migrator'@'%' IDENTIFIED BY 'ci_test_migration_password';
           GRANT SELECT, INSERT, UPDATE, DELETE ON `library_test`.* TO 'library_test_app'@'%';
@@ -154,12 +155,13 @@ jobs:
           MYSQL_ROOT_PASSWORD: ci_root_password
           MYSQL_DATABASE: library_test
         ports:
-          - 3306:3306
+          # Dedicated runner port; inventory:check deliberately refuses 3306.
+          - 33306:3306
         options: --health-cmd="mysqladmin ping -h 127.0.0.1 --silent" --health-interval=5s --health-timeout=5s --health-retries=30
     env:
       APP_ENV: testing
       DB_HOST: 127.0.0.1
-      DB_PORT: "3306"
+      DB_PORT: "33306"
       DB_DATABASE: library
       DB_TEST_DATABASE: library_test
       DB_USERNAME: library_app
@@ -190,13 +192,13 @@ jobs:
 
       - name: Confirm the database engine
         run: |
-          version=$(mysql -h 127.0.0.1 -uroot -pci_root_password -N -e 'SELECT VERSION()')
+          version=$(mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password -N -e 'SELECT VERSION()')
           echo "server: $version"
           case "$version" in 8.4.*) ;; *) echo "::error::expected MySQL 8.4, got $version" >&2; exit 1 ;; esac
 
       - name: Create least-privilege test database accounts
         run: |
-          mysql -h 127.0.0.1 -uroot -pci_root_password <<'SQL'
+          mysql -h 127.0.0.1 -P "$DB_PORT" -uroot -pci_root_password <<'SQL'
           CREATE USER 'library_test_app'@'%' IDENTIFIED BY 'ci_test_app_password';
           CREATE USER 'library_test_migrator'@'%' IDENTIFIED BY 'ci_test_migration_password';
           GRANT SELECT, INSERT, UPDATE, DELETE ON `library_test`.* TO 'library_test_app'@'%';

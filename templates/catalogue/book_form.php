@@ -56,11 +56,14 @@
                 <legend class="visually-hidden"><?= $view->t('catalogue.copy.section') ?></legend>
                 <label class="checkbox"><input type="checkbox" name="add_copy" value="1"<?= $add_copy ? ' checked' : '' ?>> <?= $view->t('catalogue.add.i_own_a_copy') ?></label>
                 <div class="form-row">
+                    <?php if (($household_options ?? []) !== []): ?>
+                        <?= $view->partial('partials/select', ['name' => 'copy_household_id', 'label' => 'fields.household', 'value' => $copy?->householdId, 'options' => $household_options, 'errors' => $errors] + (count($household_options) > 1 ? ['blank' => 'households.choose'] : [])) ?>
+                    <?php endif; ?>
                     <div class="form-field">
                         <label for="copy_location_id"><?= $view->t('fields.location') ?></label>
-                        <select id="copy_location_id" name="copy_location_id">
+                        <select id="copy_location_id" name="copy_location_id"<?= ($household_options ?? []) !== [] ? ' data-household-locations="copy_household_id"' : '' ?>>
                             <option value=""><?= $view->t('catalogue.unspecified') ?></option>
-                            <?= $view->partial('partials/tree_options', ['tree' => $location_tree, 'selected' => $copy?->locationId]) ?>
+                            <?= $view->partial('partials/location_options', ['tree' => $location_tree, 'selected' => $copy?->locationId, 'households' => $household_options ?? []]) ?>
                         </select>
                         <?= $view->partial('partials/field_errors', ['messages' => $errors['copy_location_id'] ?? [], 'id' => 'copy_location_id-errors']) ?>
                     </div>

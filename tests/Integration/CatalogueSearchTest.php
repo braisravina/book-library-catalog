@@ -29,7 +29,7 @@ final class CatalogueSearchTest extends IntegrationTestCase
     {
         $search = new CatalogueSearch($this->pdo(), new CategoryRepository($this->pdo()), new LocationRepository($this->pdo()));
 
-        return array_column($search->search($criteria)['rows'], 'title');
+        return array_column($search->search($criteria, \DigitalLibrary\Security\Visibility::unrestricted())['rows'], 'title');
     }
 
     public function testTextSearchMatchesTitleAuthorAndIsbnAccentInsensitively(): void
@@ -102,21 +102,21 @@ final class CatalogueSearchTest extends IntegrationTestCase
         }
         $search = new CatalogueSearch($this->pdo(), new CategoryRepository($this->pdo()), new LocationRepository($this->pdo()));
 
-        $first = $search->search(new SearchCriteria());
+        $first = $search->search(new SearchCriteria(), \DigitalLibrary\Security\Visibility::unrestricted());
         self::assertSame(30, $first['total']);
         self::assertSame(2, $first['pages']);
         self::assertCount(SearchCriteria::PER_PAGE, $first['rows']);
         self::assertSame('Book 01', $first['rows'][0]['title']);
 
-        $second = $search->search(new SearchCriteria(page: 2));
+        $second = $search->search(new SearchCriteria(page: 2), \DigitalLibrary\Security\Visibility::unrestricted());
         self::assertCount(6, $second['rows']);
         self::assertSame('Book 30', $second['rows'][5]['title']);
 
-        $beyond = $search->search(new SearchCriteria(page: 99));
+        $beyond = $search->search(new SearchCriteria(page: 99), \DigitalLibrary\Security\Visibility::unrestricted());
         self::assertSame(2, $beyond['page'], 'Out-of-range pages clamp to the last page');
 
-        self::assertSame('Book 30', $search->search(new SearchCriteria(sort: 'year'))['rows'][0]['title']);
-        self::assertSame('Book 30', $search->search(new SearchCriteria(sort: 'recent'))['rows'][0]['title']);
+        self::assertSame('Book 30', $search->search(new SearchCriteria(sort: 'year'), \DigitalLibrary\Security\Visibility::unrestricted())['rows'][0]['title']);
+        self::assertSame('Book 30', $search->search(new SearchCriteria(sort: 'recent'), \DigitalLibrary\Security\Visibility::unrestricted())['rows'][0]['title']);
     }
 
     public function testSearchPageThroughHttp(): void

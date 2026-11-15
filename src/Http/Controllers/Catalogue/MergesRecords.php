@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Http\Controllers\Catalogue;
 
-use DigitalLibrary\Database\Transaction;
 use DigitalLibrary\Http\Request;
 use DigitalLibrary\Http\Response;
 
@@ -31,12 +30,14 @@ trait MergesRecords
             return Response::redirect("{$basePath}/{$sourceId}/edit");
         }
 
-        Transaction::run($this->services->pdo(), static fn () => $merge($sourceId, $targetId));
-        $this->audit($request, "{$entity}.merged", $entity, $targetId, [
-            'merged_id' => $sourceId,
-            'merged_name' => (string) $source['name'],
-            'into_name' => (string) $target['name'],
-        ]);
+        $this->administrativeWrite($request, function () use ($request, $merge, $sourceId, $targetId, $entity, $source, $target): void {
+            $merge($sourceId, $targetId);
+            $this->audit($request, "{$entity}.merged", $entity, $targetId, [
+                'merged_id' => $sourceId,
+                'merged_name' => (string) $source['name'],
+                'into_name' => (string) $target['name'],
+            ]);
+        });
         $this->flash('success', 'catalogue.merge.done');
 
         return Response::redirect("{$basePath}/{$targetId}");
@@ -53,8 +54,10 @@ trait MergesRecords
 
             return Response::redirect("{$basePath}/{$id}/edit");
         }
-        $delete($id);
-        $this->audit($request, "{$entity}.deleted", $entity, $id, ['name' => (string) $record['name']]);
+        $this->administrativeWrite($request, function () use ($request, $delete, $id, $entity, $record): void {
+            $delete($id);
+            $this->audit($request, "{$entity}.deleted", $entity, $id, ['name' => (string) $record['name']]);
+        });
         $this->flash('success', 'catalogue.merge.deleted');
 
         return Response::redirect($basePath);

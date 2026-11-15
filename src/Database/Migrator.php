@@ -61,6 +61,13 @@ final class Migrator
         try {
             $applied = $this->appliedVersions();
             $this->assertSameEngine($applied);
+            foreach ($applied as $version => $checksum) {
+                if (!isset($this->available()[$version]) || !hash_equals($this->checksums($version)[$this->engine()], $checksum)) {
+                    throw new \RuntimeException('Migration checksum/history mismatch: ' . $version . '. Stop; inspect history and restore verified release files.');
+                }
+            }
+            $this->ensureAttemptsTable();
+            $this->assertNoInterruptedAttempt();
             $ran = [];
             foreach ($this->available() as $version => $file) {
                 if (isset($applied[$version])) {
@@ -69,11 +76,18 @@ final class Migrator
                 $path = $this->fileFor($version);
                 $log && $log($path === $file ? "Migrating {$version}" : "Migrating {$version} (MariaDB variant)");
                 $sql = (string) file_get_contents($path);
+                // Durable intent BEFORE any implicitly committing DDL. A crash
+                // or history-insert failure must never cause a blind replay.
+                $intent = $this->pdo->prepare('INSERT INTO schema_migration_attempts (version, checksum, started_at) VALUES (?, ?, UTC_TIMESTAMP())');
+                $intent->execute([$version, hash('sha256', $sql)]);
                 foreach (SqlSplitter::split($sql) as $statement) {
                     $this->pdo->exec($statement);
                 }
-                $stmt = $this->pdo->prepare('INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (:v, :c, UTC_TIMESTAMP())');
-                $stmt->execute(['v' => $version, 'c' => hash('sha256', $sql)]);
+                Transaction::run($this->pdo, function () use ($version, $sql): void {
+                    $stmt = $this->pdo->prepare('INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (:v, :c, UTC_TIMESTAMP())');
+                    $stmt->execute(['v' => $version, 'c' => hash('sha256', $sql)]);
+                    $this->pdo->prepare('DELETE FROM schema_migration_attempts WHERE version = ?')->execute([$version]);
+                });
                 $ran[] = $version;
             }
 
@@ -90,6 +104,8 @@ final class Migrator
     public function status(): array
     {
         $this->ensureTable();
+        $this->ensureAttemptsTable();
+        $this->assertNoInterruptedAttempt();
         $applied = $this->appliedVersions();
         $rows = [];
         foreach (array_keys($this->available()) as $version) {
@@ -240,6 +256,24 @@ final class Migrator
                 applied_at DATETIME NOT NULL
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci'
         );
+    }
+
+    private function ensureAttemptsTable(): void
+    {
+        $this->pdo->exec('CREATE TABLE IF NOT EXISTS schema_migration_attempts (
+            version VARCHAR(191) NOT NULL PRIMARY KEY,
+            checksum CHAR(64) NOT NULL,
+            started_at DATETIME NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci');
+    }
+
+    private function assertNoInterruptedAttempt(): void
+    {
+        $versions = $this->pdo->query('SELECT version FROM schema_migration_attempts ORDER BY version')->fetchAll(PDO::FETCH_COLUMN);
+        if ($versions !== []) {
+            throw new \RuntimeException('Incomplete migration attempt: ' . implode(', ', $versions)
+                . '. Do not retry DDL. Keep writers stopped; follow docs/OPERATIONS.md migration recovery.');
+        }
     }
 
     private function lock(): void

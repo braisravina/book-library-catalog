@@ -17,23 +17,16 @@ final class HomeController extends Controller
             return $this->render('home/landing', ['page_title' => null]);
         }
 
-        $pdo = $this->services->pdo();
-        $stats = $pdo->query(
-            'SELECT
-                (SELECT COUNT(*) FROM works) AS works,
-                (SELECT COUNT(*) FROM editions) AS editions,
-                (SELECT COUNT(*) FROM copies) AS copies,
-                (SELECT COUNT(*) FROM authors) AS authors'
-        )->fetch();
-        $mine = $pdo->prepare('SELECT COUNT(*) FROM copies WHERE owner_user_id = :id');
-        $mine->execute(['id' => $user->id]);
+        // Every figure is taken over the records this user may see.
+        $visibility = $this->services->visibility($user);
+        $stats = $this->services->stats()->dashboard($visibility, $user->id);
 
         return $this->render('home/dashboard', [
             'page_title' => 'nav.dashboard',
-            'stats' => array_map('intval', $stats ?: []),
-            'my_copies' => (int) $mine->fetchColumn(),
-            'recent' => $this->services->editions()->recent(12),
-            'overdue' => $this->services->loans()->countOverdueForOwner($user->id),
+            'stats' => $stats,
+            'my_copies' => $stats['my_copies'],
+            'recent' => $this->services->editions()->recent(12, $visibility),
+            'overdue' => $this->services->loans()->countOverdueForOwner($user->id, $visibility),
         ]);
     }
 }

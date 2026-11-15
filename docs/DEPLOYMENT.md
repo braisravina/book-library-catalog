@@ -847,6 +847,17 @@ recommended once the ingress exists. ⚠ production
 
 ## 11. Updating the application
 
+> **Households (phases H1 to H3) are not to be deployed.** The household
+> code and its migrations (`2026_11_13_18000*` and `2026_11_14_10000*`)
+> are development-only: reads (H2) and writes (H3) are isolated per
+> household, but the feature has not been released and completing phase H3
+> does not authorize a release. Deploy household functionality only when
+> the owner decides to, as one reviewed release. `HOUSEHOLDS_ENABLED` must
+> stay `false` (`config:check --strict` fails otherwise); while it is
+> false the application behaves as it did before households. See
+> OPERATIONS.md, "Households", for what the migrations do and the checks
+> to run around them.
+
 1. Read the release notes and the diff of `docker-compose.prod.yml`,
    `.env.production.example` and the migrations.
 2. `dc run --rm ops php bin/console backup:create` and copy it off-host.
@@ -914,3 +925,51 @@ CI has been written and statically tested only. Steps:
    SECURITY.md's checklist.
 
 The logs contain only throwaway CI passwords; no repository secrets are used.
+
+
+## H4 release boundary and future owner-run migration
+
+H4 is development-only. ConfigValidator and Services still prevent production
+households; HOUSEHOLDS_ENABLED must remain false. Neither the implementation nor
+passing tests authorizes deployment or activation. The owner alone performs all
+production operations after a separately reviewed release.
+
+Preparation sequence: verified same-engine backup plus off-host copy; protected
+restore rehearsal under owner control; baseline row counts, primary-key sets and
+field digests; migration and real-data assignment rehearsal; measured free-space
+and runtime budget including copied indexes/temporary tables and backups; tested
+recovery with explicit data-loss/recovery-time expectations. Then, only under
+separate authorization, maintenance and stopped writers, a fresh verified backup,
+ordered migrations, reviewed assignments, membership/access checks and owner
+activation decision. H4 introduces two additive migrations and no automatic
+assignment, NOT NULL constraint or default retirement.
+
+Do not use feature disablement as a rollback after separation: it restores
+catalogue-wide reads and global application code validation. Prefer maintenance
+and a compatible household-aware application recovery. Retaining an additive
+schema permits older named-column SQL but does not preserve all behavior or new
+location version guarantees. Restoring a backup is not atomic and loses writes
+after its recovery point. Consult HOUSEHOLD_INVENTORY.md before any rollback.
+
+
+## H1–H4 remediation artifact requirements
+
+The production PHP image now bakes in root-owned, read-only
+`config/production-image`. Config treats that artifact as production even with
+APP_ENV=testing/development or a hostile APP_ENV_FILE. The production Compose php
+and ops services also pin APP_ENV=production and clear APP_ENV_FILE, overriding
+env_file values. Both household prohibitions remain; HOUSEHOLDS_ENABLED stays
+false. Local household testing uses the development checkout/image and explicit
+testing configuration, never an environment override in the production image.
+
+These protections require the owner to build/review the new production image
+and Compose artifact in a later authorized deployment. They do not retrofit an
+already running old image. Do not mount over config or edit the image marker to
+activate households. No actual production configuration was changed here.
+
+Before an owner-run upgrade, check migrate:status before pending DDL as well as
+after it, keep all writers stopped, retain a verified same-engine backup, and
+follow OPERATIONS.md's interrupted-migration procedure on any checksum/history or
+incomplete-attempt refusal. Review docs/H1_H4_REMEDIATION.md and the preserved audit
+for remaining release gates. Merge, deployment and household activation remain
+separate decisions; production activation is still prohibited.
