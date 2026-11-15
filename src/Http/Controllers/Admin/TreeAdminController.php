@@ -108,8 +108,10 @@ abstract class TreeAdminController extends Controller
         } elseif ($this->usage($id) > 0) {
             $this->flash('error', 'admin.' . $this->key() . '.delete_in_use');
         } else {
-            $this->repository()->delete($id);
-            $this->audit($request, $this->entity() . '.deleted', $this->entity(), $id, ['name' => $node['name']]);
+            $this->administrativeWrite($request, function () use ($request, $id, $node): void {
+                $this->repository()->delete($id);
+                $this->audit($request, $this->entity() . '.deleted', $this->entity(), $id, ['name' => $node['name']]);
+            });
             $this->flash('success', 'admin.tree.deleted');
         }
 
@@ -147,8 +149,10 @@ abstract class TreeAdminController extends Controller
             return $this->page($old, $validator->errors(), $node, 422);
         }
 
-        $savedId = $this->persist($id, $parentId, $old, $this->user($request)->id);
-        $this->audit($request, $this->entity() . ($id === null ? '.created' : '.updated'), $this->entity(), $savedId, ['name' => $old['name'], 'parent_id' => $parentId]);
+        $this->administrativeWrite($request, function () use ($request, $id, $parentId, $old): void {
+            $savedId = $this->persist($id, $parentId, $old, $this->user($request)->id);
+            $this->audit($request, $this->entity() . ($id === null ? '.created' : '.updated'), $this->entity(), $savedId, ['name' => $old['name'], 'parent_id' => $parentId]);
+        });
         $this->flash('success', $id === null ? 'admin.tree.created' : 'catalogue.saved');
 
         return Response::redirect($this->basePath());

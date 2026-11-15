@@ -18,6 +18,15 @@ final class AuditLogger
     {
     }
 
+    private ?string $ip = null;
+    private ?string $userAgent = null;
+
+    public function context(?string $ip, ?string $userAgent): void
+    {
+        $this->ip = $ip;
+        $this->userAgent = $userAgent;
+    }
+
     /**
      * @param array<string, mixed> $details
      */
@@ -30,6 +39,8 @@ final class AuditLogger
         ?string $ip = null,
         ?string $userAgent = null,
     ): void {
+        $ip ??= $this->ip;
+        $userAgent ??= $this->userAgent;
         $stmt = $this->pdo->prepare(
             'INSERT INTO audit_log (user_id, action, entity_type, entity_id, details, ip_address, user_agent, created_at)
              VALUES (:user_id, :action, :entity_type, :entity_id, :details, :ip, :ua, UTC_TIMESTAMP())'

@@ -13,6 +13,8 @@ use DigitalLibrary\Security\Authorizer;
 use DigitalLibrary\Security\Permission;
 use DigitalLibrary\Security\Role;
 use PDO;
+use DigitalLibrary\Auth\AdministratorGuard;
+use DigitalLibrary\Audit\AuditLogger;
 
 /**
  * Administrator-issued, single-use invitations.
@@ -48,6 +50,7 @@ final class InvitationService
         private readonly int $maxDays = 30,
         private readonly ?HouseholdRepository $households = null,
         private readonly bool $householdsEnabled = false,
+        private readonly ?AuditLogger $audit = null,
     ) {
     }
 
@@ -75,10 +78,10 @@ final class InvitationService
         }
         $token = InvitationToken::generate();
 
-        $id = $this->guard(fn (): int => Transaction::run($this->pdo, function () use ($admin, $email, $role, $expiresAt, $token, $householdIds): int {
+        $id = $this->guard(fn (): int => $this->run($admin, function () use ($admin, $email, $role, $expiresAt, $token, $householdIds): int {
             // Locked in id order: a household deleted at this moment refuses the invitation.
             foreach ($householdIds as $householdId) {
-                if ($this->households->lock($householdId) === null) {
+                if ($this->households->find($householdId) === null) {
                     throw new InvitationException('invitations.error.household');
                 }
             }
@@ -97,6 +100,7 @@ final class InvitationService
             $id = $this->invitations->create($email, self::roleId($role), InvitationToken::hash($token), $admin->id, $expiresAt);
             $this->invitations->addHouseholds($id, $householdIds);
 
+            $this->logger()->log('invitation.created', $admin->id, 'invitation', $id, ['email' => $email, 'role' => $role->value, 'expires_at' => $expiresAt, 'household_ids' => $householdIds]);
             return $id;
         }));
 
@@ -109,12 +113,13 @@ final class InvitationService
     public function revoke(User $admin, int $id): void
     {
         $this->requireAdmin($admin);
-        Transaction::run($this->pdo, function () use ($admin, $id): void {
+        $this->run($admin, function () use ($admin, $id): void {
             $row = $this->invitations->lock($id) ?? throw new InvitationException('invitations.error.not_found');
             if ($row['accepted_at'] !== null || $row['revoked_at'] !== null) {
                 throw new InvitationException('invitations.error.not_open');
             }
             $this->invitations->revoke($id, $admin->id);
+            $this->logger()->log('invitation.revoked', $admin->id, 'invitation', $id);
         });
     }
 
@@ -135,8 +140,7 @@ final class InvitationService
         $expiresAt = $this->expiry($expiresOn);
         $token = InvitationToken::generate();
 
-        return $this->guard(fn (): array => Transaction::run($this->pdo, function () use ($admin, $id, $expiresAt, $token): array {
-            $this->lockAssignmentHouseholds();
+        return $this->guard(fn (): array => $this->run($admin, function () use ($admin, $id, $expiresAt, $token): array {
             $row = $this->invitations->lock($id) ?? throw new InvitationException('invitations.error.not_found');
             if ($row['accepted_at'] !== null) {
                 throw new InvitationException('invitations.error.not_open');
@@ -156,6 +160,7 @@ final class InvitationService
             $householdIds = $this->existingHouseholds($this->invitations->householdIds($id));
             $this->invitations->addHouseholds($newId, $householdIds);
 
+            $this->logger()->log('invitation.replaced', $admin->id, 'invitation', $newId, ['replaces' => $id, 'email' => $email, 'role' => $role->value, 'expires_at' => $expiresAt, 'household_ids' => $householdIds]);
             return ['id' => $newId, 'token' => $token, 'expires_at' => $expiresAt, 'email' => $email, 'role' => $role, 'household_ids' => $householdIds];
         }));
     }
@@ -182,9 +187,20 @@ final class InvitationService
      */
     public function redeem(string $tokenHash, string $email, string $displayName, string $passwordHash, string $locale): array
     {
-        return $this->guard(fn (): array => Transaction::run($this->pdo, function () use ($tokenHash, $email, $displayName, $passwordHash, $locale): array {
+        // The issuer FK and membership audit also reference an existing account.
+        // Discover its immutable id before locking the invitation, then lock
+        // that account at the account level of the global order.
+        $preview = $this->invitations->findByHash($tokenHash);
+        $issuerId = ($preview['invited_by'] ?? null) === null ? null : (int) $preview['invited_by'];
+        return $this->guard(fn (): array => Transaction::run($this->pdo, function () use ($tokenHash, $email, $displayName, $passwordHash, $locale, $issuerId): array {
             $this->lockAssignmentHouseholds();
+            if ($issuerId !== null) {
+                $this->users->findByIdLocked($issuerId);
+            }
             $row = $this->invitations->lockByHash($tokenHash) ?? throw new InvitationException(self::GENERIC_ERROR, 'unknown');
+            if (($row['invited_by'] === null ? null : (int) $row['invited_by']) !== $issuerId) {
+                throw new InvitationException(self::GENERIC_ERROR, 'race');
+            }
             if ($row['accepted_at'] !== null) {
                 throw new InvitationException(self::GENERIC_ERROR, 'used');
             }
@@ -216,6 +232,11 @@ final class InvitationService
                 $this->households?->addMember($householdId, $userId, $invitedBy);
             }
 
+            $this->logger()->log('invitation.accepted', $userId, 'invitation', (int) $row['id'], ['user_id' => $userId]);
+            $this->logger()->log('user.created', $userId, 'user', $userId, ['via' => 'invitation', 'invitation_id' => (int) $row['id'], 'role' => $role->value]);
+            foreach ($householdIds as $householdId) {
+                $this->logger()->log('household.member_added', $invitedBy, 'household', $householdId, ['member_user_id' => $userId, 'via' => 'invitation', 'invitation_id' => (int) $row['id']]);
+            }
             return ['user_id' => $userId, 'invitation_id' => (int) $row['id'], 'role' => $role, 'household_ids' => $householdIds, 'invited_by' => $invitedBy];
         }));
     }
@@ -273,6 +294,16 @@ final class InvitationService
         }
 
         return $date . ' 23:59:59';
+    }
+
+    private function logger(): AuditLogger
+    {
+        return $this->audit ?? new AuditLogger($this->pdo);
+    }
+
+    private function run(User $admin, callable $work): mixed
+    {
+        return (new AdministratorGuard($this->pdo))->run($admin->id, $work, $this->householdsEnabled ? $this->households : null);
     }
 
     private function requireAdmin(User $admin): void

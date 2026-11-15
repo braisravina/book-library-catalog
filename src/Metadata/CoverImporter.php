@@ -36,7 +36,7 @@ final class CoverImporter
     /**
      * @return int|null the new cover id, or null if nothing could be imported
      */
-    public function import(int $editionId, BookMetadata $metadata, int $userId): ?int
+    public function import(int $editionId, BookMetadata $metadata, int $userId, ?int $recordId = null): ?int
     {
         if ($metadata->coverUrl === '') {
             return null;
@@ -63,7 +63,7 @@ final class CoverImporter
         }
 
         try {
-            return $this->books->addCover($userId, $editionId, $image);
+            return $this->books->addCover($userId, $editionId, $image, 'cover.imported', ['metadata_record_id' => $recordId]);
         } catch (WriteDeniedException | WriteBusyException) {
             $this->processor->delete($image->storageKey);
 

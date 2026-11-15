@@ -90,7 +90,9 @@ final class CollectionService
                 throw new CollectionException('validation.name_taken');
             }
 
-            return $this->collections->create($actor->user->id, $input, $householdId);
+            $id = $this->collections->create($actor->user->id, $input, $householdId);
+            $this->guard->audit('collection.created', $actor->user->id, 'collection', $id, ['visibility' => $input->visibility, 'household_id' => $householdId]);
+            return $id;
         }));
     }
 
@@ -108,6 +110,11 @@ final class CollectionService
                 throw new CollectionException('validation.name_taken');
             }
             $this->collections->update($id, $input, $householdId);
+            $details = ['owner_user_id' => (int) $collection['owner_user_id'], 'visibility' => $input->visibility];
+            if (self::householdOf($collection) !== $householdId) {
+                $details['household_changed'] = ['from' => self::householdOf($collection), 'to' => $householdId];
+            }
+            $this->guard->audit('collection.updated', $actor->user->id, 'collection', $id, $details);
 
             return ['household_from' => self::householdOf($collection), 'household_to' => $householdId];
         }));
@@ -121,8 +128,10 @@ final class CollectionService
     public function delete(User $user, int $id): void
     {
         $this->guard(fn () => $this->guard->run($user->id, function (WriteActor $actor) use ($id): void {
-            $this->managedLocked($actor, $id);
+            $collection = $this->managedLocked($actor, $id);
+            $count = $this->collections->countItems($id);
             $this->collections->delete($id);
+            $this->guard->audit('collection.deleted', $actor->user->id, 'collection', $id, ['owner_user_id' => (int) $collection['owner_user_id'], 'items' => $count]);
         }));
     }
 
@@ -145,6 +154,7 @@ final class CollectionService
                 throw new CollectionException('collections.error.full');
             }
             $this->collections->addItem($id, $editionId, $actor->user->id);
+            $this->guard->audit('collection.item_added', $actor->user->id, 'collection', $id, ['edition_id' => $editionId]);
             $this->collections->touch($id);
         }));
     }
@@ -160,6 +170,7 @@ final class CollectionService
             if (!$this->collections->hasVisibleItem($id, $editionId, $actor->visibility) || !$this->collections->removeItem($id, $editionId)) {
                 throw new CollectionException('collections.error.not_in');
             }
+            $this->guard->audit('collection.item_removed', $actor->user->id, 'collection', $id, ['edition_id' => $editionId]);
             $this->collections->touch($id);
         }));
     }

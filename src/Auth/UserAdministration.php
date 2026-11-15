@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace DigitalLibrary\Auth;
 
-use DigitalLibrary\Database\Transaction;
 use DigitalLibrary\Households\HouseholdRepository;
 use DigitalLibrary\Security\Role;
 use PDO;
+use DigitalLibrary\Audit\AuditLogger;
 
 /**
  * Administrative account changes with lock-out safeguards:
@@ -24,6 +24,7 @@ final class UserAdministration
         private readonly UserRepository $users,
         private readonly ?HouseholdRepository $households = null,
         private readonly bool $householdsEnabled = false,
+        private readonly ?AuditLogger $audit = null,
     ) {
     }
 
@@ -52,9 +53,9 @@ final class UserAdministration
             $householdIds = [];
         }
 
-        return Transaction::run($this->pdo, function () use ($actor, $email, $displayName, $role, $passwordHash, $locale, $householdIds): array {
+        return $this->run($actor, function () use ($actor, $email, $displayName, $role, $passwordHash, $locale, $householdIds): array {
             foreach ($householdIds as $householdId) {
-                if ($this->households->lock($householdId) === null) {
+                if ($this->households->find($householdId) === null) {
                     throw new UserAdminException('households.error.assign_unknown');
                 }
             }
@@ -66,6 +67,10 @@ final class UserAdministration
                 $this->households->addMember($householdId, $id, $actor->id);
             }
 
+            $this->logger()->log('user.created', $actor->id, 'user', $id, ['email' => $email, 'role' => $role->value]);
+            foreach ($householdIds as $householdId) {
+                $this->logger()->log('household.member_added', $actor->id, 'household', $householdId, ['member_user_id' => $id, 'via' => 'user_creation']);
+            }
             return ['id' => $id, 'household_ids' => $householdIds];
         });
     }
@@ -77,7 +82,7 @@ final class UserAdministration
      */
     public function update(User $actor, User $target, string $email, string $displayName, Role $role, string $locale, bool $isActive): array
     {
-        return Transaction::run($this->pdo, function () use ($actor, $target, $email, $displayName, $role, $locale, $isActive): array {
+        return $this->run($actor, function () use ($actor, $target, $email, $displayName, $role, $locale, $isActive): array {
             $current = $this->users->findById($target->id) ?? throw new UserAdminException('errors.404.message');
 
             if ($actor->id === $current->id && ($role !== $current->role || !$isActive)) {
@@ -110,6 +115,9 @@ final class UserAdministration
                 }
             }
 
+            if ($changes !== []) {
+                $this->logger()->log('user.updated', $actor->id, 'user', $target->id, ['changes' => $changes]);
+            }
             return $changes;
         });
     }
@@ -123,7 +131,10 @@ final class UserAdministration
             throw new UserAdminException('admin.users.use_account_page');
         }
         // updatePassword() also bumps auth_version: all sessions end.
-        $this->users->updatePassword($target->id, $passwordHash);
+        $this->run($actor, function () use ($actor, $target, $passwordHash): void {
+            $this->users->updatePassword($target->id, $passwordHash);
+            $this->logger()->log('user.password_reset', $actor->id, 'user', $target->id);
+        });
     }
 
     /**
@@ -134,6 +145,21 @@ final class UserAdministration
         if ($actor->id === $target->id) {
             throw new UserAdminException('admin.users.use_account_page');
         }
-        $this->users->bumpAuthVersion($target->id);
+        $this->run($actor, function () use ($actor, $target): void {
+            $this->users->bumpAuthVersion($target->id);
+            $this->logger()->log('user.sessions_revoked', $actor->id, 'user', $target->id);
+        });
+    }
+
+    private function logger(): AuditLogger
+    {
+        return $this->audit ?? new AuditLogger($this->pdo);
+    }
+
+    private function run(User $actor, callable $work): mixed
+    {
+        // Household locks precede all account locks, including with the flag off:
+        // location administration also locks households in disabled mode.
+        return (new AdministratorGuard($this->pdo))->run($actor->id, $work, $this->households, accounts: true);
     }
 }

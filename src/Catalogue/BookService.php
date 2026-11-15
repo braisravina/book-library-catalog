@@ -94,8 +94,10 @@ final class BookService
                 $copy,
             );
 
+            $this->guard->audit('work.created', $userId, 'work', $workId, ['title' => $work->title]);
+            $this->guard->audit('edition.created', $userId, 'edition', $editionId, ['isbn_13' => $edition->parsedIsbn()?->isbn13]);
             return ['work_id' => $workId, 'edition_id' => $editionId, 'copy_id' => $created['copy_id'] ?? null, 'copy_household_id' => $created['household_id'] ?? null];
-        }));
+        }, accountIds: $copy === null ? [] : [$copy->ownerId()]));
     }
 
     /**
@@ -114,7 +116,9 @@ final class BookService
             }
             $this->assertIsbnFree($edition, null);
 
-            return $this->insertEdition($workId, $edition, $actor->user->id);
+            $id = $this->insertEdition($workId, $edition, $actor->user->id);
+            $this->guard->audit('edition.created', $actor->user->id, 'edition', $id, ['work_id' => $workId, 'isbn_13' => $edition->parsedIsbn()?->isbn13]);
+            return $id;
         }));
     }
 
@@ -133,6 +137,7 @@ final class BookService
                 throw new EditConflictException();
             }
             $this->editions->setContributors($editionId, $this->resolvePeople($edition->contributors, $userId));
+            $this->guard->audit('edition.updated', $userId, 'edition', $editionId);
         }));
     }
 
@@ -156,6 +161,7 @@ final class BookService
             }
             $this->works->setAuthors($workId, $this->resolvePeople($work->authors, $userId));
             $this->works->setCategories($workId, $work->categoryIds);
+            $this->guard->audit('work.updated', $userId, 'work', $workId);
         });
     }
 
@@ -166,12 +172,14 @@ final class BookService
      *
      * @throws WriteDeniedException
      */
-    public function addCover(int $actorId, int $editionId, StoredImage $image): int
+    public function addCover(int $actorId, int $editionId, StoredImage $image, string $action = 'cover.uploaded', array $details = []): int
     {
-        return $this->guard->run($actorId, function (WriteActor $actor) use ($editionId, $image): int {
+        return $this->guard->run($actorId, function (WriteActor $actor) use ($editionId, $image, $action, $details): int {
             $this->lockEditableEdition($actor, $editionId);
 
-            return $this->covers->addPrimary($editionId, $image, $actor->user->id);
+            $id = $this->covers->addPrimary($editionId, $image, $actor->user->id);
+            $this->guard->audit($action, $actor->user->id, 'cover', $id, ['edition_id' => $editionId, 'sha256' => $image->sha256] + $details);
+            return $id;
         });
     }
 
@@ -193,6 +201,7 @@ final class BookService
                 throw WriteDeniedException::notFound();
             }
 
+            $this->guard->audit('cover.deleted', $actor->user->id, 'cover', $coverId, ['edition_id' => $editionId]);
             return ['edition_id' => $editionId, 'storage_key' => (string) $cover['storage_key']];
         });
     }
@@ -214,6 +223,7 @@ final class BookService
                 throw new RecordInUseException();
             }
             $this->works->delete($workId);
+            $this->guard->audit('work.deleted', $actor->user->id, 'work', $workId, ['title' => $work['title']]);
 
             return ['title' => $work['title']];
         }));
@@ -243,6 +253,7 @@ final class BookService
                 $keys[] = (string) $cover['storage_key'];
             }
             $this->editions->delete($editionId);
+            $this->guard->audit('edition.deleted', $actor->user->id, 'edition', $editionId, ['title' => $edition['title'], 'isbn_13' => $edition['isbn_13']]);
 
             return ['title' => $edition['title'], 'isbn_13' => $edition['isbn_13'], 'work_id' => $edition['work_id'], 'storage_keys' => $keys];
         }));

@@ -92,12 +92,22 @@ final class WriteGuard
         private readonly UserRepository $users,
         private readonly bool $enabled,
         private readonly \Closure $visibility,
+        private readonly ?\DigitalLibrary\Audit\AuditLogger $audit = null,
     ) {
     }
 
     public function enabled(): bool
     {
         return $this->enabled;
+    }
+
+    /** Domain events must be inserted before this guarded transaction commits. */
+    public function audit(string $action, int $actorId, string $entity, int $id, array $details = []): void
+    {
+        if (!$this->pdo->inTransaction()) {
+            throw new \LogicException('Domain audit requires an open transaction.');
+        }
+        ($this->audit ?? new \DigitalLibrary\Audit\AuditLogger($this->pdo))->log($action, $actorId, $entity, $id, $details);
     }
 
     /**

@@ -57,7 +57,6 @@ final class HouseholdController extends Controller
 
             return $this->form(null, $input, ['name' => [$e->getMessage()]], 422);
         }
-        $this->audit($request, 'household.created', 'household', $id, ['name' => $input->name]);
         $this->flash('success', 'households.created');
 
         return Response::redirect('/admin/households/' . $id . '/edit');
@@ -104,9 +103,6 @@ final class HouseholdController extends Controller
 
             return $this->form($household, $input, ['name' => [$e->getMessage()]], 422);
         }
-        if ($changes !== []) {
-            $this->audit($request, 'household.updated', 'household', (int) $household['id'], ['changes' => $changes]);
-        }
         $this->flash('success', 'households.saved');
 
         return Response::redirect('/admin/households/' . (int) $household['id'] . '/edit');
@@ -127,7 +123,6 @@ final class HouseholdController extends Controller
 
             return Response::redirect('/admin/households/' . (int) $household['id'] . '/edit');
         }
-        $this->audit($request, 'household.deleted', 'household', (int) $household['id'], ['name' => (string) $household['name']]);
         $this->flash('success', 'households.deleted');
 
         return Response::redirect('/admin/households');
@@ -155,7 +150,6 @@ final class HouseholdController extends Controller
             return $this->back($household);
         }
         // The member is recorded by id only (names and e-mail addresses stay out of the audit trail).
-        $this->audit($request, 'household.member_added', 'household', (int) $household['id'], ['member_user_id' => (int) $raw]);
         $this->flash('success', 'households.members.added');
 
         return $this->back($household);
@@ -177,7 +171,6 @@ final class HouseholdController extends Controller
 
             return $this->back($household);
         }
-        $this->audit($request, 'household.member_removed', 'household', (int) $household['id'], ['member_user_id' => $userId, 'owned_copies' => $ownedCopies]);
         $this->flash('success', 'households.members.removed');
 
         return $this->back($household);

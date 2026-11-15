@@ -245,15 +245,19 @@ final class Console
             return $this->fail('Password rejected: ' . implode(', ', $violations));
         }
 
-        $id = $users->create(
-            (string) $input['email'],
-            (string) $input['display_name'],
-            Role::from((string) $input['role']),
-            $this->services->hasher()->hash($password),
-            (string) $input['locale'],
-            null,
-        );
-        $this->services->audit()->log('user.created', null, 'user', $id, ['email' => $input['email'], 'role' => $input['role'], 'via' => 'cli']);
+        $hash = $this->services->hasher()->hash($password);
+        $id = \DigitalLibrary\Database\Transaction::run($this->services->pdo(), function () use ($users, $input, $hash): int {
+            $id = $users->create(
+                (string) $input['email'],
+                (string) $input['display_name'],
+                Role::from((string) $input['role']),
+                $hash,
+                (string) $input['locale'],
+                null,
+            );
+            $this->services->audit()->log('user.created', null, 'user', $id, ['email' => $input['email'], 'role' => $input['role'], 'via' => 'cli']);
+            return $id;
+        });
         $this->line(sprintf('Created %s user #%d (%s).', $input['role'], $id, $input['email']));
 
         return 0;

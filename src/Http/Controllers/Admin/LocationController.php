@@ -87,7 +87,6 @@ final class LocationController extends TreeAdminController
 
             return Response::redirect($this->basePath());
         }
-        $this->audit($request, 'location.deleted', 'location', (int) $node['id'], ['name' => $deleted['name'], 'household_id' => $deleted['household_id']]);
         $this->flash('success', 'admin.tree.deleted');
 
         return Response::redirect($this->basePath());
@@ -148,7 +147,6 @@ final class LocationController extends TreeAdminController
             }
             return $this->page($old, [($e->field !== '' ? $e->field : 'name') => [$e->getMessage()]], $node, 422);
         }
-        $this->audit($request, $node === null ? 'location.created' : 'location.updated', 'location', $id, ['name' => $old['name'], 'parent_id' => $parentId, 'household_id' => $saved['household_id']]);
         $this->flash('success', $node === null ? 'admin.tree.created' : 'catalogue.saved');
 
         return Response::redirect($this->basePath());

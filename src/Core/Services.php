@@ -220,6 +220,7 @@ final class Services
             max(1, min(90, $this->config->int('INVITATION_MAX_DAYS', 30))),
             $this->households(),
             $this->householdsEnabled(),
+            $this->audit(),
         ));
     }
 
@@ -251,12 +252,18 @@ final class Services
             $this->session(),
             $this->csrf(),
             $this->audit(),
+            $this->pdo(),
         ));
+    }
+
+    public function administratorGuard(): \DigitalLibrary\Auth\AdministratorGuard
+    {
+        return $this->once(\DigitalLibrary\Auth\AdministratorGuard::class, fn () => new \DigitalLibrary\Auth\AdministratorGuard($this->pdo()));
     }
 
     public function userAdministration(): UserAdministration
     {
-        return $this->once(UserAdministration::class, fn (): UserAdministration => new UserAdministration($this->pdo(), $this->users(), $this->households(), $this->householdsEnabled()));
+        return $this->once(UserAdministration::class, fn (): UserAdministration => new UserAdministration($this->pdo(), $this->users(), $this->households(), $this->householdsEnabled(), $this->audit()));
     }
 
     public function httpClient(): HttpClient
@@ -401,7 +408,7 @@ final class Services
 
     public function householdService(): HouseholdService
     {
-        return $this->once(HouseholdService::class, fn (): HouseholdService => new HouseholdService($this->pdo(), $this->households(), $this->authorizer()));
+        return $this->once(HouseholdService::class, fn (): HouseholdService => new HouseholdService($this->pdo(), $this->households(), $this->authorizer(), $this->audit()));
     }
 
     public function inventoryTransfers(): \DigitalLibrary\Households\InventoryTransferService
@@ -447,6 +454,7 @@ final class Services
             fn (\DigitalLibrary\Auth\User $user, HouseholdScope $scope): Visibility => $this->householdsEnabled()
                 ? Visibility::forUser($user, $scope)
                 : Visibility::unrestricted(),
+            $this->audit(),
         ));
     }
 

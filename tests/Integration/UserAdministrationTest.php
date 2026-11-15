@@ -113,12 +113,12 @@ final class UserAdministrationTest extends IntegrationTestCase
         $memberActor = $users->findById($this->memberId);
         $admin = $users->findById($this->adminId);
 
-        // The guard applies even if a caller bypassed the self-change rule.
+        // A non-administrator cannot enter account administration, including last-admin changes.
         try {
             $service->update($memberActor, $admin, 'admin@example.org', 'Admin', Role::Viewer, 'en', true);
             self::fail('Expected refusal');
-        } catch (\DigitalLibrary\Auth\UserAdminException $e) {
-            self::assertSame('admin.users.last_admin', $e->getMessage());
+        } catch (\DigitalLibrary\Households\WriteDeniedException $e) {
+            self::assertFalse($e->notFound);
         }
         self::assertSame('admin', $this->pdo()->query("SELECT r.code FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = {$this->adminId}")->fetchColumn());
     }

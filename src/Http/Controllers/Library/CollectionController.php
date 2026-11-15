@@ -98,7 +98,6 @@ final class CollectionController extends Controller
             return $this->form($request, null, $input, [$e->field => [$e->getMessage()]], 422);
         }
         $created = $this->found($this->services->collections()->find($id, $this->visibility()));
-        $this->audit($request, 'collection.created', 'collection', $id, ['visibility' => $input->visibility, 'household_id' => $created['household_id'] === null ? null : (int) $created['household_id']]);
         $this->flash('success', 'collections.created');
 
         return Response::redirect('/collections/' . $id);
@@ -133,11 +132,6 @@ final class CollectionController extends Controller
 
             return $this->form($request, $collection, $input, [$e->field => [$e->getMessage()]], 422);
         }
-        $details = ['owner_user_id' => (int) $collection['owner_user_id'], 'visibility' => $input->visibility];
-        if ($saved['household_from'] !== $saved['household_to']) {
-            $details['household_changed'] = ['from' => $saved['household_from'], 'to' => $saved['household_to']];
-        }
-        $this->audit($request, 'collection.updated', 'collection', (int) $collection['id'], $details);
         $this->flash('success', 'collections.updated');
 
         return Response::redirect('/collections/' . (int) $collection['id']);
@@ -156,19 +150,12 @@ final class CollectionController extends Controller
 
             return Response::redirect('/collections/' . (int) $collection['id'] . '/edit');
         }
-        // Counted before deleting, and in full: the audit record is about
-        // the collection, not about what this user could see in it.
-        $itemCount = $this->services->collections()->countItems((int) $collection['id']);
         try {
             $this->services->collectionService()->delete($this->user($request), (int) $collection['id']);
         } catch (CollectionException $e) {
             $this->refuse($e);
             throw $e;
         }
-        $this->audit($request, 'collection.deleted', 'collection', (int) $collection['id'], [
-            'owner_user_id' => (int) $collection['owner_user_id'],
-            'items' => $itemCount,
-        ]);
         $this->flash('success', 'collections.deleted');
 
         return Response::redirect('/collections');
@@ -199,7 +186,6 @@ final class CollectionController extends Controller
 
             return Response::redirect('/editions/' . (int) $edition['id']);
         }
-        $this->audit($request, 'collection.item_added', 'collection', (int) $collection['id'], ['edition_id' => (int) $edition['id']]);
         $this->flash('success', 'collections.item_added');
 
         return Response::redirect($request->input('return') === 'collection' ? '/collections/' . (int) $collection['id'] : '/editions/' . (int) $edition['id']);
@@ -232,7 +218,6 @@ final class CollectionController extends Controller
 
             return Response::redirect('/collections/' . (int) $collection['id']);
         }
-        $this->audit($request, 'collection.item_removed', 'collection', (int) $collection['id'], ['edition_id' => $editionId]);
         $this->flash('success', 'collections.item_removed');
 
         return Response::redirect('/collections/' . (int) $collection['id']);

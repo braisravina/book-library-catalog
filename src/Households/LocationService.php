@@ -75,7 +75,9 @@ final class LocationService
             }
             $this->requireFreeName($parentId, $householdId, $name, null);
 
-            return ['id' => $this->locations->create($parentId, $householdId, $name, $kind, $description, $actor->user->id), 'household_id' => $householdId];
+            $id = $this->locations->create($parentId, $householdId, $name, $kind, $description, $actor->user->id);
+            $this->guard->audit('location.created', $actor->user->id, 'location', $id, ['name' => $name, 'parent_id' => $parentId, 'household_id' => $householdId]);
+            return ['id' => $id, 'household_id' => $householdId];
         }, exclusiveHouseholds: true));
     }
 
@@ -116,6 +118,7 @@ final class LocationService
             $this->requireFreeName($parentId, $householdId, $name, $id);
             $this->locations->update($id, $parentId, $name, $kind, $description);
 
+            $this->guard->audit('location.updated', $actor->user->id, 'location', $id, ['name' => $name, 'parent_id' => $parentId, 'household_id' => $householdId]);
             return ['household_id' => $householdId];
         }, exclusiveHouseholds: true));
     }
@@ -138,6 +141,7 @@ final class LocationService
                 throw new LocationException('admin.locations.delete_in_use');
             }
             $this->locations->delete($id);
+            $this->guard->audit('location.deleted', $actor->user->id, 'location', $id, ['name' => (string) $location['name'], 'household_id' => self::householdOf($location)]);
 
             return ['name' => (string) $location['name'], 'household_id' => self::householdOf($location)];
         }, exclusiveHouseholds: true);

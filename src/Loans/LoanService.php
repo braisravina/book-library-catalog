@@ -106,8 +106,9 @@ final class LoanService
             );
             $this->loans->setCopyStatus($copyId, 'on_loan');
 
+            $this->guard->audit('loan.created', $actor->user->id, 'loan', $loanId, ['copy_id' => $copyId, 'borrower_user_id' => $borrowerId, 'due_on' => $input->dueOn === '' ? null : $input->dueOn]);
             return $loanId;
-        }));
+        }, accountIds: $input->borrowerUserId() === null ? [] : [$input->borrowerUserId()]));
     }
 
     /**
@@ -133,6 +134,7 @@ final class LoanService
             if ($copy['status'] === 'on_loan') {
                 $this->loans->setCopyStatus($copyId, 'available');
             }
+            $this->guard->audit('loan.returned', $actor->user->id, 'loan', $loanId, ['copy_id' => $copyId]);
         }));
     }
 

@@ -60,9 +60,9 @@ final class ExportController extends Controller
     public function catalogueJson(Request $request): Response
     {
         $export = new CatalogueExport($this->services->pdo(), $this->services->householdsEnabled());
-        $this->audit($request, 'export.catalogue', 'catalogue', null, ['format' => 'json', 'dataset' => 'all']);
+        $this->administrativeWrite($request, fn () => $this->audit($request, 'export.catalogue', 'catalogue', null, ['format' => 'json', 'dataset' => 'all']));
 
-        return $this->json('catalogue', ['scope' => 'catalogue'], array_values($export->datasets()), 'library-catalogue');
+        return $this->json('catalogue', ['scope' => 'catalogue'], array_values($export->datasets()), 'library-catalogue', $request);
     }
 
     /**
@@ -71,15 +71,15 @@ final class ExportController extends Controller
     public function catalogueCsv(Request $request, array $params): Response
     {
         $dataset = (new CatalogueExport($this->services->pdo(), $this->services->householdsEnabled()))->datasets()[$params['dataset'] ?? ''] ?? throw HttpException::notFound();
-        $this->audit($request, 'export.catalogue', 'catalogue', null, ['format' => 'csv', 'dataset' => $dataset->name]);
 
-        return $this->csv($dataset, 'library-catalogue-' . $dataset->name);
+        $this->administrativeWrite($request, fn () => $this->audit($request, 'export.catalogue', 'catalogue', null, ['format' => 'csv', 'dataset' => $dataset->name]));
+        return $this->csv($dataset, 'library-catalogue-' . $dataset->name, $request);
     }
 
-    private function csv(Dataset $dataset, string $basename): Response
+    private function csv(Dataset $dataset, string $basename, ?Request $adminRequest = null): Response
     {
         return Response::stream(
-            fn ($out) => $this->snapshot(static fn () => CsvWriter::write($out, $dataset->columns, $dataset->rows())),
+            fn ($out) => $this->snapshot(static fn () => CsvWriter::write($out, $dataset->columns, $dataset->rows()), $adminRequest),
             $this->headers('text/csv; charset=UTF-8', $basename . '.csv'),
         );
     }
@@ -88,28 +88,45 @@ final class ExportController extends Controller
      * @param array<string, mixed> $meta
      * @param list<Dataset>        $datasets
      */
-    private function json(string $type, array $meta, array $datasets, string $basename): Response
+    private function json(string $type, array $meta, array $datasets, string $basename, ?Request $adminRequest = null): Response
     {
         return Response::stream(
-            fn ($out) => $this->snapshot(static fn () => JsonWriter::write($out, $type, $meta, $datasets)),
+            fn ($out) => $this->snapshot(static fn () => JsonWriter::write($out, $type, $meta, $datasets), $adminRequest),
             $this->headers('application/json; charset=UTF-8', $basename . '.json'),
         );
     }
 
     /**
-     * Runs the export in a read-only transaction with a consistent snapshot,
+     * Runs the export in a consistent snapshot. Administrative streams also
+     * hold a current account lock; their durable audit records a request,
+     * not successful delivery of bytes. Personal snapshots are read-only,
      * so all datasets reflect the same moment.
      */
-    private function snapshot(callable $write): void
+    private function snapshot(callable $write, ?Request $adminRequest = null): void
     {
         $pdo = $this->services->pdo();
         @set_time_limit(300);
         $pdo->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-        $pdo->exec('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
+        $pdo->exec($adminRequest === null ? 'START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY' : 'START TRANSACTION WITH CONSISTENT SNAPSHOT');
         try {
+            if ($adminRequest !== null) {
+                // A locking read is current even after the snapshot began.
+                // Keep this account lock through the final exported batch.
+                $stmt = $pdo->prepare('SELECT u.is_active, r.code FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ? LOCK IN SHARE MODE');
+                $stmt->execute([$this->user($adminRequest)->id]);
+                $actor = $stmt->fetch();
+                if (!$actor || !(bool) $actor['is_active'] || $actor['code'] !== 'admin') {
+                    throw HttpException::forbidden();
+                }
+            }
             $write();
+        } catch (\Throwable $e) {
+            $pdo->exec('ROLLBACK');
+            throw $e;
         } finally {
-            $pdo->exec('COMMIT');
+            if ($pdo->inTransaction()) {
+                $pdo->exec('COMMIT');
+            }
         }
     }
 

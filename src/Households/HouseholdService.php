@@ -5,8 +5,9 @@ declare(strict_types=1);
 namespace DigitalLibrary\Households;
 
 use DigitalLibrary\Auth\User;
+use DigitalLibrary\Auth\AdministratorGuard;
+use DigitalLibrary\Audit\AuditLogger;
 use DigitalLibrary\Catalogue\Repository\Repository;
-use DigitalLibrary\Database\Transaction;
 use DigitalLibrary\Security\Authorizer;
 use PDO;
 
@@ -31,6 +32,7 @@ final class HouseholdService
         private readonly PDO $pdo,
         private readonly HouseholdRepository $households,
         private readonly Authorizer $authorizer,
+        private readonly ?AuditLogger $audit = null,
     ) {
     }
 
@@ -41,12 +43,15 @@ final class HouseholdService
     {
         $this->requireManager($actor);
 
-        return $this->guardName(fn (): int => Transaction::run($this->pdo, function () use ($actor, $input): int {
+        return $this->guardName(fn (): int => $this->run($actor, function () use ($actor, $input): int {
             if ($this->households->nameTaken($input->name)) {
                 throw new HouseholdException('households.error.name_taken');
             }
 
-            return $this->households->create($input, $actor->id);
+            $id = $this->households->create($input, $actor->id);
+            $this->logger()->log('household.created', $actor->id, 'household', $id, ['name' => $input->name]);
+
+            return $id;
         }));
     }
 
@@ -59,7 +64,7 @@ final class HouseholdService
     {
         $this->requireManager($actor);
 
-        return $this->guardName(fn (): array => Transaction::run($this->pdo, function () use ($actor, $id, $input, $expectedVersion): array {
+        return $this->guardName(fn (): array => $this->run($actor, function () use ($actor, $id, $input, $expectedVersion): array {
             $current = $this->households->lock($id) ?? throw new HouseholdException('households.error.not_found');
             if ($this->households->nameTaken($input->name, $id)) {
                 throw new HouseholdException('households.error.name_taken');
@@ -75,6 +80,9 @@ final class HouseholdService
                 $changes['description'] = ['from' => (string) ($current['description'] ?? ''), 'to' => $input->description];
             }
 
+            if ($changes !== []) {
+                $this->logger()->log('household.updated', $actor->id, 'household', $id, ['changes' => $changes]);
+            }
             return $changes;
         }));
     }
@@ -88,7 +96,7 @@ final class HouseholdService
     {
         $this->requireManager($actor);
 
-        return Transaction::run($this->pdo, function () use ($id): array {
+        return $this->run($actor, function () use ($actor, $id): array {
             $household = $this->households->lock($id) ?? throw new HouseholdException('households.error.not_found');
             if ($household['system_key'] !== null) {
                 throw new HouseholdException('households.error.default_protected');
@@ -100,6 +108,7 @@ final class HouseholdService
                 throw new HouseholdException('households.error.has_members');
             }
             $this->households->delete($id);
+            $this->logger()->log('household.deleted', $actor->id, 'household', $id, ['name' => (string) $household['name']]);
 
             return $household;
         });
@@ -112,17 +121,18 @@ final class HouseholdService
     {
         $this->requireManager($actor);
         try {
-            Transaction::run($this->pdo, function () use ($actor, $householdId, $userId): void {
+            $this->run($actor, function () use ($actor, $householdId, $userId): void {
                 $this->households->lock($householdId) ?? throw new HouseholdException('households.error.not_found');
-                $user = $this->households->lockUser($userId) ?? throw new HouseholdException('households.error.user_not_found');
-                if (!$user['is_active']) {
+                $user = (new \DigitalLibrary\Auth\UserRepository($this->pdo))->findById($userId) ?? throw new HouseholdException('households.error.user_not_found');
+                if (!$user->isActive) {
                     throw new HouseholdException('households.error.user_inactive');
                 }
                 if ($this->households->isMember($householdId, $userId)) {
                     throw new HouseholdException('households.error.already_member');
                 }
                 $this->households->addMember($householdId, $userId, $actor->id);
-            });
+                $this->logger()->log('household.member_added', $actor->id, 'household', $householdId, ['member_user_id' => $userId]);
+            }, [$userId]);
         } catch (\PDOException $e) {
             if (Repository::isDuplicateKey($e)) {
                 throw new HouseholdException('households.error.already_member');
@@ -141,14 +151,26 @@ final class HouseholdService
     {
         $this->requireManager($actor);
 
-        return Transaction::run($this->pdo, function () use ($householdId, $userId): int {
+        return $this->run($actor, function () use ($actor, $householdId, $userId): int {
             $this->households->lock($householdId) ?? throw new HouseholdException('households.error.not_found');
             if (!$this->households->removeMember($householdId, $userId)) {
                 throw new HouseholdException('households.error.not_member');
             }
 
-            return $this->households->ownedCopies($householdId, $userId);
+            $owned = $this->households->ownedCopies($householdId, $userId);
+            $this->logger()->log('household.member_removed', $actor->id, 'household', $householdId, ['member_user_id' => $userId, 'owned_copies' => $owned]);
+            return $owned;
         });
+    }
+
+    private function logger(): AuditLogger
+    {
+        return $this->audit ?? new AuditLogger($this->pdo);
+    }
+
+    private function run(User $actor, callable $work, array $accountIds = []): mixed
+    {
+        return (new AdministratorGuard($this->pdo))->run($actor->id, $work, $this->households, true, false, $accountIds);
     }
 
     private function requireManager(User $actor): void

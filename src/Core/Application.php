@@ -189,6 +189,9 @@ final class Application
         [$route, $params] = $this->router->match($request->method(), $request->path());
         $middleware = array_map(fn (string $alias): Middleware => $this->resolveMiddleware($alias), $route->middleware);
         $handler = $route->handler;
+        if ($request->method() === 'POST') {
+            $this->services->audit()->context($request->remoteAddress(), $request->userAgent());
+        }
 
         $response = $this->pipeline($middleware, static fn (Request $r): Response => $handler($r, $params))($request);
         if ($request->method() === 'HEAD') {

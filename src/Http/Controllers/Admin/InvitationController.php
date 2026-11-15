@@ -90,12 +90,6 @@ final class InvitationController extends Controller
 
             return $this->form($input, [$field => [$e->getMessage()]], 422, $selected);
         }
-        $this->audit($request, 'invitation.created', 'invitation', $issued['id'], [
-            'email' => InvitationService::normaliseEmail($input['email']),
-            'role' => $input['role'],
-            'expires_at' => $issued['expires_at'],
-            'household_ids' => $issued['household_ids'],
-        ]);
 
         return $this->link($issued['id'], $issued['token'], InvitationService::normaliseEmail($input['email']), $input['role'], $issued['expires_at'], false);
     }
@@ -114,7 +108,6 @@ final class InvitationController extends Controller
 
             return Response::redirect('/admin/invitations?status=all');
         }
-        $this->audit($request, 'invitation.revoked', 'invitation', $id);
         $this->flash('success', 'invitations.admin.revoked');
 
         return Response::redirect('/admin/invitations');
@@ -138,13 +131,6 @@ final class InvitationController extends Controller
 
             return Response::redirect('/admin/invitations?status=all');
         }
-        $this->audit($request, 'invitation.replaced', 'invitation', $issued['id'], [
-            'replaces' => $id,
-            'email' => $issued['email'],
-            'role' => $issued['role']->value,
-            'expires_at' => $issued['expires_at'],
-            'household_ids' => $issued['household_ids'],
-        ]);
 
         return $this->link($issued['id'], $issued['token'], $issued['email'], $issued['role']->value, $issued['expires_at'], true);
     }

@@ -41,7 +41,6 @@ final class CoverController extends CatalogueBaseController
             $this->services->covers()->delete($image->storageKey);
             throw $e;
         }
-        $this->audit($request, 'cover.uploaded', 'cover', $coverId, ['edition_id' => $editionId, 'sha256' => $image->sha256]);
         $this->flash('success', 'catalogue.cover.uploaded');
 
         return Response::redirect('/editions/' . $editionId . '#covers');
@@ -94,7 +93,6 @@ final class CoverController extends CatalogueBaseController
 
         $deleted = $this->services->books()->deleteCover($this->user($request)->id, (int) $cover['id']);
         $this->services->covers()->delete($deleted['storage_key']);
-        $this->audit($request, 'cover.deleted', 'cover', (int) $cover['id'], ['edition_id' => $editionId]);
         $this->flash('success', 'catalogue.cover.deleted');
 
         return Response::redirect('/editions/' . $editionId . '#covers');

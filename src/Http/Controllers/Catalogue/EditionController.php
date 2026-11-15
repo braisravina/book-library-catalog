@@ -160,7 +160,6 @@ final class EditionController extends CatalogueBaseController
             // Keep the stale version: saving again must not silently overwrite.
             return $this->form(['row_version' => $this->expectedVersion($request)] + $edition, $input, [], 409, null, true);
         }
-        $this->audit($request, 'edition.updated', 'edition', (int) $edition['id']);
         $this->flash('success', 'catalogue.saved');
 
         return Response::redirect('/editions/' . $edition['id']);
@@ -185,7 +184,6 @@ final class EditionController extends CatalogueBaseController
         foreach ($deleted['storage_keys'] as $key) {
             $this->services->covers()->delete($key);
         }
-        $this->audit($request, 'edition.deleted', 'edition', $id, ['title' => $edition['title'], 'isbn_13' => $edition['isbn_13']]);
         $this->flash('success', 'catalogue.edition.deleted');
 
         return Response::redirect('/works/' . $edition['work_id']);

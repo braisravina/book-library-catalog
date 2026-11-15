@@ -55,13 +55,18 @@ final class PublisherController extends CatalogueBaseController
         $publisher = $this->found($this->services->publishers()->find($this->id($params), $this->visibility()));
         $name = trim((string) $request->input('name', ''));
         $validator = Validator::make(['name' => $name], ['name' => ['required', 'max:255', 'no_control']]);
-        if (!$validator->fails() && !$this->services->publishers()->rename((int) $publisher['id'], $name)) {
+        if (!$validator->fails() && !$this->administrativeWrite($request, function () use ($request, $publisher, $name): bool {
+            $renamed = $this->services->publishers()->rename((int) $publisher['id'], $name);
+            if ($renamed) {
+                $this->audit($request, 'publisher.updated', 'publisher', (int) $publisher['id'], ['name' => $name]);
+            }
+            return $renamed;
+        })) {
             $validator->addError('name', 'validation.name_taken');
         }
         if ($validator->fails()) {
             return $this->form($publisher, $name, $validator->errors(), 422);
         }
-        $this->audit($request, 'publisher.updated', 'publisher', (int) $publisher['id'], ['name' => $name]);
         $this->flash('success', 'catalogue.saved');
 
         return Response::redirect('/publishers/' . $publisher['id']);

@@ -63,7 +63,6 @@ final class CopyController extends CatalogueBaseController
         } catch (CopyValidationException $e) {
             return $this->form($request, $edition, null, $input, $e->errors, 422);
         }
-        $this->audit($request, 'copy.created', 'copy', $created['copy_id'], ['edition_id' => $created['edition_id'], 'owner_user_id' => $input->ownerId(), 'household_id' => $created['household_id']]);
         $this->flash('success', 'catalogue.copy.created');
 
         return Response::redirect('/editions/' . $edition['id']);
@@ -110,7 +109,6 @@ final class CopyController extends CatalogueBaseController
         } catch (CopyValidationException $e) {
             return $this->isbnForm($request, $isbn, $editionId, $input, $e->errors, 422);
         }
-        $this->audit($request, 'copy.created', 'copy', $created['copy_id'], ['edition_id' => $created['edition_id'], 'owner_user_id' => $input->ownerId(), 'household_id' => $created['household_id'], 'via' => 'isbn']);
         $this->flash('success', 'catalogue.copy.created');
 
         // The copy is in one of the user's households, so the edition is now in their view.
@@ -151,14 +149,6 @@ final class CopyController extends CatalogueBaseController
             // Keep the stale version: saving again must not silently overwrite.
             return $this->form($request, $edition, ['row_version' => $this->expectedVersion($request)] + $copy, $input, [], 409, true);
         }
-        $details = ['edition_id' => $saved['edition_id']];
-        if ($saved['owner_from'] !== $saved['owner_to']) {
-            $details['owner_changed'] = ['from' => $saved['owner_from'], 'to' => $saved['owner_to']];
-        }
-        if ($saved['household_from'] !== $saved['household_to']) {
-            $details['household_changed'] = ['from' => $saved['household_from'], 'to' => $saved['household_to']];
-        }
-        $this->audit($request, 'copy.updated', 'copy', (int) $copy['id'], $details);
         $this->flash('success', 'catalogue.saved');
 
         return Response::redirect('/editions/' . $copy['edition_id']);
@@ -178,7 +168,6 @@ final class CopyController extends CatalogueBaseController
 
             return Response::redirect('/copies/' . (int) $copy['id']);
         }
-        $this->audit($request, 'copy.deleted', 'copy', (int) $copy['id'], ['edition_id' => $deleted['edition_id'], 'owner_user_id' => $deleted['owner_user_id'], 'household_id' => $deleted['household_id']]);
         $this->flash('success', 'catalogue.copy.deleted');
 
         return Response::redirect('/editions/' . $copy['edition_id']);

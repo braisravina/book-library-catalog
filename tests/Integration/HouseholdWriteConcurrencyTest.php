@@ -258,8 +258,9 @@ final class HouseholdWriteConcurrencyTest extends IntegrationTestCase
                 try {
                     $change();
                     self::fail('A membership change overtook a write in flight');
-                } catch (\PDOException $e) {
-                    self::assertSame(Engine::LOCK_WAIT_TIMEOUT, $e->errorInfo[1]);
+                } catch (WriteBusyException $e) {
+                    self::assertSame(Engine::LOCK_WAIT_TIMEOUT, $e->getPrevious()->errorInfo[1]);
+                    self::assertFalse($this->other()->inTransaction());
                 }
             }
             self::assertTrue($this->guard()->isMember($this->casa, $this->anaId), 'Still a member while the write runs');

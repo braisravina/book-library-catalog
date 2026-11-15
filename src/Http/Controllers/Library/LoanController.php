@@ -134,11 +134,6 @@ final class LoanController extends Controller
             return $this->form($request, $copy, $input, [], 409, $e->getMessage());
         }
         // Borrower names are personal data and stay out of the audit trail.
-        $this->audit($request, 'loan.created', 'loan', $loanId, [
-            'copy_id' => (int) $copy['id'],
-            'borrower_user_id' => $input->borrowerUserId(),
-            'due_on' => $input->dueOn === '' ? null : $input->dueOn,
-        ]);
         $this->flash('success', 'loans.created');
 
         return Response::redirect('/copies/' . (int) $copy['id']);
@@ -179,7 +174,6 @@ final class LoanController extends Controller
 
             return Response::redirect('/copies/' . (int) $loan['copy_id']);
         }
-        $this->audit($request, 'loan.returned', 'loan', (int) $loan['id'], ['copy_id' => (int) $loan['copy_id']]);
         $this->flash('success', 'loans.returned');
 
         return Response::redirect('/copies/' . (int) $loan['copy_id']);

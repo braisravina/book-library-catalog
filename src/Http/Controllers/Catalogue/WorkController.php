@@ -72,7 +72,6 @@ final class WorkController extends CatalogueBaseController
         } catch (EditConflictException) {
             return $this->form(['row_version' => $this->expectedVersion($request)] + $work, $input, [], 409, true);
         }
-        $this->audit($request, 'work.updated', 'work', (int) $work['id']);
         $this->flash('success', 'catalogue.saved');
 
         return Response::redirect('/works/' . $work['id']);
@@ -127,7 +126,6 @@ final class WorkController extends CatalogueBaseController
 
             return $this->editionForm($work, $input, $validator->errors(), 409, $this->linkable($e->existingEditionId));
         }
-        $this->audit($request, 'edition.created', 'edition', $editionId, ['work_id' => (int) $work['id'], 'isbn_13' => $input->parsedIsbn()?->isbn13]);
         $this->flash('success', 'catalogue.add.created');
 
         return Response::redirect('/editions/' . $editionId);
@@ -149,7 +147,6 @@ final class WorkController extends CatalogueBaseController
 
             return Response::redirect('/works/' . $id);
         }
-        $this->audit($request, 'work.deleted', 'work', $id, ['title' => $work['title']]);
         $this->flash('success', 'catalogue.work.deleted');
 
         return Response::redirect('/books');

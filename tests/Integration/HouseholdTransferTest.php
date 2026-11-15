@@ -90,6 +90,14 @@ final class HouseholdTransferTest extends IntegrationTestCase
         self::assertSame($before, $this->snapshot());
     }
 
+    public function testUnrelatedHouseholdCounterChangeConservativelyInvalidatesSavedPlan(): void
+    {
+        $id = $this->service()->plan($this->admin, $this->input());
+        $edition = (int) $this->pdo()->query("SELECT edition_id FROM copies WHERE id = {$this->copy}")->fetchColumn();
+        $this->makeCopy($edition, $this->owner, $this->source, null, 'UNRELATED');
+        $this->refused(fn () => $this->apply($id), 'stale');
+    }
+
     public function testDryRunPlansApplicationPreservationAndIdempotency(): void
     {
         $before = $this->snapshot();

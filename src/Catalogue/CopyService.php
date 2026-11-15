@@ -78,7 +78,7 @@ final class CopyService
             }
 
             return $this->createWithin($actor, $edition, $input);
-        }));
+        }, accountIds: [$input->ownerId()]));
     }
 
     /**
@@ -100,8 +100,8 @@ final class CopyService
                 throw WriteDeniedException::notFound();
             }
 
-            return $this->createWithin($actor, $edition, $input);
-        }));
+            return $this->createWithin($actor, $edition, $input, ['via' => 'isbn']);
+        }, accountIds: [$input->ownerId()]));
     }
 
     /**
@@ -131,6 +131,14 @@ final class CopyService
                 throw new EditConflictException();
             }
 
+            $details = ['edition_id' => (int) $copy['edition_id']];
+            if ((int) $copy['owner_user_id'] !== $input->ownerId()) {
+                $details['owner_changed'] = ['from' => (int) $copy['owner_user_id'], 'to' => $input->ownerId()];
+            }
+            if (self::householdOf($copy) !== $householdId) {
+                $details['household_changed'] = ['from' => self::householdOf($copy), 'to' => $householdId];
+            }
+            $this->guard->audit('copy.updated', $actor->user->id, 'copy', $copyId, $details);
             return [
                 'edition_id' => (int) $copy['edition_id'],
                 'owner_from' => (int) $copy['owner_user_id'],
@@ -138,7 +146,7 @@ final class CopyService
                 'household_from' => self::householdOf($copy),
                 'household_to' => $householdId,
             ];
-        }));
+        }, accountIds: [$input->ownerId()]));
     }
 
     /**
@@ -157,6 +165,7 @@ final class CopyService
                 throw new CopyHasHistoryException();
             }
             $this->copies->delete($copyId);
+            $this->guard->audit('copy.deleted', $actor->user->id, 'copy', $copyId, ['edition_id' => (int) $copy['edition_id'], 'owner_user_id' => (int) $copy['owner_user_id'], 'household_id' => self::householdOf($copy)]);
 
             return [
                 'edition_id' => (int) $copy['edition_id'],
@@ -178,7 +187,7 @@ final class CopyService
      * @throws CopyValidationException
      * @throws WriteDeniedException
      */
-    public function createWithin(WriteActor $actor, array $edition, CopyInput $input): array
+    public function createWithin(WriteActor $actor, array $edition, CopyInput $input, array $auditDetails = []): array
     {
         if (!$this->authorizer->can($actor->user, Permission::CopyManageOwn)) {
             throw WriteDeniedException::forbidden();
@@ -190,6 +199,7 @@ final class CopyService
         $householdId = $this->validate($actor, $input, null);
         $copyId = $this->copies->create($edition['id'], ['household_id' => $householdId] + $input->toRecord(), $actor->user->id);
 
+        $this->guard->audit('copy.created', $actor->user->id, 'copy', $copyId, ['edition_id' => $edition['id'], 'owner_user_id' => $input->ownerId(), 'household_id' => $householdId] + $auditDetails);
         return ['copy_id' => $copyId, 'edition_id' => $edition['id'], 'household_id' => $householdId];
     }
 

@@ -88,14 +88,6 @@ final class UserController extends Controller
             return $this->form($input, [$field => [$e->getMessage()]], 422, $selected);
         }
         $id = $created['id'];
-        $this->services->audit()->log('user.created', $admin->id, 'user', $id, [
-            'email' => $input['email'],
-            'role' => $input['role'],
-        ], $request->remoteAddress(), $request->userAgent());
-        // Each membership is recorded on its household, by account id only.
-        foreach ($created['household_ids'] as $householdId) {
-            $this->audit($request, 'household.member_added', 'household', $householdId, ['member_user_id' => $id, 'via' => 'user_creation']);
-        }
         $this->flash('success', 'admin.users.created');
 
         return Response::redirect('/admin/users');
@@ -151,9 +143,6 @@ final class UserController extends Controller
         } catch (UserAdminException $e) {
             return $this->editPage($request, $target, $input, [], 409, $e->getMessage());
         }
-        if ($changes !== []) {
-            $this->audit($request, 'user.updated', 'user', $target->id, ['changes' => $changes]);
-        }
         $this->flash('success', 'admin.users.saved');
 
         return Response::redirect('/admin/users');
@@ -183,7 +172,6 @@ final class UserController extends Controller
         } catch (UserAdminException $e) {
             return $this->editPage($request, $target, null, [], 409, $e->getMessage());
         }
-        $this->audit($request, 'user.password_reset', 'user', $target->id);
         $this->flash('success', 'admin.users.password_reset_done');
 
         return Response::redirect('/admin/users/' . $target->id . '/edit');
@@ -201,7 +189,6 @@ final class UserController extends Controller
         } catch (UserAdminException $e) {
             return $this->editPage($request, $target, null, [], 409, $e->getMessage());
         }
-        $this->audit($request, 'user.sessions_revoked', 'user', $target->id);
         $this->flash('success', 'admin.users.sessions_revoked');
 
         return Response::redirect('/admin/users/' . $target->id . '/edit');

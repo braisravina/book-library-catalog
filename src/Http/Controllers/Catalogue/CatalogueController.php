@@ -160,16 +160,9 @@ final class CatalogueController extends CatalogueBaseController
             return $this->bookForm($request, $work, $edition, $validator->errors(), [], $addCopy, $copy, 422, $lookup, $similar);
         }
 
-        $this->audit($request, 'work.created', 'work', $ids['work_id'], ['title' => $work->title]);
-        $this->audit($request, 'edition.created', 'edition', $ids['edition_id'], ['isbn_13' => $edition->parsedIsbn()?->isbn13]);
-        if ($ids['copy_id'] !== null) {
-            $this->audit($request, 'copy.created', 'copy', $ids['copy_id'], ['edition_id' => $ids['edition_id'], 'household_id' => $ids['copy_household_id']]);
-        }
         if ($importCover && $providerData instanceof BookMetadata) {
-            $coverId = $this->services->coverImporter()->import($ids['edition_id'], $providerData, $user->id);
-            if ($coverId !== null) {
-                $this->audit($request, 'cover.imported', 'cover', $coverId, ['edition_id' => $ids['edition_id'], 'metadata_record_id' => $recordId]);
-            } else {
+            $coverId = $this->services->coverImporter()->import($ids['edition_id'], $providerData, $user->id, $recordId);
+            if ($coverId === null) {
                 $this->flash('info', 'metadata.cover_failed');
             }
         }

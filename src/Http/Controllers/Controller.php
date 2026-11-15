@@ -100,9 +100,14 @@ abstract class Controller
         return $this->services->authorizer()->can($user, $permission);
     }
 
-    /**
-     * @param array<string, mixed> $details
-     */
+    protected function administrativeWrite(Request $request, callable $work): mixed
+    {
+        // Exclusive household locks also serialise legacy vocabulary merges
+        // against edition-before-work inventory writers.
+        return $this->services->administratorGuard()->run($this->user($request)->id, $work, $this->services->households(), true);
+    }
+
+    /** @param array<string, mixed> $details */
     protected function audit(Request $request, string $action, string $entityType, ?int $entityId, array $details = []): void
     {
         $this->services->audit()->log(

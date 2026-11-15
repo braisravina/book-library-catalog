@@ -84,15 +84,17 @@ final class AuthorController extends CatalogueBaseController
         if ($validator->fails()) {
             return $this->form($author, $old, $validator->errors(), 422);
         }
-        $this->services->authors()->update(
-            (int) $author['id'],
-            $old['name'],
-            $old['sort_name'],
-            $old['birth_year'] === '' ? null : (int) $old['birth_year'],
-            $old['death_year'] === '' ? null : (int) $old['death_year'],
-            $old['notes'] === '' ? null : $old['notes'],
-        );
-        $this->audit($request, 'author.updated', 'author', (int) $author['id'], ['name' => $old['name']]);
+        $this->administrativeWrite($request, function () use ($request, $author, $old): void {
+            $this->services->authors()->update(
+                (int) $author['id'],
+                $old['name'],
+                $old['sort_name'],
+                $old['birth_year'] === '' ? null : (int) $old['birth_year'],
+                $old['death_year'] === '' ? null : (int) $old['death_year'],
+                $old['notes'] === '' ? null : $old['notes'],
+            );
+            $this->audit($request, 'author.updated', 'author', (int) $author['id'], ['name' => $old['name']]);
+        });
         $this->flash('success', 'catalogue.saved');
 
         return Response::redirect('/authors/' . $author['id']);
