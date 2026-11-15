@@ -635,3 +635,63 @@ household alignment, cycles, code conflicts, loans, ownership and planned access
 for every role before returning service. Never silently resolve conflicts by
 changing inventory codes. Retain pre-release images and document the precise
 compatibility/recovery boundary.
+
+
+## Interrupted migration and checksum recovery (H1–H4 remediation)
+
+Owner-run procedure only. Never edit released migration SQL, pinned checksums or
+schema_migrations to make a refusal disappear. Do not delete/recreate production
+objects or automatically replay a partly executed file. MariaDB 11.4 and MySQL
+8.4 can commit each DDL statement while a later statement/history INSERT fails;
+file-level rollback is impossible, including after a client disconnect.
+
+The migrator writes schema_migration_attempts(version, checksum, started_at)
+before executing a file. Successful history insertion and intent removal commit
+together. An incomplete intent makes both migrate and migrate:status refuse and
+name the version. A checksum/history mismatch also prevents pending execution.
+The metadata table is created by the migrator itself; no released migration is
+changed. The runtime account still has no DDL privileges. Metadata/table creation
+is not a domain migration and does not make migration files atomic.
+
+1. Keep maintenance active and stop all web, CLI and scheduled writers. Retain
+   the exact failed release, server/client logs, backup, UTC failure time and
+   engine/version. Preserve a copy of the failed database for investigation.
+2. With the owner's migration/diagnostic account, inspect (do not modify):
+   `SELECT * FROM schema_migration_attempts ORDER BY version;`
+   `SELECT * FROM schema_migrations ORDER BY version;`
+   Compare SHA-256 of the selected engine's immutable release file with both
+   records. A MODIFIED/unknown-version/OTHER-ENGINE history is a stop condition.
+   Restore the verified original release files for accidental file edits; never
+   rewrite a correct recorded checksum. Unknown history requires release review.
+3. Inspect SHOW CREATE TABLE and information_schema.COLUMNS, STATISTICS and
+   REFERENTIAL_CONSTRAINTS for every table named by the incomplete file. Compare
+   column types/defaults/generated expressions, index order/uniqueness, FKs and
+   data effects with each ordered statement. For H1's two inventory ALTERs inspect
+   both copies and locations; for H4 inspect both transfer tables. An existing
+   index/column/table alone does not prove the whole statement or file completed.
+   Preserve counts, primary keys and fingerprints of existing records.
+4. Preferred recovery: restore a verified pre-migration **same-engine** backup
+   into an empty disposable target first, reconcile records/covers and rehearse
+   the exact release. Then follow the existing owner restore procedure with its
+   safety backup/incomplete-restore marker. Agree loss of subsequent writes and
+   measured restore time before replacing live data. Restore is not atomic.
+5. If preserving post-backup writes requires repair, stop for an explicit
+   owner-reviewed, version-specific SQL plan. That plan must prove which DDL and
+   data statements committed, preserve existing rows, complete only missing
+   effects, reconcile final schema/data, and specify the exact justified history
+   and intent reconciliation in one DML transaction. No generic repair command
+   is provided. Even an intent written before any DDL needs this proof; do not
+   simply clear it. A new migration cannot bypass an incomplete earlier file.
+6. On the recovered disposable target, run migrate:status, migrate, then
+   migrate:status; verify checksums, no incomplete intents, FKs and baseline
+   fingerprints. Perform application/read/write checks and backup/restore drill.
+   Only the owner can approve the corresponding production procedure and return
+   writers after reconciliation. Record evidence and recovery point explicitly.
+
+For an interruption made by an older migrator, the intent table may be empty even
+when a pending file partially changed schema. Inspect the pending file's objects
+before running it. A duplicate-object error is a stop condition, not permission
+to DROP it or mark the file applied. The new migrator will retain an intent on
+that failed attempt. Neither engine is treated as supporting atomic multi-DDL
+files. Disposable fault-injection tests cover later-DDL and history-insert
+failure; they do not simulate power loss or certify a real-data recovery.
